@@ -39,6 +39,24 @@ cargo run -- memory compact --session <SESSION_UUID>
 cargo run -- memory vacuum
 ```
 
+## TUI 조작
+- 포커스/이동: `Tab`, `↑/↓` 또는 `j/k`
+- 작업 실행: `i` (입력 모드) -> 작업 입력 -> `Enter`
+- 세션 이어하기: 세션 선택 후 `Enter` 또는 `c`
+- 새 세션: `n`
+- 활성 세션 해제: `x`
+- 세션 삭제: 세션 선택 후 `d` -> `y` 확인
+- 세션 요약(compact): `m`
+- 세션 리플레이 미리보기: `v`
+- 프로필 변경: `1(planning)`, `2(extraction)`, `3(coding)`, `4(general)`, `p(순환)`
+- 자동 새로고침 간격: `[` 감소, `]` 증가
+- 실행 목록 크기: `-` 감소, `=` 증가
+- 활성 세션 필터 토글: `f`
+- 수동 새로고침: `r`
+- 종료: `q`
+
+TUI 사용자 설정은 `data/tui-settings.json`에 저장됩니다.
+
 ## REST 엔드포인트
 - `POST /v1/sessions`
 - `POST /v1/runs`
