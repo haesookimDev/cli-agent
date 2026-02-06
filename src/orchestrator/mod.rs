@@ -12,10 +12,10 @@ use crate::agents::{AgentInput, AgentRegistry};
 use crate::context::{ContextChunk, ContextKind, ContextManager, ContextScope};
 use crate::memory::MemoryManager;
 use crate::router::{ModelRouter, RoutingConstraints};
-use crate::runtime::graph::{
-    AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy,
+use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
+use crate::runtime::{
+    AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
 };
-use crate::runtime::{AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent};
 use crate::types::{
     AgentExecutionRecord, AgentRole, RunRecord, RunRequest, RunStatus, RunSubmission, SessionEvent,
     SessionEventType,
@@ -204,7 +204,8 @@ impl Orchestrator {
                     RunStatus::Failed
                 };
 
-                self.finish_run(run_id, final_status, node_results, None).await?;
+                self.finish_run(run_id, final_status, node_results, None)
+                    .await?;
             }
             Err(err) => {
                 self.finish_run(run_id, RunStatus::Failed, vec![], Some(err.to_string()))
@@ -548,7 +549,9 @@ impl Orchestrator {
                         "phase": "dynamic_added",
                         "from": from_node
                     }),
-                    RuntimeEvent::GraphCompleted => serde_json::json!({ "phase": "graph_completed" }),
+                    RuntimeEvent::GraphCompleted => {
+                        serde_json::json!({ "phase": "graph_completed" })
+                    }
                 };
 
                 let event_type = match event_clone {
@@ -688,9 +691,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let memory = Arc::new(
-            MemoryManager::new(tmp.join("sessions"), format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str())
-                .await
-                .unwrap(),
+            MemoryManager::new(
+                tmp.join("sessions"),
+                format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
+            )
+            .await
+            .unwrap(),
         );
         let auth = Arc::new(crate::webhook::AuthManager::new("k", "s", 300));
         let webhook = Arc::new(crate::webhook::WebhookDispatcher::new(

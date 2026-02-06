@@ -17,7 +17,10 @@ pub enum NodeStatus {
 
 impl NodeStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped)
+        matches!(
+            self,
+            NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped
+        )
     }
 }
 
@@ -201,7 +204,9 @@ impl ExecutionGraph {
 
     pub fn mark_role_pending_as_skipped(&mut self, role: AgentRole) {
         for node in self.nodes.values() {
-            if node.role == role && matches!(self.status(node.id.as_str()), Some(NodeStatus::Pending)) {
+            if node.role == role
+                && matches!(self.status(node.id.as_str()), Some(NodeStatus::Pending))
+            {
                 self.set_status(node.id.as_str(), NodeStatus::Skipped);
             }
         }

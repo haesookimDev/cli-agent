@@ -138,7 +138,10 @@ impl MemoryManager {
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryHit>> {
-        let mut long_hits = self.store.search_memory(session_id, query, limit * 2).await?;
+        let mut long_hits = self
+            .store
+            .search_memory(session_id, query, limit * 2)
+            .await?;
 
         let now = Instant::now();
         let mut short_hits = Vec::<MemoryHit>::new();

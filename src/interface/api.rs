@@ -88,7 +88,7 @@ async fn create_session_handler(
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({"error": err.to_string()})),
-                )
+                );
             }
         }
     };
@@ -125,7 +125,7 @@ async fn create_run_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
-            )
+            );
         }
     };
 
@@ -165,7 +165,7 @@ async fn get_run_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
-            )
+            );
         }
     };
 
@@ -200,7 +200,7 @@ async fn register_webhook_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
-            )
+            );
         }
     };
 
@@ -238,7 +238,7 @@ async fn test_webhook_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
-            )
+            );
         }
     };
 

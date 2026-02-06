@@ -30,8 +30,8 @@ impl AppConfig {
             .unwrap_or_else(|_| format!("sqlite://{}", database_path.display()));
 
         let api_key = env::var("AGENT_API_KEY").unwrap_or_else(|_| "local-dev-key".to_string());
-        let api_secret = env::var("AGENT_API_SECRET")
-            .unwrap_or_else(|_| "local-dev-secret".to_string());
+        let api_secret =
+            env::var("AGENT_API_SECRET").unwrap_or_else(|_| "local-dev-secret".to_string());
 
         let server_host = env::var("AGENT_SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let server_port = env::var("AGENT_SERVER_PORT")
@@ -59,8 +59,8 @@ impl AppConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(16_000);
 
-        let ollama_base_url = env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+        let ollama_base_url =
+            env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
 
         let cfg = Self {
             data_dir,

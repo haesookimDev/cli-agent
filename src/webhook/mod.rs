@@ -23,7 +23,11 @@ pub struct AuthManager {
 }
 
 impl AuthManager {
-    pub fn new(api_key: impl Into<String>, api_secret: impl Into<String>, max_drift_secs: i64) -> Self {
+    pub fn new(
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+        max_drift_secs: i64,
+    ) -> Self {
         Self {
             api_key: api_key.into(),
             api_secret: api_secret.into(),
@@ -127,7 +131,8 @@ impl WebhookDispatcher {
             for attempt in 1..=3 {
                 let timestamp = Utc::now().timestamp().to_string();
                 let nonce = Uuid::new_v4().to_string();
-                let signature = sign_payload(endpoint.secret.as_str(), &timestamp, &nonce, &body_bytes)?;
+                let signature =
+                    sign_payload(endpoint.secret.as_str(), &timestamp, &nonce, &body_bytes)?;
 
                 let send = self
                     .client
@@ -165,9 +170,7 @@ impl WebhookDispatcher {
                     Err(err) => {
                         warn!(
                             "webhook delivery error [{}] attempt {}: {}",
-                            endpoint.url,
-                            attempt,
-                            err
+                            endpoint.url, attempt, err
                         );
                     }
                 }
@@ -194,7 +197,12 @@ fn header_value(headers: &HeaderMap, key: &str) -> anyhow::Result<String> {
     Ok(value)
 }
 
-pub fn sign_payload(secret: &str, timestamp: &str, nonce: &str, body: &[u8]) -> anyhow::Result<String> {
+pub fn sign_payload(
+    secret: &str,
+    timestamp: &str,
+    nonce: &str,
+    body: &[u8],
+) -> anyhow::Result<String> {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
     mac.update(timestamp.as_bytes());
     mac.update(b".");

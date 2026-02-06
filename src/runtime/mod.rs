@@ -26,16 +26,35 @@ pub struct NodeExecutionResult {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEvent {
-    NodeStarted { node_id: String, role: AgentRole },
-    NodeCompleted { node_id: String, role: AgentRole },
-    NodeFailed { node_id: String, role: AgentRole, error: String },
-    NodeSkipped { node_id: String, reason: String },
-    DynamicNodeAdded { node_id: String, from_node: String },
+    NodeStarted {
+        node_id: String,
+        role: AgentRole,
+    },
+    NodeCompleted {
+        node_id: String,
+        role: AgentRole,
+    },
+    NodeFailed {
+        node_id: String,
+        role: AgentRole,
+        error: String,
+    },
+    NodeSkipped {
+        node_id: String,
+        reason: String,
+    },
+    DynamicNodeAdded {
+        node_id: String,
+        from_node: String,
+    },
     GraphCompleted,
 }
 
 pub type RunNodeFn = Arc<
-    dyn Fn(AgentNode, Vec<NodeExecutionResult>) -> BoxFuture<'static, anyhow::Result<NodeExecutionResult>>
+    dyn Fn(
+            AgentNode,
+            Vec<NodeExecutionResult>,
+        ) -> BoxFuture<'static, anyhow::Result<NodeExecutionResult>>
         + Send
         + Sync,
 >;
@@ -71,7 +90,8 @@ impl AgentRuntime {
         let mut running: HashSet<String> = HashSet::new();
         let mut running_by_role: HashMap<AgentRole, usize> = HashMap::new();
         let mut role_failures: HashMap<AgentRole, u8> = HashMap::new();
-        let mut join_set: JoinSet<(AgentNode, anyhow::Result<NodeExecutionResult>)> = JoinSet::new();
+        let mut join_set: JoinSet<(AgentNode, anyhow::Result<NodeExecutionResult>)> =
+            JoinSet::new();
 
         loop {
             let mut launched_any = false;
@@ -102,7 +122,9 @@ impl AgentRuntime {
                 let run_node_fn = run_node.clone();
                 let node_clone = node.clone();
                 join_set.spawn(async move {
-                    let result = execute_node_with_policy(node_clone.clone(), dep_outputs, run_node_fn).await;
+                    let result =
+                        execute_node_with_policy(node_clone.clone(), dep_outputs, run_node_fn)
+                            .await;
                     (node_clone, result)
                 });
                 launched_any = true;
@@ -168,17 +190,14 @@ impl AgentRuntime {
                         }
 
                         if let Some(fallback_id) = &node.policy.fallback_node {
-                            debug!(
-                                "node {} failed, forcing fallback {}",
-                                node.id,
-                                fallback_id
-                            );
+                            debug!("node {} failed, forcing fallback {}", node.id, fallback_id);
                             graph.force_ready(fallback_id);
                         }
 
                         let entry = role_failures.entry(node.role).or_insert(0);
                         *entry = entry.saturating_add(1);
-                        if node.policy.circuit_breaker > 0 && *entry >= node.policy.circuit_breaker {
+                        if node.policy.circuit_breaker > 0 && *entry >= node.policy.circuit_breaker
+                        {
                             warn!("circuit breaker opened for role {}", node.role);
                             graph.mark_role_pending_as_skipped(node.role);
                         }
@@ -374,12 +393,10 @@ async fn execute_node_with_policy(
                 if output.succeeded {
                     return Ok(output);
                 }
-                last_error = Some(anyhow::anyhow!(
-                    output
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "node execution reported failure".to_string())
-                ));
+                last_error =
+                    Some(anyhow::anyhow!(output.error.clone().unwrap_or_else(|| {
+                        "node execution reported failure".to_string()
+                    })));
             }
             Ok(Err(err)) => last_error = Some(err),
             Err(_) => {
@@ -397,14 +414,16 @@ async fn execute_node_with_policy(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     use futures::FutureExt;
 
     use super::*;
-    use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
+    use crate::runtime::graph::{
+        AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy,
+    };
     use crate::types::AgentRole;
 
     #[tokio::test]
@@ -454,7 +473,8 @@ mod tests {
             })
         };
 
-        let on_completed: OnNodeCompletedFn = Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
+        let on_completed: OnNodeCompletedFn =
+            Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
 
         let now = Instant::now();
         let results = runtime
@@ -515,7 +535,8 @@ mod tests {
             .boxed()
         });
 
-        let on_completed: OnNodeCompletedFn = Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
+        let on_completed: OnNodeCompletedFn =
+            Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
 
         let results = runtime
             .execute_graph(graph, run_node, on_completed, None)

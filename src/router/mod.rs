@@ -147,7 +147,11 @@ impl ModelRouter {
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let primary = scored.first().map(|v| v.0.clone()).expect("non-empty");
-        let fallbacks = scored.iter().skip(1).map(|v| v.0.clone()).collect::<Vec<_>>();
+        let fallbacks = scored
+            .iter()
+            .skip(1)
+            .map(|v| v.0.clone())
+            .collect::<Vec<_>>();
 
         Ok(RoutingDecision {
             profile,
@@ -238,7 +242,10 @@ impl ProviderClient {
     }
 
     async fn generate_ollama(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
-        let endpoint = format!("{}/api/generate", self.ollama_base_url.trim_end_matches('/'));
+        let endpoint = format!(
+            "{}/api/generate",
+            self.ollama_base_url.trim_end_matches('/')
+        );
 
         let resp = self
             .http
@@ -272,11 +279,11 @@ impl ProviderClient {
 
 fn score_model(model: &ModelSpec, constraints: &RoutingConstraints) -> f64 {
     let quality = model.quality;
-    let latency_fit = (constraints.latency_budget_ms as f64 / model.latency.max(1.0)).min(1.5) / 1.5;
+    let latency_fit =
+        (constraints.latency_budget_ms as f64 / model.latency.max(1.0)).min(1.5) / 1.5;
     let cost_fit = (constraints.cost_budget / model.cost.max(0.0001)).min(1.5) / 1.5;
-    let context_fit = (model.context_window as f64 / constraints.min_context.max(1) as f64)
-        .min(1.5)
-        / 1.5;
+    let context_fit =
+        (model.context_window as f64 / constraints.min_context.max(1) as f64).min(1.5) / 1.5;
     let tool = model.tool_call_accuracy;
 
     let quality_w = constraints.quality_weight;

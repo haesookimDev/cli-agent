@@ -25,7 +25,8 @@ pub struct AgentOutput {
 #[async_trait]
 pub trait SubAgent: Send + Sync {
     fn role(&self) -> AgentRole;
-    async fn run(&self, input: AgentInput, router: Arc<ModelRouter>) -> anyhow::Result<AgentOutput>;
+    async fn run(&self, input: AgentInput, router: Arc<ModelRouter>)
+    -> anyhow::Result<AgentOutput>;
 }
 
 #[derive(Clone)]
@@ -36,12 +37,18 @@ pub struct AgentRegistry {
 impl AgentRegistry {
     pub fn builtin() -> Self {
         let mut map: HashMap<AgentRole, Arc<dyn SubAgent>> = HashMap::new();
-        map.insert(AgentRole::Planner, Arc::new(BuiltinAgent::new(AgentRole::Planner)));
+        map.insert(
+            AgentRole::Planner,
+            Arc::new(BuiltinAgent::new(AgentRole::Planner)),
+        );
         map.insert(
             AgentRole::Extractor,
             Arc::new(BuiltinAgent::new(AgentRole::Extractor)),
         );
-        map.insert(AgentRole::Coder, Arc::new(BuiltinAgent::new(AgentRole::Coder)));
+        map.insert(
+            AgentRole::Coder,
+            Arc::new(BuiltinAgent::new(AgentRole::Coder)),
+        );
         map.insert(
             AgentRole::Summarizer,
             Arc::new(BuiltinAgent::new(AgentRole::Summarizer)),
@@ -117,7 +124,11 @@ impl SubAgent for BuiltinAgent {
         self.role
     }
 
-    async fn run(&self, input: AgentInput, router: Arc<ModelRouter>) -> anyhow::Result<AgentOutput> {
+    async fn run(
+        &self,
+        input: AgentInput,
+        router: Arc<ModelRouter>,
+    ) -> anyhow::Result<AgentOutput> {
         let prompt = format!(
             "{}\n\nTASK:\n{}\n\nINSTRUCTIONS:\n{}\n\nSTRUCTURED BRIEF:\n{}\n\nDEPENDENCY OUTPUTS:\n{}\n\nCONTEXT:\n{}",
             self.role_prompt(),
@@ -129,7 +140,9 @@ impl SubAgent for BuiltinAgent {
         );
 
         let constraints = RoutingConstraints::for_profile(self.profile());
-        let (_decision, inference) = router.infer(self.profile(), prompt.as_str(), &constraints).await?;
+        let (_decision, inference) = router
+            .infer(self.profile(), prompt.as_str(), &constraints)
+            .await?;
 
         Ok(AgentOutput {
             model: format!("{}:{}", inference.provider, inference.model_id),
