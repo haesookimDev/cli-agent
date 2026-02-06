@@ -8,7 +8,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 use uuid::Uuid;
 
-use crate::types::{MemoryHit, RunRecord, SessionEvent, SessionEventType, WebhookEndpoint};
+use crate::types::{
+    MemoryHit, RunRecord, SessionEvent, SessionEventType, SessionSummary, WebhookEndpoint,
+};
 
 pub use self::session_log::SessionLogger;
 pub use self::store::SqliteStore;
@@ -75,6 +77,25 @@ impl MemoryManager {
 
     pub async fn list_recent_runs(&self, limit: usize) -> anyhow::Result<Vec<RunRecord>> {
         self.store.list_recent_runs(limit).await
+    }
+
+    pub async fn list_session_runs(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunRecord>> {
+        self.store.list_session_runs(session_id, limit).await
+    }
+
+    pub async fn list_sessions(&self, limit: usize) -> anyhow::Result<Vec<SessionSummary>> {
+        self.store.list_sessions(limit).await
+    }
+
+    pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+        self.store.delete_session(session_id).await?;
+        self.short_term.remove(&session_id);
+        self.logger.delete(session_id).await?;
+        Ok(())
     }
 
     pub async fn remember_short(

@@ -5,7 +5,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::types::{MemoryHit, RunRecord, WebhookEndpoint};
+use crate::types::{MemoryHit, RunRecord, SessionSummary, WebhookEndpoint};
 
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -245,6 +245,140 @@ impl SqliteStore {
         Ok(runs)
     }
 
+    pub async fn list_session_runs(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT run_json
+            FROM agent_runs
+            WHERE session_id = ?1
+            ORDER BY created_at DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(session_id.to_string())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut runs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let run_json: String = row.get("run_json");
+            runs.push(serde_json::from_str(&run_json)?);
+        }
+        Ok(runs)
+    }
+
+    pub async fn list_sessions(&self, limit: usize) -> anyhow::Result<Vec<SessionSummary>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                s.id AS session_id,
+                s.created_at AS created_at,
+                COUNT(ar.run_id) AS run_count,
+                MAX(ar.created_at) AS last_run_at,
+                (
+                    SELECT ar2.task
+                    FROM agent_runs ar2
+                    WHERE ar2.session_id = s.id
+                    ORDER BY ar2.created_at DESC
+                    LIMIT 1
+                ) AS last_task
+            FROM sessions s
+            LEFT JOIN agent_runs ar ON ar.session_id = s.id
+            GROUP BY s.id
+            ORDER BY COALESCE(MAX(ar.created_at), s.created_at) DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut sessions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_raw: String = row.get("session_id");
+            let created_at_raw: String = row.get("created_at");
+            let last_run_at_raw: Option<String> = row.get("last_run_at");
+
+            sessions.push(SessionSummary {
+                session_id: Uuid::parse_str(session_raw.as_str())?,
+                created_at: parse_rfc3339(created_at_raw.as_str())?,
+                run_count: row.get::<i64, _>("run_count").max(0) as usize,
+                last_run_at: last_run_at_raw
+                    .as_deref()
+                    .map(parse_rfc3339)
+                    .transpose()?,
+                last_task: row.get("last_task"),
+            });
+        }
+
+        Ok(sessions)
+    }
+
+    pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+        let session = session_id.to_string();
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM memory_links
+            WHERE memory_item_id IN (
+                SELECT id FROM memory_items WHERE session_id = ?1
+            )
+            "#,
+        )
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM memory_items
+            WHERE session_id = ?1
+            "#,
+        )
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM messages
+            WHERE session_id = ?1
+            "#,
+        )
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM agent_runs
+            WHERE session_id = ?1
+            "#,
+        )
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM sessions
+            WHERE id = ?1
+            "#,
+        )
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn insert_memory_item(
         &self,
         session_id: Uuid,
@@ -429,4 +563,8 @@ impl SqliteStore {
         sqlx::query("VACUUM").execute(&self.pool).await?;
         Ok(())
     }
+}
+
+fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }

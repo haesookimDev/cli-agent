@@ -68,6 +68,17 @@ impl SessionLogger {
     pub fn path_for(&self, session_id: Uuid) -> PathBuf {
         self.root.join(format!("{}.jsonl", session_id))
     }
+
+    pub async fn delete(&self, session_id: Uuid) -> anyhow::Result<()> {
+        let path = self.path_for(session_id);
+        if !path.exists() {
+            return Ok(());
+        }
+        fs::remove_file(&path)
+            .await
+            .with_context(|| format!("failed to remove session log {}", path.display()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

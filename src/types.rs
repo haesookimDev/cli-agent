@@ -197,3 +197,12 @@ pub struct WebhookEndpoint {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub run_count: usize,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_task: Option<String>,
+}

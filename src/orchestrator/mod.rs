@@ -124,6 +124,45 @@ impl Orchestrator {
         Ok(runs)
     }
 
+    pub async fn list_session_runs(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunRecord>> {
+        let mut runs = self.memory.list_session_runs(session_id, limit).await?;
+        for kv in self.runs.iter() {
+            let run = kv.value().clone();
+            if run.session_id == session_id && !runs.iter().any(|r| r.run_id == run.run_id) {
+                runs.push(run);
+            }
+        }
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        runs.truncate(limit);
+        Ok(runs)
+    }
+
+    pub async fn list_sessions(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::types::SessionSummary>> {
+        self.memory.list_sessions(limit).await
+    }
+
+    pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+        self.memory.delete_session(session_id).await?;
+        let run_ids = self
+            .runs
+            .iter()
+            .filter(|kv| kv.value().session_id == session_id)
+            .map(|kv| *kv.key())
+            .collect::<Vec<_>>();
+
+        for run_id in run_ids {
+            self.runs.remove(&run_id);
+        }
+        Ok(())
+    }
+
     pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
         self.memory.create_session(session_id).await
     }
