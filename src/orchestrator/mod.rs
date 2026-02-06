@@ -124,6 +124,10 @@ impl Orchestrator {
         Ok(runs)
     }
 
+    pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+        self.memory.create_session(session_id).await
+    }
+
     pub async fn replay_session(
         &self,
         session_id: Uuid,
@@ -146,6 +150,14 @@ impl Orchestrator {
         secret: &str,
     ) -> anyhow::Result<crate::types::WebhookEndpoint> {
         self.memory.register_webhook(url, events, secret).await
+    }
+
+    pub async fn dispatch_webhook_event(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.webhook.dispatch(event, payload).await
     }
 
     async fn execute_run(&self, run_id: Uuid, req: RunRequest) -> anyhow::Result<()> {
