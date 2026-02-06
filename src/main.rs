@@ -140,7 +140,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Tui => {
-            tui::run_tui(orchestrator).await?;
+            let settings_path = cfg.data_dir.join("tui-settings.json");
+            tui::run_tui(orchestrator, settings_path).await?;
         }
         Commands::Serve { host, port } => {
             let host = host.unwrap_or(cfg.server_host);
