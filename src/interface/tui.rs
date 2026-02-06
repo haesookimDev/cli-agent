@@ -28,7 +28,10 @@ pub async fn run_tui(orchestrator: Orchestrator) -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<()> {
         loop {
             if last_refresh.elapsed() >= Duration::from_secs(1) {
-                match futures::executor::block_on(orchestrator.list_recent_runs(20)) {
+                let fetched = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(orchestrator.list_recent_runs(20))
+                });
+                match fetched {
                     Ok(runs) => {
                         cached_runs = runs;
                         status_text = format!("{} runs loaded", cached_runs.len());
