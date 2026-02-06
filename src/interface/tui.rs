@@ -51,7 +51,7 @@ pub async fn run_tui(orchestrator: Orchestrator) -> anyhow::Result<()> {
                         Constraint::Min(8),
                         Constraint::Length(3),
                     ])
-                    .split(frame.size());
+                    .split(frame.area());
 
                 let header = Paragraph::new("CLI Agent TUI - press q to quit")
                     .block(Block::default().borders(Borders::ALL).title("Agent"));

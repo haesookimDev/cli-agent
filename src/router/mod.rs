@@ -384,7 +384,7 @@ mod tests {
         assert!(
             matches!(
                 decision.primary.provider,
-                ProviderKind::OpenAi | ProviderKind::Anthropic
+                ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::Gemini
             ),
             "unexpected primary provider: {}",
             decision.primary.provider

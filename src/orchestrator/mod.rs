@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::agents::{AgentInput, AgentRegistry};
 use crate::context::{ContextChunk, ContextKind, ContextManager, ContextScope};
 use crate::memory::MemoryManager;
-use crate::router::{ModelRouter, RoutingConstraints};
+use crate::router::ModelRouter;
 use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
 use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
@@ -621,10 +621,11 @@ impl Orchestrator {
         entry.outputs = records;
         entry.error = error_message;
         entry.finished_at = Some(Utc::now());
+        let status_text = entry.status.to_string();
         entry.timeline.push(format!(
             "{} run finished ({})",
             Utc::now().to_rfc3339(),
-            entry.status
+            status_text
         ));
 
         self.memory.upsert_run(&entry).await?;

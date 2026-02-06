@@ -203,12 +203,18 @@ impl ExecutionGraph {
     }
 
     pub fn mark_role_pending_as_skipped(&mut self, role: AgentRole) {
-        for node in self.nodes.values() {
-            if node.role == role
-                && matches!(self.status(node.id.as_str()), Some(NodeStatus::Pending))
-            {
-                self.set_status(node.id.as_str(), NodeStatus::Skipped);
-            }
+        let targets = self
+            .nodes
+            .values()
+            .filter(|node| {
+                node.role == role
+                    && matches!(self.status(node.id.as_str()), Some(NodeStatus::Pending))
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+
+        for node_id in targets {
+            self.set_status(node_id.as_str(), NodeStatus::Skipped);
         }
     }
 
