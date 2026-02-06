@@ -178,3 +178,22 @@ pub struct ReplayEvent {
     pub line: usize,
     pub event: SessionEvent,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryHit {
+    pub id: String,
+    pub content: String,
+    pub importance: f64,
+    pub created_at: DateTime<Utc>,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEndpoint {
+    pub id: String,
+    pub url: String,
+    pub events: Vec<String>,
+    pub secret: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
