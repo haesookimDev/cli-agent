@@ -145,7 +145,7 @@ impl AgentRuntime {
             }
 
             if let Some(joined) = join_set.join_next().await {
-                let (node, result) = joined??;
+                let (node, result) = joined.map_err(anyhow::Error::from)?;
                 running.remove(node.id.as_str());
                 if let Some(count) = running_by_role.get_mut(&node.role) {
                     *count = count.saturating_sub(1);
