@@ -196,7 +196,9 @@ pub async fn run_tui(orchestrator: Orchestrator, settings_path: PathBuf) -> anyh
 }
 
 async fn refresh_state(orchestrator: &Orchestrator, state: &mut TuiState) -> anyhow::Result<()> {
-    state.sessions = orchestrator.list_sessions(state.settings.session_limit).await?;
+    state.sessions = orchestrator
+        .list_sessions(state.settings.session_limit)
+        .await?;
 
     let run_scope_session = if state.settings.follow_active_session {
         state.active_or_selected_session_id()
@@ -209,7 +211,9 @@ async fn refresh_state(orchestrator: &Orchestrator, state: &mut TuiState) -> any
             .list_session_runs(session_id, state.settings.run_limit)
             .await?
     } else {
-        orchestrator.list_recent_runs(state.settings.run_limit).await?
+        orchestrator
+            .list_recent_runs(state.settings.run_limit)
+            .await?
     };
 
     if let Some(active) = state.active_session {
@@ -350,21 +354,18 @@ async fn handle_key(
         },
         KeyCode::Enter => match state.focus {
             FocusPane::Sessions => {
-                if let Some(session) = state.selected_session() {
-                    state.active_session = Some(session.session_id);
-                    state.set_status(format!(
-                        "active session set: {}",
-                        short_uuid(session.session_id)
-                    ));
+                if let Some(session_id) = state.selected_session().map(|s| s.session_id) {
+                    state.active_session = Some(session_id);
+                    state.set_status(format!("active session set: {}", short_uuid(session_id)));
                     *immediate_refresh = true;
                 }
             }
             FocusPane::Runs => {
-                if let Some(run) = state.selected_run() {
-                    state.active_session = Some(run.session_id);
+                if let Some(session_id) = state.selected_run().map(|r| r.session_id) {
+                    state.active_session = Some(session_id);
                     state.set_status(format!(
                         "active session from run: {}",
-                        short_uuid(run.session_id)
+                        short_uuid(session_id)
                     ));
                     *immediate_refresh = true;
                 }
@@ -393,9 +394,9 @@ async fn handle_key(
             }
         }
         KeyCode::Char('c') => {
-            if let Some(session) = state.selected_session() {
-                state.active_session = Some(session.session_id);
-                state.set_status(format!("continue session: {}", short_uuid(session.session_id)));
+            if let Some(session_id) = state.selected_session().map(|s| s.session_id) {
+                state.active_session = Some(session_id);
+                state.set_status(format!("continue session: {}", short_uuid(session_id)));
                 *immediate_refresh = true;
             }
         }
@@ -405,11 +406,11 @@ async fn handle_key(
             *immediate_refresh = true;
         }
         KeyCode::Char('d') => {
-            if let Some(session) = state.selected_session() {
-                state.mode = InputMode::ConfirmDelete(session.session_id);
+            if let Some(session_id) = state.selected_session().map(|s| s.session_id) {
+                state.mode = InputMode::ConfirmDelete(session_id);
                 state.set_status(format!(
                     "delete session {} ? press y to confirm",
-                    short_uuid(session.session_id)
+                    short_uuid(session_id)
                 ));
             }
         }
@@ -473,13 +474,19 @@ async fn handle_key(
             state.settings.auto_refresh_ms = (state.settings.auto_refresh_ms.saturating_sub(250))
                 .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
             save_settings(settings_path, &state.settings)?;
-            state.set_status(format!("refresh interval: {}ms", state.settings.auto_refresh_ms));
+            state.set_status(format!(
+                "refresh interval: {}ms",
+                state.settings.auto_refresh_ms
+            ));
         }
         KeyCode::Char(']') => {
             state.settings.auto_refresh_ms =
                 (state.settings.auto_refresh_ms + 250).clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
             save_settings(settings_path, &state.settings)?;
-            state.set_status(format!("refresh interval: {}ms", state.settings.auto_refresh_ms));
+            state.set_status(format!(
+                "refresh interval: {}ms",
+                state.settings.auto_refresh_ms
+            ));
         }
         KeyCode::Char('-') => {
             state.settings.run_limit = state
@@ -525,8 +532,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
 
     let header = header_lines(state);
     frame.render_widget(
-        Paragraph::new(header)
-            .block(Block::default().borders(Borders::ALL).title("Agent TUI")),
+        Paragraph::new(header).block(Block::default().borders(Borders::ALL).title("Agent TUI")),
         root[0],
     );
 
@@ -545,9 +551,11 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
 
     let footer_text = footer_lines(state);
     frame.render_widget(
-        Paragraph::new(footer_text)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("Status/Controls")),
+        Paragraph::new(footer_text).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Status/Controls"),
+        ),
         root[2],
     );
 }
@@ -648,7 +656,9 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
 
     lines.push(Line::from(Span::styled(
         "Settings",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(format!(
         "profile={} refresh={}ms follow_active={}",
@@ -670,7 +680,9 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Selected Run",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
 
     if let Some(run) = state.selected_run() {
@@ -704,7 +716,9 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Replay Preview",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         )));
         for line in &state.replay_preview {
             lines.push(Line::from(compact_json(line, 64)));
@@ -809,7 +823,11 @@ fn save_settings(path: &Path, settings: &TuiSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn update_profile(state: &mut TuiState, profile: TaskProfile, settings_path: &Path) -> anyhow::Result<()> {
+fn update_profile(
+    state: &mut TuiState,
+    profile: TaskProfile,
+    settings_path: &Path,
+) -> anyhow::Result<()> {
     state.settings.default_profile = profile;
     save_settings(settings_path, &state.settings)?;
     state.set_status(format!("profile set: {}", state.settings.default_profile));

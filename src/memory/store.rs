@@ -308,10 +308,7 @@ impl SqliteStore {
                 session_id: Uuid::parse_str(session_raw.as_str())?,
                 created_at: parse_rfc3339(created_at_raw.as_str())?,
                 run_count: row.get::<i64, _>("run_count").max(0) as usize,
-                last_run_at: last_run_at_raw
-                    .as_deref()
-                    .map(parse_rfc3339)
-                    .transpose()?,
+                last_run_at: last_run_at_raw.as_deref().map(parse_rfc3339).transpose()?,
                 last_task: row.get("last_task"),
             });
         }
