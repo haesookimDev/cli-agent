@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -20,7 +21,7 @@ use crate::runtime::{
 use crate::types::{
     AgentExecutionRecord, AgentRole, NodeTraceState, RunActionEvent, RunActionType, RunRecord,
     RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
-    TraceEdge,
+    TraceEdge, WebhookDeliveryRecord, WebhookEndpoint,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -33,7 +34,14 @@ pub struct Orchestrator {
     context: Arc<ContextManager>,
     webhook: Arc<WebhookDispatcher>,
     runs: Arc<DashMap<Uuid, RunRecord>>,
+    controls: Arc<DashMap<Uuid, RunControl>>,
     max_graph_depth: u8,
+}
+
+#[derive(Debug, Clone)]
+struct RunControl {
+    cancel_requested: Arc<AtomicBool>,
+    pause_requested: Arc<AtomicBool>,
 }
 
 impl Orchestrator {
@@ -54,6 +62,7 @@ impl Orchestrator {
             context,
             webhook,
             runs: Arc::new(DashMap::new()),
+            controls: Arc::new(DashMap::new()),
             max_graph_depth,
         }
     }
@@ -71,6 +80,13 @@ impl Orchestrator {
 
         self.runs.insert(run_id, record.clone());
         self.memory.upsert_run(&record).await?;
+        self.controls.insert(
+            run_id,
+            RunControl {
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+                pause_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
         let run_id_text = run_id.to_string();
         self.record_action_event(
             run_id,
@@ -202,6 +218,13 @@ impl Orchestrator {
         self.memory.list_sessions(limit).await
     }
 
+    pub async fn get_session(
+        &self,
+        session_id: Uuid,
+    ) -> anyhow::Result<Option<crate::types::SessionSummary>> {
+        self.memory.get_session(session_id).await
+    }
+
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
         self.memory.delete_session(session_id).await?;
         let run_ids = self
@@ -215,6 +238,142 @@ impl Orchestrator {
             self.runs.remove(&run_id);
         }
         Ok(())
+    }
+
+    pub async fn cancel_run(&self, run_id: Uuid) -> anyhow::Result<bool> {
+        let Some(control) = self.controls.get(&run_id) else {
+            return Ok(false);
+        };
+        control.cancel_requested.store(true, Ordering::Relaxed);
+        drop(control);
+
+        if let Some(mut run) = self.runs.get_mut(&run_id) {
+            if run.status.is_terminal() {
+                return Ok(false);
+            }
+            run.status = RunStatus::Cancelling;
+            run.timeline
+                .push(format!("{} cancel requested", Utc::now().to_rfc3339()));
+            let session_id = run.session_id;
+            let run_id_text = run_id.to_string();
+            self.memory.upsert_run(&run).await?;
+            self.record_action_event(
+                run_id,
+                session_id,
+                RunActionType::RunCancelRequested,
+                Some("run"),
+                Some(run_id_text.as_str()),
+                None,
+                serde_json::json!({ "status": "cancelling" }),
+            )
+            .await;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn pause_run(&self, run_id: Uuid) -> anyhow::Result<bool> {
+        let Some(control) = self.controls.get(&run_id) else {
+            return Ok(false);
+        };
+        control.pause_requested.store(true, Ordering::Relaxed);
+        drop(control);
+
+        if let Some(mut run) = self.runs.get_mut(&run_id) {
+            if run.status.is_terminal() || run.status == RunStatus::Paused {
+                return Ok(false);
+            }
+            run.status = RunStatus::Paused;
+            run.timeline
+                .push(format!("{} pause requested", Utc::now().to_rfc3339()));
+            let session_id = run.session_id;
+            let run_id_text = run_id.to_string();
+            self.memory.upsert_run(&run).await?;
+            self.record_action_event(
+                run_id,
+                session_id,
+                RunActionType::RunPauseRequested,
+                Some("run"),
+                Some(run_id_text.as_str()),
+                None,
+                serde_json::json!({ "status": "paused" }),
+            )
+            .await;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn resume_run(&self, run_id: Uuid) -> anyhow::Result<bool> {
+        let Some(control) = self.controls.get(&run_id) else {
+            return Ok(false);
+        };
+        control.pause_requested.store(false, Ordering::Relaxed);
+        let cancelling = control.cancel_requested.load(Ordering::Relaxed);
+        drop(control);
+
+        if let Some(mut run) = self.runs.get_mut(&run_id) {
+            if run.status.is_terminal() {
+                return Ok(false);
+            }
+            run.status = if cancelling {
+                RunStatus::Cancelling
+            } else {
+                RunStatus::Running
+            };
+            run.timeline
+                .push(format!("{} resumed", Utc::now().to_rfc3339()));
+            let session_id = run.session_id;
+            let run_id_text = run_id.to_string();
+            self.memory.upsert_run(&run).await?;
+            self.record_action_event(
+                run_id,
+                session_id,
+                RunActionType::RunResumed,
+                Some("run"),
+                Some(run_id_text.as_str()),
+                None,
+                serde_json::json!({
+                    "status": if cancelling { "cancelling" } else { "running" }
+                }),
+            )
+            .await;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn retry_run(&self, run_id: Uuid) -> anyhow::Result<RunSubmission> {
+        let run = self
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("run not found"))?;
+        let req = RunRequest {
+            task: run.task.clone(),
+            profile: run.profile,
+            session_id: Some(run.session_id),
+        };
+        self.submit_run(req).await
+    }
+
+    pub async fn clone_run(
+        &self,
+        run_id: Uuid,
+        target_session: Option<Uuid>,
+    ) -> anyhow::Result<RunSubmission> {
+        let run = self
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("run not found"))?;
+        let req = RunRequest {
+            task: run.task.clone(),
+            profile: run.profile,
+            session_id: target_session.or(Some(run.session_id)),
+        };
+        self.submit_run(req).await
     }
 
     pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
@@ -245,12 +404,41 @@ impl Orchestrator {
         self.memory.register_webhook(url, events, secret).await
     }
 
+    pub async fn list_webhooks(&self) -> anyhow::Result<Vec<WebhookEndpoint>> {
+        self.memory.list_webhooks().await
+    }
+
     pub async fn dispatch_webhook_event(
         &self,
         event: &str,
         payload: serde_json::Value,
     ) -> anyhow::Result<()> {
         self.webhook.dispatch(event, payload).await
+    }
+
+    pub async fn list_webhook_deliveries(
+        &self,
+        dead_letter_only: bool,
+        limit: usize,
+    ) -> anyhow::Result<Vec<WebhookDeliveryRecord>> {
+        self.memory
+            .list_webhook_deliveries(dead_letter_only, limit)
+            .await
+    }
+
+    pub async fn retry_webhook_delivery(&self, delivery_id: i64) -> anyhow::Result<()> {
+        let delivery = self
+            .memory
+            .get_webhook_delivery(delivery_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("webhook delivery not found"))?;
+        self.webhook
+            .dispatch_to_endpoint(
+                delivery.endpoint_id.as_str(),
+                delivery.event.as_str(),
+                delivery.payload,
+            )
+            .await
     }
 
     async fn record_action_event(
@@ -279,7 +467,23 @@ impl Orchestrator {
 
     async fn execute_run(&self, run_id: Uuid, req: RunRequest) -> anyhow::Result<()> {
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+        let cancel_flag = self
+            .controls
+            .get(&run_id)
+            .map(|c| c.cancel_requested.clone())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let pause_flag = self
+            .controls
+            .get(&run_id)
+            .map(|c| c.pause_requested.clone())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         self.set_running(run_id).await?;
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            self.finish_run(run_id, RunStatus::Cancelled, vec![], None)
+                .await?;
+            return Ok(());
+        }
 
         self.memory
             .append_event(SessionEvent {
@@ -347,12 +551,27 @@ impl Orchestrator {
 
         let outputs = self
             .runtime
-            .execute_graph(graph, run_node, on_complete, Some(event_sink))
+            .execute_graph(
+                graph,
+                run_node,
+                on_complete,
+                Some(event_sink),
+                Some(Arc::new({
+                    let cancel_flag = cancel_flag.clone();
+                    move || cancel_flag.load(Ordering::Relaxed)
+                })),
+                Some(Arc::new({
+                    let pause_flag = pause_flag.clone();
+                    move || pause_flag.load(Ordering::Relaxed)
+                })),
+            )
             .await;
 
         match outputs {
             Ok(node_results) => {
-                let final_status = if node_results.iter().all(|r| r.succeeded) {
+                let final_status = if cancel_flag.load(Ordering::Relaxed) {
+                    RunStatus::Cancelled
+                } else if node_results.iter().all(|r| r.succeeded) {
                     RunStatus::Succeeded
                 } else {
                     RunStatus::Failed
@@ -791,7 +1010,23 @@ impl Orchestrator {
 
     async fn set_running(&self, run_id: Uuid) -> anyhow::Result<()> {
         if let Some(mut entry) = self.runs.get_mut(&run_id) {
-            entry.status = RunStatus::Running;
+            let cancelling = self
+                .controls
+                .get(&run_id)
+                .map(|control| control.cancel_requested.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            let paused = self
+                .controls
+                .get(&run_id)
+                .map(|control| control.pause_requested.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            entry.status = if cancelling {
+                RunStatus::Cancelling
+            } else if paused {
+                RunStatus::Paused
+            } else {
+                RunStatus::Running
+            };
             entry.started_at = Some(Utc::now());
             entry
                 .timeline
@@ -807,7 +1042,15 @@ impl Orchestrator {
                 Some("run"),
                 Some(run_id_text.as_str()),
                 None,
-                serde_json::json!({ "status": "running" }),
+                serde_json::json!({
+                    "status": if cancelling {
+                        "cancelling"
+                    } else if paused {
+                        "paused"
+                    } else {
+                        "running"
+                    }
+                }),
             )
             .await;
             return Ok(());
@@ -876,10 +1119,10 @@ impl Orchestrator {
             .append_event(SessionEvent {
                 session_id,
                 run_id: Some(entry.run_id),
-                event_type: if entry.status == RunStatus::Succeeded {
-                    SessionEventType::RunCompleted
-                } else {
-                    SessionEventType::RunFailed
+                event_type: match entry.status {
+                    RunStatus::Succeeded => SessionEventType::RunCompleted,
+                    RunStatus::Cancelled => SessionEventType::RunCancelled,
+                    _ => SessionEventType::RunFailed,
                 },
                 timestamp: Utc::now(),
                 payload: serde_json::json!({
@@ -890,50 +1133,75 @@ impl Orchestrator {
             })
             .await?;
 
-        if entry.status == RunStatus::Succeeded {
-            self.webhook
-                .dispatch(
-                    "run.completed",
-                    serde_json::json!({
-                        "run_id": entry.run_id,
-                        "session_id": entry.session_id,
-                        "outputs": entry.outputs,
-                    }),
+        match entry.status {
+            RunStatus::Succeeded => {
+                self.webhook
+                    .dispatch(
+                        "run.completed",
+                        serde_json::json!({
+                            "run_id": entry.run_id,
+                            "session_id": entry.session_id,
+                            "outputs": entry.outputs,
+                        }),
+                    )
+                    .await?;
+                self.record_action_event(
+                    run_id,
+                    session_id,
+                    RunActionType::WebhookDispatched,
+                    Some("webhook"),
+                    Some("run.completed"),
+                    None,
+                    serde_json::json!({ "event": "run.completed" }),
                 )
-                .await?;
-            self.record_action_event(
-                run_id,
-                session_id,
-                RunActionType::WebhookDispatched,
-                Some("webhook"),
-                Some("run.completed"),
-                None,
-                serde_json::json!({ "event": "run.completed" }),
-            )
-            .await;
-        } else {
-            self.webhook
-                .dispatch(
-                    "run.failed",
-                    serde_json::json!({
-                        "run_id": entry.run_id,
-                        "session_id": entry.session_id,
-                        "error": entry.error,
-                    }),
+                .await;
+            }
+            RunStatus::Cancelled => {
+                self.webhook
+                    .dispatch(
+                        "run.cancelled",
+                        serde_json::json!({
+                            "run_id": entry.run_id,
+                            "session_id": entry.session_id,
+                        }),
+                    )
+                    .await?;
+                self.record_action_event(
+                    run_id,
+                    session_id,
+                    RunActionType::WebhookDispatched,
+                    Some("webhook"),
+                    Some("run.cancelled"),
+                    None,
+                    serde_json::json!({ "event": "run.cancelled" }),
                 )
-                .await?;
-            self.record_action_event(
-                run_id,
-                session_id,
-                RunActionType::WebhookDispatched,
-                Some("webhook"),
-                Some("run.failed"),
-                None,
-                serde_json::json!({ "event": "run.failed" }),
-            )
-            .await;
+                .await;
+            }
+            _ => {
+                self.webhook
+                    .dispatch(
+                        "run.failed",
+                        serde_json::json!({
+                            "run_id": entry.run_id,
+                            "session_id": entry.session_id,
+                            "error": entry.error,
+                        }),
+                    )
+                    .await?;
+                self.record_action_event(
+                    run_id,
+                    session_id,
+                    RunActionType::WebhookDispatched,
+                    Some("webhook"),
+                    Some("run.failed"),
+                    None,
+                    serde_json::json!({ "event": "run.failed" }),
+                )
+                .await;
+            }
         }
 
+        self.controls.remove(&run_id);
         info!("run {} finished with status {}", run_id, entry.status);
         Ok(())
     }
@@ -1196,6 +1464,9 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             }
             RunActionType::RunQueued
             | RunActionType::RunStarted
+            | RunActionType::RunCancelRequested
+            | RunActionType::RunPauseRequested
+            | RunActionType::RunResumed
             | RunActionType::GraphCompleted
             | RunActionType::RunFinished
             | RunActionType::WebhookDispatched => {}

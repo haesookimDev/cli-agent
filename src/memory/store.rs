@@ -6,7 +6,8 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::types::{
-    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionSummary, WebhookEndpoint,
+    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionSummary, WebhookDeliveryRecord,
+    WebhookEndpoint,
 };
 
 #[derive(Debug, Clone)]
@@ -156,6 +157,36 @@ impl SqliteStore {
                 enabled INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                delivered INTEGER NOT NULL,
+                dead_letter INTEGER NOT NULL,
+                status_code INTEGER,
+                error TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_dead_letter_created
+            ON webhook_deliveries (dead_letter, created_at DESC);
             "#,
         )
         .execute(&self.pool)
@@ -512,6 +543,48 @@ impl SqliteStore {
         Ok(sessions)
     }
 
+    pub async fn get_session(&self, session_id: Uuid) -> anyhow::Result<Option<SessionSummary>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                s.id AS session_id,
+                s.created_at AS created_at,
+                COUNT(ar.run_id) AS run_count,
+                MAX(ar.created_at) AS last_run_at,
+                (
+                    SELECT ar2.task
+                    FROM agent_runs ar2
+                    WHERE ar2.session_id = s.id
+                    ORDER BY ar2.created_at DESC
+                    LIMIT 1
+                ) AS last_task
+            FROM sessions s
+            LEFT JOIN agent_runs ar ON ar.session_id = s.id
+            WHERE s.id = ?1
+            GROUP BY s.id
+            "#,
+        )
+        .bind(session_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let session_raw: String = row.get("session_id");
+        let created_at_raw: String = row.get("created_at");
+        let last_run_at_raw: Option<String> = row.get("last_run_at");
+
+        Ok(Some(SessionSummary {
+            session_id: Uuid::parse_str(session_raw.as_str())?,
+            created_at: parse_rfc3339(created_at_raw.as_str())?,
+            run_count: row.get::<i64, _>("run_count").max(0) as usize,
+            last_run_at: last_run_at_raw.as_deref().map(parse_rfc3339).transpose()?,
+            last_task: row.get("last_task"),
+        }))
+    }
+
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
         let session = session_id.to_string();
         let mut tx = self.pool.begin().await?;
@@ -551,6 +624,16 @@ impl SqliteStore {
         sqlx::query(
             r#"
             DELETE FROM agent_runs
+            WHERE session_id = ?1
+            "#,
+        )
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM run_action_events
             WHERE session_id = ?1
             "#,
         )
@@ -720,6 +803,163 @@ impl SqliteStore {
         Ok(endpoints)
     }
 
+    pub async fn insert_webhook_delivery(
+        &self,
+        endpoint_id: &str,
+        event: &str,
+        event_id: &str,
+        url: &str,
+        attempts: u32,
+        delivered: bool,
+        dead_letter: bool,
+        status_code: Option<u16>,
+        error: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<WebhookDeliveryRecord> {
+        let created_at = Utc::now();
+        let payload_raw = serde_json::to_string(payload)?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO webhook_deliveries (
+                endpoint_id,
+                event,
+                event_id,
+                url,
+                attempts,
+                delivered,
+                dead_letter,
+                status_code,
+                error,
+                payload,
+                created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+        )
+        .bind(endpoint_id)
+        .bind(event)
+        .bind(event_id)
+        .bind(url)
+        .bind(attempts as i64)
+        .bind(if delivered { 1_i64 } else { 0_i64 })
+        .bind(if dead_letter { 1_i64 } else { 0_i64 })
+        .bind(status_code.map(|v| v as i64))
+        .bind(error)
+        .bind(payload_raw)
+        .bind(created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(WebhookDeliveryRecord {
+            id: result.last_insert_rowid(),
+            endpoint_id: endpoint_id.to_string(),
+            event: event.to_string(),
+            event_id: event_id.to_string(),
+            url: url.to_string(),
+            attempts,
+            delivered,
+            dead_letter,
+            status_code,
+            error: error.map(ToString::to_string),
+            payload: payload.clone(),
+            created_at,
+        })
+    }
+
+    pub async fn list_webhook_deliveries(
+        &self,
+        dead_letter_only: bool,
+        limit: usize,
+    ) -> anyhow::Result<Vec<WebhookDeliveryRecord>> {
+        let rows = if dead_letter_only {
+            sqlx::query(
+                r#"
+                SELECT id, endpoint_id, event, event_id, url, attempts, delivered, dead_letter, status_code, error, payload, created_at
+                FROM webhook_deliveries
+                WHERE dead_letter = 1
+                ORDER BY created_at DESC
+                LIMIT ?1
+                "#,
+            )
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, endpoint_id, event, event_id, url, attempts, delivered, dead_letter, status_code, error, payload, created_at
+                FROM webhook_deliveries
+                ORDER BY created_at DESC
+                LIMIT ?1
+                "#,
+            )
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let created_at_raw: String = row.get("created_at");
+            let payload_raw: String = row.get("payload");
+            let status_code_raw: Option<i64> = row.get("status_code");
+
+            out.push(WebhookDeliveryRecord {
+                id: row.get("id"),
+                endpoint_id: row.get("endpoint_id"),
+                event: row.get("event"),
+                event_id: row.get("event_id"),
+                url: row.get("url"),
+                attempts: row.get::<i64, _>("attempts").max(0) as u32,
+                delivered: row.get::<i64, _>("delivered") != 0,
+                dead_letter: row.get::<i64, _>("dead_letter") != 0,
+                status_code: status_code_raw.map(|v| v as u16),
+                error: row.get("error"),
+                payload: serde_json::from_str(payload_raw.as_str())?,
+                created_at: parse_rfc3339(created_at_raw.as_str())?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn get_webhook_delivery(
+        &self,
+        delivery_id: i64,
+    ) -> anyhow::Result<Option<WebhookDeliveryRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, endpoint_id, event, event_id, url, attempts, delivered, dead_letter, status_code, error, payload, created_at
+            FROM webhook_deliveries
+            WHERE id = ?1
+            "#,
+        )
+        .bind(delivery_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let created_at_raw: String = row.get("created_at");
+        let payload_raw: String = row.get("payload");
+        let status_code_raw: Option<i64> = row.get("status_code");
+
+        Ok(Some(WebhookDeliveryRecord {
+            id: row.get("id"),
+            endpoint_id: row.get("endpoint_id"),
+            event: row.get("event"),
+            event_id: row.get("event_id"),
+            url: row.get("url"),
+            attempts: row.get::<i64, _>("attempts").max(0) as u32,
+            delivered: row.get::<i64, _>("delivered") != 0,
+            dead_letter: row.get::<i64, _>("dead_letter") != 0,
+            status_code: status_code_raw.map(|v| v as u16),
+            error: row.get("error"),
+            payload: serde_json::from_str(payload_raw.as_str())?,
+            created_at: parse_rfc3339(created_at_raw.as_str())?,
+        }))
+    }
+
     pub async fn compact_session(&self, session_id: Uuid) -> anyhow::Result<()> {
         let rows = sqlx::query(
             r#"
@@ -766,6 +1006,9 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
     let action = match value {
         "run_queued" => RunActionType::RunQueued,
         "run_started" => RunActionType::RunStarted,
+        "run_cancel_requested" => RunActionType::RunCancelRequested,
+        "run_pause_requested" => RunActionType::RunPauseRequested,
+        "run_resumed" => RunActionType::RunResumed,
         "graph_initialized" => RunActionType::GraphInitialized,
         "node_started" => RunActionType::NodeStarted,
         "node_completed" => RunActionType::NodeCompleted,

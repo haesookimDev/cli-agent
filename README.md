@@ -63,20 +63,37 @@ TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시
 
 ## REST 엔드포인트
 - `POST /v1/sessions`
+- `GET /v1/sessions`
+- `GET /v1/sessions/{session_id}`
+- `GET /v1/sessions/{session_id}/runs`
 - `POST /v1/runs`
 - `GET /v1/runs/{run_id}`
+- `POST /v1/runs/{run_id}/cancel`
+- `POST /v1/runs/{run_id}/retry`
+- `POST /v1/runs/{run_id}/clone`
 - `GET /v1/runs/{run_id}/trace`
 - `GET /v1/runs/{run_id}/stream` (SSE)
 - `POST /v1/webhooks/endpoints`
+- `GET /v1/webhooks/deliveries`
+- `POST /v1/webhooks/deliveries/{delivery_id}/retry`
 - `POST /v1/webhooks/test`
 
 `trace`는 동작 이벤트와 그래프 스냅샷을 반환합니다.
 `stream`은 실시간 행동 이벤트를 SSE로 전송합니다.
+`/v1/webhooks/deliveries?dead_letter=true`로 DLQ 대상 전달 이력을 조회할 수 있습니다.
 
 ### SSE 이벤트 타입
 - `action_event`: 런타임 행동 이벤트 payload
 - `run_terminal`: 런 종료 상태 이벤트
 - `error`: 스트림 오류
+
+### Run 상태
+- `queued`
+- `cancelling`
+- `cancelled`
+- `running`
+- `succeeded`
+- `failed`
 
 ## 인증 시그니처
 시그니처 원문:

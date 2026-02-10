@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::memory::MemoryManager;
+use crate::types::WebhookEndpoint;
 
 pub type HmacSha256 = Hmac<Sha256>;
 
@@ -116,18 +117,53 @@ impl WebhookDispatcher {
             .into_iter()
             .filter(|ep| ep.enabled && ep.events.iter().any(|e| e == event))
             .collect::<Vec<_>>();
+        self.dispatch_with_endpoints(matched, event, payload).await
+    }
 
-        for endpoint in matched {
+    pub async fn dispatch_to_endpoint(
+        &self,
+        endpoint_id: &str,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let endpoints = self.memory.list_webhooks().await?;
+        let matched = endpoints
+            .into_iter()
+            .filter(|ep| {
+                ep.enabled
+                    && ep.id == endpoint_id
+                    && ep.events.iter().any(|registered| registered == event)
+            })
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no active webhook endpoint matched id={} event={}",
+                endpoint_id,
+                event
+            ));
+        }
+        self.dispatch_with_endpoints(matched, event, payload).await
+    }
+
+    async fn dispatch_with_endpoints(
+        &self,
+        endpoints: Vec<WebhookEndpoint>,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        for endpoint in endpoints {
             let event_id = Uuid::new_v4().to_string();
             let body = serde_json::json!({
                 "event": event,
                 "event_id": event_id,
                 "timestamp": Utc::now().to_rfc3339(),
-                "data": payload,
+                "data": payload.clone(),
             });
             let body_bytes = serde_json::to_vec(&body)?;
 
             let mut delivered = false;
+            let mut last_status: Option<u16> = None;
+            let mut last_error: Option<String> = None;
             for attempt in 1..=3 {
                 let timestamp = Utc::now().timestamp().to_string();
                 let nonce = Uuid::new_v4().to_string();
@@ -150,16 +186,52 @@ impl WebhookDispatcher {
 
                 match send {
                     Ok(resp) if resp.status().is_success() => {
+                        last_status = Some(resp.status().as_u16());
+                        last_error = None;
                         delivered = true;
                         info!("webhook delivered to {}", endpoint.url);
+                        let _ = self
+                            .memory
+                            .insert_webhook_delivery(
+                                endpoint.id.as_str(),
+                                event,
+                                event_id.as_str(),
+                                endpoint.url.as_str(),
+                                attempt,
+                                true,
+                                false,
+                                last_status,
+                                None,
+                                &payload,
+                            )
+                            .await;
                         break;
                     }
                     Ok(resp) if resp.status() == StatusCode::CONFLICT => {
+                        last_status = Some(resp.status().as_u16());
+                        last_error = None;
                         delivered = true;
                         info!("webhook idempotent conflict treated as delivered");
+                        let _ = self
+                            .memory
+                            .insert_webhook_delivery(
+                                endpoint.id.as_str(),
+                                event,
+                                event_id.as_str(),
+                                endpoint.url.as_str(),
+                                attempt,
+                                true,
+                                false,
+                                last_status,
+                                None,
+                                &payload,
+                            )
+                            .await;
                         break;
                     }
                     Ok(resp) => {
+                        last_status = Some(resp.status().as_u16());
+                        last_error = Some(format!("status {}", resp.status()));
                         warn!(
                             "webhook delivery failed [{}] attempt {} status {}",
                             endpoint.url,
@@ -168,6 +240,7 @@ impl WebhookDispatcher {
                         );
                     }
                     Err(err) => {
+                        last_error = Some(err.to_string());
                         warn!(
                             "webhook delivery error [{}] attempt {}: {}",
                             endpoint.url, attempt, err
@@ -180,6 +253,21 @@ impl WebhookDispatcher {
 
             if !delivered {
                 warn!("webhook delivery permanently failed for {}", endpoint.url);
+                let _ = self
+                    .memory
+                    .insert_webhook_delivery(
+                        endpoint.id.as_str(),
+                        event,
+                        event_id.as_str(),
+                        endpoint.url.as_str(),
+                        3,
+                        false,
+                        true,
+                        last_status,
+                        last_error.as_deref(),
+                        &payload,
+                    )
+                    .await;
             }
         }
 

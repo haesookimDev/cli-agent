@@ -59,6 +59,9 @@ impl Display for AgentRole {
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Queued,
+    Cancelling,
+    Cancelled,
+    Paused,
     Running,
     Succeeded,
     Failed,
@@ -66,7 +69,10 @@ pub enum RunStatus {
 
 impl RunStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, RunStatus::Succeeded | RunStatus::Failed)
+        matches!(
+            self,
+            RunStatus::Cancelled | RunStatus::Succeeded | RunStatus::Failed
+        )
     }
 }
 
@@ -74,6 +80,9 @@ impl Display for RunStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             RunStatus::Queued => "queued",
+            RunStatus::Cancelling => "cancelling",
+            RunStatus::Cancelled => "cancelled",
+            RunStatus::Paused => "paused",
             RunStatus::Running => "running",
             RunStatus::Succeeded => "succeeded",
             RunStatus::Failed => "failed",
@@ -94,6 +103,7 @@ pub enum SessionEventType {
     SessionSummary,
     RunProgress,
     RunFailed,
+    RunCancelled,
     RunCompleted,
 }
 
@@ -212,6 +222,9 @@ pub struct SessionSummary {
 pub enum RunActionType {
     RunQueued,
     RunStarted,
+    RunCancelRequested,
+    RunPauseRequested,
+    RunResumed,
     GraphInitialized,
     NodeStarted,
     NodeCompleted,
@@ -229,6 +242,9 @@ impl Display for RunActionType {
         let s = match self {
             RunActionType::RunQueued => "run_queued",
             RunActionType::RunStarted => "run_started",
+            RunActionType::RunCancelRequested => "run_cancel_requested",
+            RunActionType::RunPauseRequested => "run_pause_requested",
+            RunActionType::RunResumed => "run_resumed",
             RunActionType::GraphInitialized => "graph_initialized",
             RunActionType::NodeStarted => "node_started",
             RunActionType::NodeCompleted => "node_completed",
@@ -293,4 +309,20 @@ pub struct RunTrace {
     pub status: Option<RunStatus>,
     pub events: Vec<RunActionEvent>,
     pub graph: RunTraceGraph,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDeliveryRecord {
+    pub id: i64,
+    pub endpoint_id: String,
+    pub event: String,
+    pub event_id: String,
+    pub url: String,
+    pub attempts: u32,
+    pub delivered: bool,
+    pub dead_letter: bool,
+    pub status_code: Option<u16>,
+    pub error: Option<String>,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
 }

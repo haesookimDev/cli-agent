@@ -68,6 +68,8 @@ pub type OnNodeCompletedFn = Arc<
 >;
 
 pub type EventSink = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
+pub type ShouldCancelFn = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type ShouldPauseFn = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct AgentRuntime {
@@ -87,6 +89,8 @@ impl AgentRuntime {
         run_node: RunNodeFn,
         on_completed: OnNodeCompletedFn,
         on_event: Option<EventSink>,
+        should_cancel: Option<ShouldCancelFn>,
+        should_pause: Option<ShouldPauseFn>,
     ) -> anyhow::Result<Vec<NodeExecutionResult>> {
         let mut outputs: HashMap<String, NodeExecutionResult> = HashMap::new();
         let mut running: HashSet<String> = HashSet::new();
@@ -97,8 +101,14 @@ impl AgentRuntime {
 
         loop {
             let mut launched_any = false;
+            let cancellation_requested =
+                should_cancel.as_ref().map(|check| check()).unwrap_or(false);
+            let pause_requested = should_pause.as_ref().map(|check| check()).unwrap_or(false);
 
-            while running.len() < self.global_max_parallelism {
+            while !cancellation_requested
+                && !pause_requested
+                && running.len() < self.global_max_parallelism
+            {
                 let next = self.select_next_node(&mut graph, &running, &running_by_role)?;
                 let Some(node) = next else {
                     break;
@@ -133,6 +143,23 @@ impl AgentRuntime {
             }
 
             if running.is_empty() && !launched_any {
+                if cancellation_requested {
+                    for node in graph.pending_nodes() {
+                        graph.set_status(node.id.as_str(), NodeStatus::Skipped);
+                        if let Some(sink) = &on_event {
+                            sink(RuntimeEvent::NodeSkipped {
+                                node_id: node.id,
+                                reason: "cancel_requested".to_string(),
+                            });
+                        }
+                    }
+                    break;
+                }
+                if pause_requested {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    continue;
+                }
+
                 if graph.all_terminal() {
                     break;
                 }
@@ -484,7 +511,7 @@ mod tests {
 
         let now = Instant::now();
         let results = runtime
-            .execute_graph(graph, run_node, on_completed, None)
+            .execute_graph(graph, run_node, on_completed, None, None, None)
             .await
             .unwrap();
 
@@ -545,7 +572,7 @@ mod tests {
             Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
 
         let results = runtime
-            .execute_graph(graph, run_node, on_completed, None)
+            .execute_graph(graph, run_node, on_completed, None, None, None)
             .await
             .unwrap();
 

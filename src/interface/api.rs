@@ -51,6 +51,22 @@ struct StreamQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneRunRequest {
+    session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeliveryListQuery {
+    limit: Option<usize>,
+    dead_letter: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterWebhookRequest {
     url: String,
     events: Vec<String>,
@@ -65,12 +81,36 @@ struct TestWebhookRequest {
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
-        .route("/v1/sessions", post(create_session_handler))
+        .route(
+            "/v1/sessions",
+            post(create_session_handler).get(list_sessions_handler),
+        )
+        .route("/v1/sessions/:session_id", get(get_session_handler))
+        .route(
+            "/v1/sessions/:session_id/runs",
+            get(list_session_runs_handler),
+        )
         .route("/v1/runs", post(create_run_handler))
         .route("/v1/runs/:run_id", get(get_run_handler))
+        .route("/v1/runs/:run_id/cancel", post(cancel_run_handler))
+        .route("/v1/runs/:run_id/pause", post(pause_run_handler))
+        .route("/v1/runs/:run_id/resume", post(resume_run_handler))
+        .route("/v1/runs/:run_id/retry", post(retry_run_handler))
+        .route("/v1/runs/:run_id/clone", post(clone_run_handler))
         .route("/v1/runs/:run_id/trace", get(get_run_trace_handler))
         .route("/v1/runs/:run_id/stream", get(stream_run_handler))
-        .route("/v1/webhooks/endpoints", post(register_webhook_handler))
+        .route(
+            "/v1/webhooks/endpoints",
+            post(register_webhook_handler).get(list_webhooks_handler),
+        )
+        .route(
+            "/v1/webhooks/deliveries",
+            get(list_webhook_deliveries_handler),
+        )
+        .route(
+            "/v1/webhooks/deliveries/:delivery_id/retry",
+            post(retry_webhook_delivery_handler),
+        )
         .route("/v1/webhooks/test", post(test_webhook_handler))
         .with_state(state)
 }
@@ -120,6 +160,103 @@ async fn create_session_handler(
         StatusCode::CREATED,
         Json(serde_json::to_value(CreateSessionResponse { session_id }).unwrap()),
     )
+}
+
+async fn list_sessions_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    match state.orchestrator.list_sessions(limit).await {
+        Ok(sessions) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(sessions).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn get_session_handler(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let session_id = match Uuid::parse_str(session_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.get_session(session_id).await {
+        Ok(Some(summary)) => (StatusCode::OK, Json(serde_json::to_value(summary).unwrap())),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_session_runs_handler(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<ListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let session_id = match Uuid::parse_str(session_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+
+    match state
+        .orchestrator
+        .list_session_runs(session_id, limit)
+        .await
+    {
+        Ok(runs) => (StatusCode::OK, Json(serde_json::to_value(runs).unwrap())),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
 }
 
 async fn create_run_handler(
@@ -189,6 +326,186 @@ async fn get_run_handler(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "run not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn cancel_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    match state.orchestrator.cancel_run(run_id).await {
+        Ok(cancelled) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "cancel_requested": cancelled })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn pause_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    match state.orchestrator.pause_run(run_id).await {
+        Ok(paused) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "paused": paused })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn resume_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    match state.orchestrator.resume_run(run_id).await {
+        Ok(resumed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "resumed": resumed })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn retry_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    match state.orchestrator.retry_run(run_id).await {
+        Ok(sub) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(sub).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn clone_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let req = if body.is_empty() {
+        CloneRunRequest { session_id: None }
+    } else {
+        match serde_json::from_slice::<CloneRunRequest>(body.as_ref()) {
+            Ok(v) => v,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": err.to_string()})),
+                );
+            }
+        }
+    };
+
+    match state.orchestrator.clone_run(run_id, req.session_id).await {
+        Ok(sub) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(sub).unwrap()),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -375,6 +692,94 @@ async fn register_webhook_handler(
         Ok(endpoint) => (
             StatusCode::CREATED,
             Json(serde_json::to_value(endpoint).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_webhooks_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    match state.orchestrator.list_webhooks().await {
+        Ok(endpoints) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(endpoints).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_webhook_deliveries_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<DeliveryListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let dead_letter_only = query.dead_letter.unwrap_or(false);
+
+    match state
+        .orchestrator
+        .list_webhook_deliveries(dead_letter_only, limit)
+        .await
+    {
+        Ok(deliveries) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(deliveries).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn retry_webhook_delivery_handler(
+    State(state): State<ApiState>,
+    Path(delivery_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let delivery_id = match delivery_id.parse::<i64>() {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.retry_webhook_delivery(delivery_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "requeued"})),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,

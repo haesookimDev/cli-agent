@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::types::{
     MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionEvent, SessionEventType,
-    SessionSummary, WebhookEndpoint,
+    SessionSummary, WebhookDeliveryRecord, WebhookEndpoint,
 };
 
 pub use self::session_log::SessionLogger;
@@ -132,6 +132,10 @@ impl MemoryManager {
 
     pub async fn list_sessions(&self, limit: usize) -> anyhow::Result<Vec<SessionSummary>> {
         self.store.list_sessions(limit).await
+    }
+
+    pub async fn get_session(&self, session_id: Uuid) -> anyhow::Result<Option<SessionSummary>> {
+        self.store.get_session(session_id).await
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
@@ -261,6 +265,52 @@ impl MemoryManager {
 
     pub async fn list_webhooks(&self) -> anyhow::Result<Vec<WebhookEndpoint>> {
         self.store.list_webhooks().await
+    }
+
+    pub async fn insert_webhook_delivery(
+        &self,
+        endpoint_id: &str,
+        event: &str,
+        event_id: &str,
+        url: &str,
+        attempts: u32,
+        delivered: bool,
+        dead_letter: bool,
+        status_code: Option<u16>,
+        error: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<WebhookDeliveryRecord> {
+        self.store
+            .insert_webhook_delivery(
+                endpoint_id,
+                event,
+                event_id,
+                url,
+                attempts,
+                delivered,
+                dead_letter,
+                status_code,
+                error,
+                payload,
+            )
+            .await
+    }
+
+    pub async fn list_webhook_deliveries(
+        &self,
+        dead_letter_only: bool,
+        limit: usize,
+    ) -> anyhow::Result<Vec<WebhookDeliveryRecord>> {
+        self.store
+            .list_webhook_deliveries(dead_letter_only, limit)
+            .await
+    }
+
+    pub async fn get_webhook_delivery(
+        &self,
+        delivery_id: i64,
+    ) -> anyhow::Result<Option<WebhookDeliveryRecord>> {
+        self.store.get_webhook_delivery(delivery_id).await
     }
 
     pub async fn compact_session(&self, session_id: Uuid) -> anyhow::Result<()> {

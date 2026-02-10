@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -434,6 +436,75 @@ async fn handle_key(
                 }
             }
         }
+        KeyCode::Char('s') => {
+            if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
+                match orchestrator.cancel_run(run_id).await {
+                    Ok(true) => {
+                        state.set_status(format!("run cancelling: {}", short_uuid(run_id)));
+                        *immediate_refresh = true;
+                    }
+                    Ok(false) => state.set_status("run cancel ignored"),
+                    Err(err) => state.set_status(format!("cancel failed: {err}")),
+                }
+            }
+        }
+        KeyCode::Char('z') => {
+            if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
+                match orchestrator.pause_run(run_id).await {
+                    Ok(true) => {
+                        state.set_status(format!("run paused: {}", short_uuid(run_id)));
+                        *immediate_refresh = true;
+                    }
+                    Ok(false) => state.set_status("run pause ignored"),
+                    Err(err) => state.set_status(format!("pause failed: {err}")),
+                }
+            }
+        }
+        KeyCode::Char('u') => {
+            if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
+                match orchestrator.resume_run(run_id).await {
+                    Ok(true) => {
+                        state.set_status(format!("run resumed: {}", short_uuid(run_id)));
+                        *immediate_refresh = true;
+                    }
+                    Ok(false) => state.set_status("run resume ignored"),
+                    Err(err) => state.set_status(format!("resume failed: {err}")),
+                }
+            }
+        }
+        KeyCode::Char('t') => {
+            if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
+                match orchestrator.retry_run(run_id).await {
+                    Ok(sub) => {
+                        state.active_session = Some(sub.session_id);
+                        state.set_status(format!(
+                            "retry queued: {} -> {}",
+                            short_uuid(run_id),
+                            short_uuid(sub.run_id)
+                        ));
+                        *immediate_refresh = true;
+                    }
+                    Err(err) => state.set_status(format!("retry failed: {err}")),
+                }
+            }
+        }
+        KeyCode::Char('g') => {
+            if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
+                let target_session = state.active_or_selected_session_id();
+                match orchestrator.clone_run(run_id, target_session).await {
+                    Ok(sub) => {
+                        state.active_session = Some(sub.session_id);
+                        state.set_status(format!(
+                            "clone queued: {} -> {}",
+                            short_uuid(run_id),
+                            short_uuid(sub.run_id)
+                        ));
+                        *immediate_refresh = true;
+                    }
+                    Err(err) => state.set_status(format!("clone failed: {err}")),
+                }
+            }
+        }
         KeyCode::Char('v') => {
             if let Some(session_id) = state.active_or_selected_session_id() {
                 match orchestrator.replay_session(session_id).await {
@@ -512,6 +583,23 @@ async fn handle_key(
                 (state.settings.run_limit + 5).clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
             save_settings(settings_path, &state.settings)?;
             state.set_status(format!("run list limit: {}", state.settings.run_limit));
+            *immediate_refresh = true;
+        }
+        KeyCode::Char(',') => {
+            state.settings.session_limit = state
+                .settings
+                .session_limit
+                .saturating_sub(5)
+                .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+            save_settings(settings_path, &state.settings)?;
+            state.set_status(format!("session list limit: {}", state.settings.session_limit));
+            *immediate_refresh = true;
+        }
+        KeyCode::Char('.') => {
+            state.settings.session_limit =
+                (state.settings.session_limit + 5).clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+            save_settings(settings_path, &state.settings)?;
+            state.set_status(format!("session list limit: {}", state.settings.session_limit));
             *immediate_refresh = true;
         }
         KeyCode::Char('f') => {
@@ -757,6 +845,27 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
+            "Execution Timeline",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let timeline_width = area.width.saturating_sub(26).clamp(12, 36) as usize;
+        lines.extend(build_timeline_lines(trace, timeline_width, 6));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Action Mix",
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (action, count) in build_action_mix(trace, 4) {
+            lines.push(Line::from(format!("{action}: {count}")));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
             "Recent Actions",
             Style::default()
                 .fg(Color::Blue)
@@ -837,7 +946,10 @@ fn footer_lines(state: &TuiState) -> Vec<Line<'static>> {
                 "tab switch pane | i add task | enter set active | c continue | n new session | d delete | x clear active",
             ));
             lines.push(Line::from(
-                "1/2/3/4 profile | p cycle profile | [/ ] refresh | -/= run-limit | f follow-active | v replay | m compact | r refresh | q quit",
+                "s cancel run | z pause run | u resume run | t retry run | g clone run | v replay | m compact | r refresh | q quit",
+            ));
+            lines.push(Line::from(
+                "1/2/3/4 profile | p cycle | [/ ] refresh-ms | ,/. session-limit | -/= run-limit | f follow-active",
             ));
             if state.show_help {
                 lines.push(Line::from(
@@ -853,10 +965,135 @@ fn footer_lines(state: &TuiState) -> Vec<Line<'static>> {
 fn status_marker(status: &str) -> &'static str {
     match status {
         "running" => "[RUN]",
+        "cancelled" => "[CXL]",
         "succeeded" => "[OK ]",
         "failed" => "[ERR]",
         "skipped" => "[SKIP]",
         _ => "[WAIT]",
+    }
+}
+
+fn build_timeline_lines(trace: &RunTrace, width: usize, max_nodes: usize) -> Vec<Line<'static>> {
+    let mut nodes = trace.graph.nodes.clone();
+    nodes.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+
+    let now = Utc::now();
+    let starts = nodes
+        .iter()
+        .filter_map(|n| n.started_at)
+        .collect::<Vec<_>>();
+    if starts.is_empty() {
+        return vec![Line::from("timeline unavailable (no node runtime yet)")];
+    }
+
+    let window_start = starts.into_iter().min().unwrap_or(now);
+    let mut window_end = window_start;
+    for node in &nodes {
+        let Some(started_at) = node.started_at else {
+            continue;
+        };
+        let estimated_end = if let Some(finished_at) = node.finished_at {
+            finished_at
+        } else if let Some(duration_ms) = node.duration_ms {
+            let bounded = duration_ms.min(i64::MAX as u128) as i64;
+            started_at + chrono::Duration::milliseconds(bounded)
+        } else {
+            now
+        };
+        if estimated_end > window_end {
+            window_end = estimated_end;
+        }
+    }
+
+    if window_end <= window_start {
+        window_end = window_start + chrono::Duration::milliseconds(1);
+    }
+
+    let total_ms = window_end
+        .signed_duration_since(window_start)
+        .num_milliseconds()
+        .max(1) as f64;
+
+    let mut lines = Vec::new();
+    for node in nodes.iter().take(max_nodes) {
+        let name = compact_json(node.node_id.as_str(), 12);
+        let mut lane = vec!['.'; width];
+
+        if let Some(started_at) = node.started_at {
+            let end_at = node.finished_at.unwrap_or(now);
+            let mut start_idx = (((started_at
+                .signed_duration_since(window_start)
+                .num_milliseconds()
+                .max(0) as f64)
+                / total_ms)
+                * (width.saturating_sub(1) as f64))
+                .round() as usize;
+            let mut end_idx = (((end_at
+                .signed_duration_since(window_start)
+                .num_milliseconds()
+                .max(0) as f64)
+                / total_ms)
+                * (width.saturating_sub(1) as f64))
+                .round() as usize;
+
+            if start_idx >= width {
+                start_idx = width.saturating_sub(1);
+            }
+            if end_idx >= width {
+                end_idx = width.saturating_sub(1);
+            }
+            if end_idx < start_idx {
+                end_idx = start_idx;
+            }
+
+            let marker = lane_marker(node.status.as_str());
+            for slot in lane.iter_mut().take(end_idx + 1).skip(start_idx) {
+                *slot = marker;
+            }
+        }
+
+        let duration = node.duration_ms.unwrap_or(0);
+        lines.push(Line::from(format!(
+            "{} {:<12} |{}| {}ms",
+            status_marker(node.status.as_str()),
+            name,
+            lane.into_iter().collect::<String>(),
+            duration
+        )));
+    }
+
+    if nodes.len() > max_nodes {
+        lines.push(Line::from(format!("... +{}", nodes.len() - max_nodes)));
+    }
+
+    lines
+}
+
+fn build_action_mix(trace: &RunTrace, top_n: usize) -> Vec<(String, usize)> {
+    let mut counts = HashMap::<String, usize>::new();
+    for event in &trace.events {
+        let label = event.action.to_string();
+        let next = counts.get(&label).copied().unwrap_or(0) + 1;
+        counts.insert(label, next);
+    }
+
+    let mut items = counts.into_iter().collect::<Vec<_>>();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items.into_iter().take(top_n).collect()
+}
+
+fn lane_marker(status: &str) -> char {
+    match status {
+        "succeeded" => '=',
+        "failed" => '!',
+        "running" => '>',
+        "cancelled" => 'x',
+        "skipped" => '-',
+        _ => '.',
     }
 }
 
