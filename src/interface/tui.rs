@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::orchestrator::Orchestrator;
+use crate::router::ProviderKind;
 use crate::types::{RunRecord, RunRequest, RunTrace, SessionSummary, TaskProfile};
 
 const MIN_REFRESH_MS: u64 = 500;
@@ -50,6 +51,10 @@ struct TuiSettings {
     session_limit: usize,
     run_limit: usize,
     follow_active_session: bool,
+    #[serde(default)]
+    disabled_providers: Vec<String>,
+    #[serde(default)]
+    disabled_models: Vec<String>,
 }
 
 impl Default for TuiSettings {
@@ -60,6 +65,8 @@ impl Default for TuiSettings {
             session_limit: 50,
             run_limit: 60,
             follow_active_session: true,
+            disabled_providers: Vec::new(),
+            disabled_models: Vec::new(),
         }
     }
 }
@@ -69,8 +76,17 @@ impl TuiSettings {
         self.auto_refresh_ms = self.auto_refresh_ms.clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
         self.session_limit = self.session_limit.clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
         self.run_limit = self.run_limit.clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+        self.disabled_providers
+            .retain(|p| parse_provider_kind(p).is_some());
+        self.disabled_models.retain(|m| !m.is_empty());
         self
     }
+}
+
+#[derive(Debug, Clone)]
+struct ModelInfo {
+    model_id: String,
+    display_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +109,7 @@ struct TuiState {
     trace: Option<RunTrace>,
     details_scroll: u16,
     settings_selected: usize,
+    model_list: Vec<ModelInfo>,
     show_help: bool,
     should_quit: bool,
 }
@@ -118,6 +135,7 @@ impl TuiState {
             trace: None,
             details_scroll: 0,
             settings_selected: 0,
+            model_list: Vec::new(),
             show_help: false,
             should_quit: false,
         }
@@ -222,6 +240,39 @@ pub async fn run_tui(orchestrator: Orchestrator, settings_path: PathBuf) -> anyh
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::new(load_settings(settings_path.as_path())?);
+
+    // Build model list from catalog
+    state.model_list = orchestrator
+        .router()
+        .catalog()
+        .iter()
+        .map(|m| {
+            let display_label = match m.provider {
+                ProviderKind::OpenAi => "OpenAI",
+                ProviderKind::Anthropic => "Anthropic",
+                ProviderKind::Gemini => "Gemini",
+                ProviderKind::Vllm => "vLLM",
+                ProviderKind::Mock => "Mock",
+            };
+            ModelInfo {
+                model_id: m.model_id.clone(),
+                display_name: format!("{} ({})", display_label, m.model_id),
+            }
+        })
+        .collect();
+
+    // Restore disabled providers from saved settings
+    for name in &state.settings.disabled_providers {
+        if let Some(provider) = parse_provider_kind(name) {
+            orchestrator.router().set_provider_disabled(provider, true);
+        }
+    }
+
+    // Restore disabled models from saved settings
+    for model_id in &state.settings.disabled_models {
+        orchestrator.router().set_model_disabled(model_id, true);
+    }
+
     let mut last_refresh = Instant::now() - Duration::from_secs(30);
 
     let result = async {
@@ -448,18 +499,27 @@ async fn handle_key(
             return Ok(());
         }
         InputMode::Settings => {
-            const SETTINGS_COUNT: usize = 5;
+            let model_count = state.model_list.len();
+            // 0..4 = settings, 5 = separator, 6..6+model_count-1 = models
+            let separator_idx = 5;
+            let settings_max = separator_idx + model_count; // last selectable index
+
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     state.mode = InputMode::Normal;
                     state.set_status("settings closed");
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    state.settings_selected = state.settings_selected.saturating_sub(1);
+                    let prev = state.settings_selected.saturating_sub(1);
+                    // skip separator
+                    let prev = if prev == separator_idx { separator_idx - 1 } else { prev };
+                    state.settings_selected = prev;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    state.settings_selected =
-                        (state.settings_selected + 1).min(SETTINGS_COUNT - 1);
+                    let next = state.settings_selected + 1;
+                    // skip separator
+                    let next = if next == separator_idx { separator_idx + 1 } else { next };
+                    state.settings_selected = next.min(settings_max);
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
                     match state.settings_selected {
@@ -485,6 +545,9 @@ async fn handle_key(
                         4 => {
                             state.settings.follow_active_session =
                                 !state.settings.follow_active_session;
+                        }
+                        idx if idx > separator_idx => {
+                            toggle_model(state, orchestrator, idx - separator_idx - 1);
                         }
                         _ => {}
                     }
@@ -516,12 +579,25 @@ async fn handle_key(
                             state.settings.follow_active_session =
                                 !state.settings.follow_active_session;
                         }
+                        idx if idx > separator_idx => {
+                            toggle_model(state, orchestrator, idx - separator_idx - 1);
+                        }
                         _ => {}
                     }
                     save_settings(settings_path, &state.settings)?;
                     *immediate_refresh = true;
                 }
                 KeyCode::Char('R') => {
+                    // Re-enable all previously disabled providers
+                    for name in &state.settings.disabled_providers {
+                        if let Some(provider) = parse_provider_kind(name) {
+                            orchestrator.router().set_provider_disabled(provider, false);
+                        }
+                    }
+                    // Re-enable all previously disabled models
+                    for model_id in &state.settings.disabled_models {
+                        orchestrator.router().set_model_disabled(model_id, false);
+                    }
                     state.settings = TuiSettings::default();
                     save_settings(settings_path, &state.settings)?;
                     state.set_status("settings reset to defaults");
@@ -1621,7 +1697,7 @@ fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
 }
 
 fn draw_settings_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
-    let popup = centered_rect(52, 50, frame.area());
+    let popup = centered_rect(58, 72, frame.area());
     frame.render_widget(Clear, popup);
 
     let defaults = TuiSettings::default();
@@ -1629,14 +1705,16 @@ fn draw_settings_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let desc_style = Style::default().fg(Color::DarkGray);
+    let separator_idx = 5;
 
+    // --- General settings rows ---
     struct SettingRow {
         label: &'static str,
         value: String,
         is_default: bool,
     }
 
-    let rows = [
+    let general_rows = [
         SettingRow {
             label: "Profile",
             value: format!("{}", state.settings.default_profile),
@@ -1667,7 +1745,7 @@ fn draw_settings_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     let mut lines = Vec::<Line>::new();
     lines.push(Line::from(""));
 
-    for (i, row) in rows.iter().enumerate() {
+    for (i, row) in general_rows.iter().enumerate() {
         let is_selected = i == state.settings_selected;
         let value_style = if !row.is_default {
             Style::default()
@@ -1698,22 +1776,90 @@ fn draw_settings_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         };
 
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<20}", row.label), label_style),
+            Span::styled(format!("  {:<22}", row.label), label_style),
             left_arrow,
             Span::styled(format!("{:<14}", row.value), value_style),
             right_arrow,
         ]));
     }
 
+    // --- Separator ---
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", desc_style),
+        Span::styled(
+            "  \u{2500}\u{2500} Models \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // --- Model toggle rows ---
+    for (i, info) in state.model_list.iter().enumerate() {
+        let row_idx = separator_idx + 1 + i;
+        let is_selected = row_idx == state.settings_selected;
+        let is_disabled = state
+            .settings
+            .disabled_models
+            .contains(&info.model_id);
+        let (status_text, status_style) = if is_disabled {
+            (
+                "OFF",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                "ON ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+
+        let (left_arrow, right_arrow) = if is_selected {
+            (
+                Span::styled(" \u{25C0} ", key_style),
+                Span::styled(" \u{25B6}", key_style),
+            )
+        } else {
+            (
+                Span::styled("   ", Style::default()),
+                Span::styled("  ", Style::default()),
+            )
+        };
+
+        let label_style = if is_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_disabled {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<22}", info.display_name), label_style),
+            left_arrow,
+            Span::styled(status_text.to_string(), status_style),
+            Span::styled(format!("{:<11}", ""), Style::default()),
+            right_arrow,
+        ]));
+    }
+
+    // --- Footer ---
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            desc_style,
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  j/k", key_style),
         Span::styled(" navigate  ", desc_style),
         Span::styled("h/l", key_style),
-        Span::styled(" change  ", desc_style),
+        Span::styled(" toggle  ", desc_style),
         Span::styled("R", key_style),
         Span::styled(" reset  ", desc_style),
         Span::styled("Esc", key_style),
@@ -2013,6 +2159,33 @@ fn cycle_profile_back(current: TaskProfile) -> TaskProfile {
         TaskProfile::Extraction => TaskProfile::Planning,
         TaskProfile::Coding => TaskProfile::Extraction,
         TaskProfile::General => TaskProfile::Coding,
+    }
+}
+
+fn toggle_model(state: &mut TuiState, orchestrator: &Orchestrator, model_idx: usize) {
+    if let Some(info) = state.model_list.get(model_idx) {
+        let mid = &info.model_id;
+        let currently_disabled = state.settings.disabled_models.contains(mid);
+        if currently_disabled {
+            state.settings.disabled_models.retain(|m| m != mid);
+            orchestrator.router().set_model_disabled(mid, false);
+            state.set_status(format!("{} enabled", info.display_name));
+        } else {
+            state.settings.disabled_models.push(mid.clone());
+            orchestrator.router().set_model_disabled(mid, true);
+            state.set_status(format!("{} disabled", info.display_name));
+        }
+    }
+}
+
+fn parse_provider_kind(s: &str) -> Option<ProviderKind> {
+    match s {
+        "openai" => Some(ProviderKind::OpenAi),
+        "anthropic" => Some(ProviderKind::Anthropic),
+        "gemini" => Some(ProviderKind::Gemini),
+        "vllm" => Some(ProviderKind::Vllm),
+        "mock" => Some(ProviderKind::Mock),
+        _ => None,
     }
 }
 

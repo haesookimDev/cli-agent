@@ -143,8 +143,20 @@ impl ModelRouter {
         }
     }
 
+    pub fn catalog(&self) -> &[ModelSpec] {
+        &self.catalog
+    }
+
     pub fn set_provider_disabled(&self, provider: ProviderKind, disabled: bool) {
         self.client.set_provider_disabled(provider, disabled);
+    }
+
+    pub fn set_model_disabled(&self, model_id: &str, disabled: bool) {
+        self.client.set_model_disabled(model_id, disabled);
+    }
+
+    pub fn is_model_disabled(&self, model_id: &str) -> bool {
+        self.client.is_model_disabled(model_id)
     }
 
     pub fn select_model(
@@ -155,6 +167,9 @@ impl ModelRouter {
         let mut scored = Vec::<(ModelSpec, f64)>::new();
         for model in self.catalog.iter() {
             if model.context_window < constraints.min_context {
+                continue;
+            }
+            if self.client.is_model_disabled(&model.model_id) {
                 continue;
             }
             let score = score_model(model, constraints);
@@ -231,6 +246,7 @@ pub struct ProviderClient {
     anthropic_api_key: Option<String>,
     gemini_api_key: Option<String>,
     disabled: Arc<DashSet<ProviderKind>>,
+    disabled_models: Arc<DashSet<String>>,
 }
 
 impl ProviderClient {
@@ -247,7 +263,20 @@ impl ProviderClient {
             anthropic_api_key,
             gemini_api_key,
             disabled: Arc::new(DashSet::new()),
+            disabled_models: Arc::new(DashSet::new()),
         }
+    }
+
+    pub fn set_model_disabled(&self, model_id: &str, disabled: bool) {
+        if disabled {
+            self.disabled_models.insert(model_id.to_string());
+        } else {
+            self.disabled_models.remove(model_id);
+        }
+    }
+
+    pub fn is_model_disabled(&self, model_id: &str) -> bool {
+        self.disabled_models.contains(model_id)
     }
 
     pub fn set_provider_disabled(&self, provider: ProviderKind, disabled: bool) {
@@ -261,6 +290,9 @@ impl ProviderClient {
     pub async fn generate(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
         if self.disabled.contains(&model.provider) {
             return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
+        }
+        if self.disabled_models.contains(&model.model_id) {
+            return Err(anyhow::anyhow!("model {} is disabled", model.model_id));
         }
 
         match model.provider {
@@ -452,9 +484,10 @@ fn mock_inference(model: &ModelSpec, prompt: &str) -> String {
 
 fn default_catalog() -> Vec<ModelSpec> {
     vec![
+        // --- OpenAI ---
         ModelSpec {
             provider: ProviderKind::OpenAi,
-            model_id: "gpt-4.1".to_string(),
+            model_id: "gpt-5.2".to_string(),
             quality: 0.95,
             latency: 3200.0,
             cost: 0.07,
@@ -463,25 +496,78 @@ fn default_catalog() -> Vec<ModelSpec> {
             local_only: false,
         },
         ModelSpec {
+            provider: ProviderKind::OpenAi,
+            model_id: "gpt-5.1".to_string(),
+            quality: 0.82,
+            latency: 1400.0,
+            cost: 0.015,
+            context_window: 128_000,
+            tool_call_accuracy: 0.85,
+            local_only: false,
+        },
+        ModelSpec {
+            provider: ProviderKind::OpenAi,
+            model_id: "gpt-5-mini".to_string(),
+            quality: 0.88,
+            latency: 4500.0,
+            cost: 0.04,
+            context_window: 200_000,
+            tool_call_accuracy: 0.80,
+            local_only: false,
+        },
+        // --- Anthropic ---
+        ModelSpec {
             provider: ProviderKind::Anthropic,
-            model_id: "claude-sonnet".to_string(),
-            quality: 0.92,
+            model_id: "claude-sonnet-4-5-20250929".to_string(),
+            quality: 0.94,
             latency: 2800.0,
             cost: 0.06,
             context_window: 200_000,
+            tool_call_accuracy: 0.92,
+            local_only: false,
+        },
+        ModelSpec {
+            provider: ProviderKind::Anthropic,
+            model_id: "claude-opus-4-5-20251101".to_string(),
+            quality: 0.80,
+            latency: 1200.0,
+            cost: 0.005,
+            context_window: 200_000,
+            tool_call_accuracy: 0.82,
+            local_only: false,
+        },
+        ModelSpec {
+            provider: ProviderKind::Anthropic,
+            model_id: "claude-opus-4-6".to_string(),
+            quality: 0.97,
+            latency: 5000.0,
+            cost: 0.12,
+            context_window: 200_000,
+            tool_call_accuracy: 0.95,
+            local_only: false,
+        },
+        // --- Gemini ---
+        ModelSpec {
+            provider: ProviderKind::Gemini,
+            model_id: "gemini-2.5-pro".to_string(),
+            quality: 0.93,
+            latency: 2400.0,
+            cost: 0.05,
+            context_window: 1_000_000,
             tool_call_accuracy: 0.90,
             local_only: false,
         },
         ModelSpec {
             provider: ProviderKind::Gemini,
-            model_id: "gemini-2.0-pro".to_string(),
-            quality: 0.90,
-            latency: 2400.0,
-            cost: 0.05,
-            context_window: 128_000,
-            tool_call_accuracy: 0.88,
+            model_id: "gemini-2.5-flash".to_string(),
+            quality: 0.82,
+            latency: 800.0,
+            cost: 0.008,
+            context_window: 1_000_000,
+            tool_call_accuracy: 0.78,
             local_only: false,
         },
+        // --- vLLM (local) ---
         ModelSpec {
             provider: ProviderKind::Vllm,
             model_id: "qwen2.5:14b".to_string(),
@@ -492,6 +578,17 @@ fn default_catalog() -> Vec<ModelSpec> {
             tool_call_accuracy: 0.72,
             local_only: true,
         },
+        ModelSpec {
+            provider: ProviderKind::Vllm,
+            model_id: "qwen2.5:7b".to_string(),
+            quality: 0.68,
+            latency: 900.0,
+            cost: 0.002,
+            context_window: 32_000,
+            tool_call_accuracy: 0.60,
+            local_only: true,
+        },
+        // --- Mock ---
         ModelSpec {
             provider: ProviderKind::Mock,
             model_id: "mock-general".to_string(),

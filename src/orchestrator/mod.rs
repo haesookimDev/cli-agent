@@ -68,6 +68,10 @@ impl Orchestrator {
         }
     }
 
+    pub fn router(&self) -> &Arc<ModelRouter> {
+        &self.router
+    }
+
     pub async fn submit_run(&self, req: RunRequest) -> anyhow::Result<RunSubmission> {
         let run_id = Uuid::new_v4();
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
