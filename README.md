@@ -48,8 +48,10 @@ cargo run -- memory vacuum
 - 세션 삭제: 세션 선택 후 `d` -> `y` 확인
 - 세션 요약(compact): `m`
 - 세션 리플레이 미리보기: `v`
+- 실행 제어: `s(cancel)`, `z(pause)`, `u(resume)`, `t(retry)`, `g(clone)`
 - 프로필 변경: `1(planning)`, `2(extraction)`, `3(coding)`, `4(general)`, `p(순환)`
 - 자동 새로고침 간격: `[` 감소, `]` 증가
+- 세션 목록 크기: `,` 감소, `.` 증가
 - 실행 목록 크기: `-` 감소, `=` 증가
 - 활성 세션 필터 토글: `f`
 - 수동 새로고침: `r`
@@ -59,7 +61,9 @@ TUI 사용자 설정은 `data/tui-settings.json`에 저장됩니다.
 
 TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시됩니다.
 - `Behavior Graph`: 노드 상태(`WAIT/RUN/OK/ERR/SKIP`), 의존성, 선택 모델
-- `Recent Actions`: 런타임 행동 이벤트 시퀀스(`node_started`, `model_selected`, `dynamic_node_added` 등)
+- `Execution Timeline`: 노드 실행 구간을 시간축 lane으로 표시
+- `Action Mix`: 행동 타입 분포 카운트
+- `Recent Actions`: 최신 런타임 행동 이벤트 시퀀스(`node_started`, `model_selected`, `dynamic_node_added` 등)
 
 ## REST 엔드포인트
 - `POST /v1/sessions`
@@ -69,16 +73,21 @@ TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시
 - `POST /v1/runs`
 - `GET /v1/runs/{run_id}`
 - `POST /v1/runs/{run_id}/cancel`
+- `POST /v1/runs/{run_id}/pause`
+- `POST /v1/runs/{run_id}/resume`
 - `POST /v1/runs/{run_id}/retry`
 - `POST /v1/runs/{run_id}/clone`
+- `GET /v1/runs/{run_id}/behavior`
 - `GET /v1/runs/{run_id}/trace`
 - `GET /v1/runs/{run_id}/stream` (SSE)
 - `POST /v1/webhooks/endpoints`
+- `GET /v1/webhooks/endpoints`
 - `GET /v1/webhooks/deliveries`
 - `POST /v1/webhooks/deliveries/{delivery_id}/retry`
 - `POST /v1/webhooks/test`
 
 `trace`는 동작 이벤트와 그래프 스냅샷을 반환합니다.
+`behavior`는 시각화 친화적인 실행 lane/오프셋/행동 분포를 반환합니다.
 `stream`은 실시간 행동 이벤트를 SSE로 전송합니다.
 `/v1/webhooks/deliveries?dead_letter=true`로 DLQ 대상 전달 이력을 조회할 수 있습니다.
 
@@ -91,6 +100,7 @@ TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시
 - `queued`
 - `cancelling`
 - `cancelled`
+- `paused`
 - `running`
 - `succeeded`
 - `failed`

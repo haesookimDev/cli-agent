@@ -326,3 +326,34 @@ pub struct WebhookDeliveryRecord {
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunBehaviorLane {
+    pub node_id: String,
+    pub role: Option<AgentRole>,
+    pub status: String,
+    pub dependencies: Vec<String>,
+    pub start_offset_ms: Option<i64>,
+    pub end_offset_ms: Option<i64>,
+    pub duration_ms: Option<u128>,
+    pub retries: u32,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunBehaviorActionCount {
+    pub action: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunBehaviorView {
+    pub run_id: Uuid,
+    pub session_id: Uuid,
+    pub status: Option<RunStatus>,
+    pub window_start: Option<DateTime<Utc>>,
+    pub window_end: Option<DateTime<Utc>>,
+    pub active_nodes: Vec<String>,
+    pub lanes: Vec<RunBehaviorLane>,
+    pub action_mix: Vec<RunBehaviorActionCount>,
+}

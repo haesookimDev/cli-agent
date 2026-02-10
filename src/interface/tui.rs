@@ -592,14 +592,20 @@ async fn handle_key(
                 .saturating_sub(5)
                 .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
             save_settings(settings_path, &state.settings)?;
-            state.set_status(format!("session list limit: {}", state.settings.session_limit));
+            state.set_status(format!(
+                "session list limit: {}",
+                state.settings.session_limit
+            ));
             *immediate_refresh = true;
         }
         KeyCode::Char('.') => {
             state.settings.session_limit =
                 (state.settings.session_limit + 5).clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
             save_settings(settings_path, &state.settings)?;
-            state.set_status(format!("session list limit: {}", state.settings.session_limit));
+            state.set_status(format!(
+                "session list limit: {}",
+                state.settings.session_limit
+            ));
             *immediate_refresh = true;
         }
         KeyCode::Char('f') => {

@@ -97,6 +97,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/runs/:run_id/resume", post(resume_run_handler))
         .route("/v1/runs/:run_id/retry", post(retry_run_handler))
         .route("/v1/runs/:run_id/clone", post(clone_run_handler))
+        .route("/v1/runs/:run_id/behavior", get(get_run_behavior_handler))
         .route("/v1/runs/:run_id/trace", get(get_run_trace_handler))
         .route("/v1/runs/:run_id/stream", get(stream_run_handler))
         .route(
@@ -540,6 +541,46 @@ async fn get_run_trace_handler(
     let limit = query.limit.unwrap_or(5_000).clamp(1, 20_000);
     match state.orchestrator.get_run_trace(run_id, limit).await {
         Ok(Some(trace)) => (StatusCode::OK, Json(serde_json::to_value(trace).unwrap())),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "run not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn get_run_behavior_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    Query(query): Query<TraceQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    let limit = query.limit.unwrap_or(2_000).clamp(1, 20_000);
+
+    match state.orchestrator.get_run_behavior(run_id, limit).await {
+        Ok(Some(behavior)) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(behavior).unwrap()),
+        ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "run not found"})),

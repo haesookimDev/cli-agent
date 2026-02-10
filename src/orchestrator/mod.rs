@@ -19,9 +19,10 @@ use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
 };
 use crate::types::{
-    AgentExecutionRecord, AgentRole, NodeTraceState, RunActionEvent, RunActionType, RunRecord,
-    RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
-    TraceEdge, WebhookDeliveryRecord, WebhookEndpoint,
+    AgentExecutionRecord, AgentRole, NodeTraceState, RunActionEvent, RunActionType,
+    RunBehaviorActionCount, RunBehaviorLane, RunBehaviorView, RunRecord, RunRequest, RunStatus,
+    RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType, TraceEdge,
+    WebhookDeliveryRecord, WebhookEndpoint,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -192,6 +193,17 @@ impl Orchestrator {
             events,
             graph,
         }))
+    }
+
+    pub async fn get_run_behavior(
+        &self,
+        run_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Option<RunBehaviorView>> {
+        let Some(trace) = self.get_run_trace(run_id, limit).await? else {
+            return Ok(None);
+        };
+        Ok(Some(build_behavior_view(&trace)))
     }
 
     pub async fn list_session_runs(
@@ -1539,6 +1551,138 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
     }
 }
 
+fn build_behavior_view(trace: &RunTrace) -> RunBehaviorView {
+    let now = Utc::now();
+    let mut window_start = trace.events.first().map(|e| e.timestamp);
+    let mut window_end = trace.events.last().map(|e| e.timestamp);
+
+    for node in &trace.graph.nodes {
+        if let Some(started_at) = node.started_at {
+            window_start = Some(match window_start {
+                Some(current) => current.min(started_at),
+                None => started_at,
+            });
+        }
+
+        if let Some(estimated_end) = estimate_node_end(node, now) {
+            window_end = Some(match window_end {
+                Some(current) => current.max(estimated_end),
+                None => estimated_end,
+            });
+        }
+    }
+
+    if let (Some(start), Some(end)) = (window_start, window_end) {
+        if end < start {
+            window_end = Some(start);
+        }
+    }
+
+    let mut lanes = trace
+        .graph
+        .nodes
+        .iter()
+        .map(|node| {
+            let start_offset_ms = match (window_start, node.started_at) {
+                (Some(start), Some(node_start)) => Some(
+                    node_start
+                        .signed_duration_since(start)
+                        .num_milliseconds()
+                        .max(0),
+                ),
+                _ => None,
+            };
+
+            let end_offset_ms = match (window_start, estimate_node_end(node, now)) {
+                (Some(start), Some(node_end)) => Some(
+                    node_end
+                        .signed_duration_since(start)
+                        .num_milliseconds()
+                        .max(0),
+                ),
+                _ => None,
+            };
+
+            let duration_ms = node
+                .duration_ms
+                .or_else(|| match (start_offset_ms, end_offset_ms) {
+                    (Some(start_ms), Some(end_ms)) if end_ms >= start_ms => {
+                        Some((end_ms - start_ms) as u128)
+                    }
+                    _ => None,
+                });
+
+            RunBehaviorLane {
+                node_id: node.node_id.clone(),
+                role: node.role,
+                status: node.status.clone(),
+                dependencies: node.dependencies.clone(),
+                start_offset_ms,
+                end_offset_ms,
+                duration_ms,
+                retries: node.retries,
+                model: node.model.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    lanes.sort_by(|a, b| {
+        a.start_offset_ms
+            .is_none()
+            .cmp(&b.start_offset_ms.is_none())
+            .then_with(|| {
+                a.start_offset_ms
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.start_offset_ms.unwrap_or(i64::MAX))
+            })
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+
+    let mut action_counts = HashMap::<String, usize>::new();
+    for event in &trace.events {
+        let key = event.action.to_string();
+        let next = action_counts.get(key.as_str()).copied().unwrap_or(0) + 1;
+        action_counts.insert(key, next);
+    }
+
+    let mut action_mix = action_counts
+        .into_iter()
+        .map(|(action, count)| RunBehaviorActionCount { action, count })
+        .collect::<Vec<_>>();
+    action_mix.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.action.cmp(&b.action)));
+
+    RunBehaviorView {
+        run_id: trace.run_id,
+        session_id: trace.session_id,
+        status: trace.status,
+        window_start,
+        window_end,
+        active_nodes: trace.graph.active_nodes.clone(),
+        lanes,
+        action_mix,
+    }
+}
+
+fn estimate_node_end(
+    node: &NodeTraceState,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    if let Some(finished_at) = node.finished_at {
+        return Some(finished_at);
+    }
+
+    if let (Some(started_at), Some(duration_ms)) = (node.started_at, node.duration_ms) {
+        let bounded = duration_ms.min(i64::MAX as u128) as i64;
+        return Some(started_at + chrono::Duration::milliseconds(bounded));
+    }
+
+    if node.status == "running" {
+        return node.started_at.or(Some(now));
+    }
+
+    None
+}
+
 fn parse_agent_role(value: &str) -> Option<AgentRole> {
     match value {
         "planner" => Some(AgentRole::Planner),
@@ -1700,5 +1844,138 @@ mod tests {
             .expect("code node should exist");
         assert_eq!(code.status, "succeeded");
         assert_eq!(code.model.as_deref(), Some("mock:model"));
+    }
+
+    #[test]
+    fn build_behavior_view_derives_lane_offsets_and_action_mix() {
+        let run_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut run = RunRecord::new_queued(
+            run_id,
+            session_id,
+            "behavior test".to_string(),
+            crate::types::TaskProfile::General,
+        );
+        run.status = RunStatus::Failed;
+
+        let t0 = Utc::now();
+        let events = vec![
+            RunActionEvent {
+                seq: 1,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: t0,
+                action: RunActionType::GraphInitialized,
+                actor_type: Some("orchestrator".to_string()),
+                actor_id: Some("graph".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({
+                    "nodes": [
+                        {"id":"plan","role":"planner","dependencies":[]},
+                        {"id":"code","role":"coder","dependencies":["plan"]}
+                    ]
+                }),
+            },
+            RunActionEvent {
+                seq: 2,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: t0 + chrono::Duration::milliseconds(10),
+                action: RunActionType::NodeStarted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("plan".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"plan","role":"planner"}),
+            },
+            RunActionEvent {
+                seq: 3,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: t0 + chrono::Duration::milliseconds(25),
+                action: RunActionType::NodeCompleted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("plan".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"plan","role":"planner"}),
+            },
+            RunActionEvent {
+                seq: 4,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: t0 + chrono::Duration::milliseconds(30),
+                action: RunActionType::NodeStarted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("code".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"code","role":"coder"}),
+            },
+            RunActionEvent {
+                seq: 5,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: t0 + chrono::Duration::milliseconds(50),
+                action: RunActionType::NodeFailed,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("code".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"code","role":"coder","error":"boom"}),
+            },
+        ];
+
+        let trace = RunTrace {
+            run_id,
+            session_id,
+            status: Some(RunStatus::Failed),
+            events: events.clone(),
+            graph: build_trace_graph(&run, events.as_slice()),
+        };
+
+        let view = build_behavior_view(&trace);
+        assert_eq!(view.run_id, run_id);
+        assert_eq!(view.session_id, session_id);
+        assert_eq!(view.lanes.len(), 2);
+        assert!(view.window_start.is_some());
+        assert!(view.window_end.is_some());
+
+        let plan_lane = view
+            .lanes
+            .iter()
+            .find(|l| l.node_id == "plan")
+            .expect("plan lane should exist");
+        let code_lane = view
+            .lanes
+            .iter()
+            .find(|l| l.node_id == "code")
+            .expect("code lane should exist");
+
+        assert!(
+            plan_lane.start_offset_ms.unwrap_or_default()
+                <= code_lane.start_offset_ms.unwrap_or_default()
+        );
+        assert!(
+            code_lane.end_offset_ms.unwrap_or_default()
+                >= code_lane.start_offset_ms.unwrap_or_default()
+        );
+
+        let started_count = view
+            .action_mix
+            .iter()
+            .find(|item| item.action == "node_started")
+            .map(|item| item.count)
+            .unwrap_or_default();
+        let failed_count = view
+            .action_mix
+            .iter()
+            .find(|item| item.action == "node_failed")
+            .map(|item| item.count)
+            .unwrap_or_default();
+
+        assert_eq!(started_count, 2);
+        assert_eq!(failed_count, 1);
     }
 }
