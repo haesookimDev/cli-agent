@@ -1909,7 +1909,7 @@ mod tests {
         let orchestrator = Orchestrator::new(
             AgentRuntime::new(4),
             AgentRegistry::builtin(),
-            Arc::new(ModelRouter::new("http://127.0.0.1:11434")),
+            Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None)),
             memory,
             Arc::new(ContextManager::new(8_000)),
             webhook,

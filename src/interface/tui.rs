@@ -40,6 +40,7 @@ enum InputMode {
     TaskInput,
     Filter(FocusPane),
     ConfirmDelete(Uuid),
+    Settings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +92,7 @@ struct TuiState {
     replay_preview: Vec<String>,
     trace: Option<RunTrace>,
     details_scroll: u16,
+    settings_selected: usize,
     show_help: bool,
     should_quit: bool,
 }
@@ -115,6 +117,7 @@ impl TuiState {
             replay_preview: Vec::new(),
             trace: None,
             details_scroll: 0,
+            settings_selected: 0,
             show_help: false,
             should_quit: false,
         }
@@ -444,6 +447,90 @@ async fn handle_key(
             }
             return Ok(());
         }
+        InputMode::Settings => {
+            const SETTINGS_COUNT: usize = 5;
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    state.mode = InputMode::Normal;
+                    state.set_status("settings closed");
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    state.settings_selected = state.settings_selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    state.settings_selected =
+                        (state.settings_selected + 1).min(SETTINGS_COUNT - 1);
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    match state.settings_selected {
+                        0 => {
+                            state.settings.default_profile =
+                                cycle_profile_back(state.settings.default_profile);
+                        }
+                        1 => {
+                            state.settings.auto_refresh_ms =
+                                state.settings.auto_refresh_ms.saturating_sub(250)
+                                    .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
+                        }
+                        2 => {
+                            state.settings.session_limit =
+                                state.settings.session_limit.saturating_sub(5)
+                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                        }
+                        3 => {
+                            state.settings.run_limit =
+                                state.settings.run_limit.saturating_sub(5)
+                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                        }
+                        4 => {
+                            state.settings.follow_active_session =
+                                !state.settings.follow_active_session;
+                        }
+                        _ => {}
+                    }
+                    save_settings(settings_path, &state.settings)?;
+                    *immediate_refresh = true;
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                    match state.settings_selected {
+                        0 => {
+                            state.settings.default_profile =
+                                cycle_profile(state.settings.default_profile);
+                        }
+                        1 => {
+                            state.settings.auto_refresh_ms =
+                                (state.settings.auto_refresh_ms + 250)
+                                    .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
+                        }
+                        2 => {
+                            state.settings.session_limit =
+                                (state.settings.session_limit + 5)
+                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                        }
+                        3 => {
+                            state.settings.run_limit =
+                                (state.settings.run_limit + 5)
+                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                        }
+                        4 => {
+                            state.settings.follow_active_session =
+                                !state.settings.follow_active_session;
+                        }
+                        _ => {}
+                    }
+                    save_settings(settings_path, &state.settings)?;
+                    *immediate_refresh = true;
+                }
+                KeyCode::Char('R') => {
+                    state.settings = TuiSettings::default();
+                    save_settings(settings_path, &state.settings)?;
+                    state.set_status("settings reset to defaults");
+                    *immediate_refresh = true;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         InputMode::Normal => {}
     }
 
@@ -595,6 +682,11 @@ async fn handle_key(
         },
         KeyCode::Char('?') => {
             state.show_help = !state.show_help;
+        }
+        KeyCode::Char('S') => {
+            state.mode = InputMode::Settings;
+            state.settings_selected = 0;
+            state.set_status("settings opened");
         }
         KeyCode::Char('r') => {
             *immediate_refresh = true;
@@ -869,6 +961,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         InputMode::TaskInput => ("Task Input", Color::Blue),
         InputMode::Filter(_) => ("Filter", Color::Yellow),
         InputMode::ConfirmDelete(_) => ("Confirm Delete", Color::Red),
+        InputMode::Settings => ("Settings", Color::Magenta),
     };
     frame.render_widget(
         Paragraph::new(footer_text).wrap(Wrap { trim: true }).block(
@@ -887,6 +980,10 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
 
     if state.show_help {
         draw_help_overlay(frame);
+    }
+
+    if matches!(state.mode, InputMode::Settings) {
+        draw_settings_overlay(frame, state);
     }
 }
 
@@ -1274,6 +1371,7 @@ fn header_lines(state: &TuiState) -> Vec<Line<'static>> {
         InputMode::TaskInput => (" INPUT ", Color::Blue),
         InputMode::Filter(_) => (" FILTER ", Color::Yellow),
         InputMode::ConfirmDelete(_) => (" DELETE? ", Color::Red),
+        InputMode::Settings => (" SETTINGS ", Color::Magenta),
     };
     let mode_span = Span::styled(
         mode_text.to_string(),
@@ -1401,6 +1499,18 @@ fn footer_lines(state: &TuiState) -> Vec<Line<'static>> {
                 Span::styled(" cancel", desc_style),
             ])]
         }
+        InputMode::Settings => {
+            vec![Line::from(vec![
+                Span::styled(" j/k", key_style),
+                Span::styled(" navigate  ", desc_style),
+                Span::styled("h/l", key_style),
+                Span::styled(" change  ", desc_style),
+                Span::styled("R", key_style),
+                Span::styled(" reset  ", desc_style),
+                Span::styled("Esc", key_style),
+                Span::styled(" close", desc_style),
+            ])]
+        }
         InputMode::Normal => {
             let nav_line = Line::from(vec![
                 Span::styled(" Tab", key_style),
@@ -1491,6 +1601,7 @@ fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
         Line::from("- d delete session, m compact, v replay preview"),
         Line::from(""),
         Line::from("Settings:"),
+        Line::from("- S open settings panel"),
         Line::from("- 1/2/3/4 profile, p cycle"),
         Line::from("- [ ] refresh, , . session-limit, - = run-limit"),
         Line::from("- f follow active session"),
@@ -1504,6 +1615,122 @@ fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
                 .title("Help")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        popup,
+    );
+}
+
+fn draw_settings_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
+    let popup = centered_rect(52, 50, frame.area());
+    frame.render_widget(Clear, popup);
+
+    let defaults = TuiSettings::default();
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(Color::DarkGray);
+
+    struct SettingRow {
+        label: &'static str,
+        value: String,
+        is_default: bool,
+    }
+
+    let rows = [
+        SettingRow {
+            label: "Profile",
+            value: format!("{}", state.settings.default_profile),
+            is_default: state.settings.default_profile == defaults.default_profile,
+        },
+        SettingRow {
+            label: "Refresh Interval",
+            value: format!("{}ms", state.settings.auto_refresh_ms),
+            is_default: state.settings.auto_refresh_ms == defaults.auto_refresh_ms,
+        },
+        SettingRow {
+            label: "Session Limit",
+            value: format!("{}", state.settings.session_limit),
+            is_default: state.settings.session_limit == defaults.session_limit,
+        },
+        SettingRow {
+            label: "Run Limit",
+            value: format!("{}", state.settings.run_limit),
+            is_default: state.settings.run_limit == defaults.run_limit,
+        },
+        SettingRow {
+            label: "Follow Active",
+            value: format!("{}", state.settings.follow_active_session),
+            is_default: state.settings.follow_active_session == defaults.follow_active_session,
+        },
+    ];
+
+    let mut lines = Vec::<Line>::new();
+    lines.push(Line::from(""));
+
+    for (i, row) in rows.iter().enumerate() {
+        let is_selected = i == state.settings_selected;
+        let value_style = if !row.is_default {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let (left_arrow, right_arrow) = if is_selected {
+            (
+                Span::styled(" \u{25C0} ", key_style),
+                Span::styled(" \u{25B6}", key_style),
+            )
+        } else {
+            (
+                Span::styled("   ", Style::default()),
+                Span::styled("  ", Style::default()),
+            )
+        };
+
+        let label_style = if is_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<20}", row.label), label_style),
+            left_arrow,
+            Span::styled(format!("{:<14}", row.value), value_style),
+            right_arrow,
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", desc_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  j/k", key_style),
+        Span::styled(" navigate  ", desc_style),
+        Span::styled("h/l", key_style),
+        Span::styled(" change  ", desc_style),
+        Span::styled("R", key_style),
+        Span::styled(" reset  ", desc_style),
+        Span::styled("Esc", key_style),
+        Span::styled(" close", desc_style),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(Span::styled(
+                    " Settings ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta)),
         ),
         popup,
     );
@@ -1777,6 +2004,15 @@ fn cycle_profile(current: TaskProfile) -> TaskProfile {
         TaskProfile::Extraction => TaskProfile::Coding,
         TaskProfile::Coding => TaskProfile::General,
         TaskProfile::General => TaskProfile::Planning,
+    }
+}
+
+fn cycle_profile_back(current: TaskProfile) -> TaskProfile {
+    match current {
+        TaskProfile::Planning => TaskProfile::General,
+        TaskProfile::Extraction => TaskProfile::Planning,
+        TaskProfile::Coding => TaskProfile::Extraction,
+        TaskProfile::General => TaskProfile::Coding,
     }
 }
 

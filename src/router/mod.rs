@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashSet;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::types::TaskProfile;
@@ -13,7 +12,7 @@ pub enum ProviderKind {
     OpenAi,
     Anthropic,
     Gemini,
-    Ollama,
+    Vllm,
     Mock,
 }
 
@@ -23,7 +22,7 @@ impl std::fmt::Display for ProviderKind {
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
-            ProviderKind::Ollama => "ollama",
+            ProviderKind::Vllm => "vllm",
             ProviderKind::Mock => "mock",
         };
         write!(f, "{s}")
@@ -109,17 +108,38 @@ pub struct ModelRouter {
 }
 
 impl ModelRouter {
-    pub fn new(ollama_base_url: impl Into<String>) -> Self {
+    pub fn new(
+        vllm_base_url: impl Into<String>,
+        openai_api_key: Option<String>,
+        anthropic_api_key: Option<String>,
+        gemini_api_key: Option<String>,
+    ) -> Self {
         Self {
             catalog: Arc::new(default_catalog()),
-            client: ProviderClient::new(ollama_base_url.into()),
+            client: ProviderClient::new(
+                vllm_base_url.into(),
+                openai_api_key,
+                anthropic_api_key,
+                gemini_api_key,
+            ),
         }
     }
 
-    pub fn with_catalog(ollama_base_url: impl Into<String>, catalog: Vec<ModelSpec>) -> Self {
+    pub fn with_catalog(
+        vllm_base_url: impl Into<String>,
+        openai_api_key: Option<String>,
+        anthropic_api_key: Option<String>,
+        gemini_api_key: Option<String>,
+        catalog: Vec<ModelSpec>,
+    ) -> Self {
         Self {
             catalog: Arc::new(catalog),
-            client: ProviderClient::new(ollama_base_url.into()),
+            client: ProviderClient::new(
+                vllm_base_url.into(),
+                openai_api_key,
+                anthropic_api_key,
+                gemini_api_key,
+            ),
         }
     }
 
@@ -206,15 +226,26 @@ impl ModelRouter {
 #[derive(Debug, Clone)]
 pub struct ProviderClient {
     http: reqwest::Client,
-    ollama_base_url: String,
+    vllm_base_url: String,
+    openai_api_key: Option<String>,
+    anthropic_api_key: Option<String>,
+    gemini_api_key: Option<String>,
     disabled: Arc<DashSet<ProviderKind>>,
 }
 
 impl ProviderClient {
-    pub fn new(ollama_base_url: String) -> Self {
+    pub fn new(
+        vllm_base_url: String,
+        openai_api_key: Option<String>,
+        anthropic_api_key: Option<String>,
+        gemini_api_key: Option<String>,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            ollama_base_url,
+            vllm_base_url,
+            openai_api_key,
+            anthropic_api_key,
+            gemini_api_key,
             disabled: Arc::new(DashSet::new()),
         }
     }
@@ -233,47 +264,156 @@ impl ProviderClient {
         }
 
         match model.provider {
-            ProviderKind::Ollama => self.generate_ollama(model, prompt).await,
-            ProviderKind::OpenAi
-            | ProviderKind::Anthropic
-            | ProviderKind::Gemini
-            | ProviderKind::Mock => Ok(mock_inference(model, prompt)),
+            ProviderKind::OpenAi => self.generate_openai(model, prompt).await,
+            ProviderKind::Anthropic => self.generate_anthropic(model, prompt).await,
+            ProviderKind::Gemini => self.generate_gemini(model, prompt).await,
+            ProviderKind::Vllm => self.generate_vllm(model, prompt).await,
+            ProviderKind::Mock => Ok(mock_inference(model, prompt)),
         }
     }
 
-    async fn generate_ollama(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
-        let endpoint = format!(
-            "{}/api/generate",
-            self.ollama_base_url.trim_end_matches('/')
+    async fn generate_openai(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let api_key = self
+            .openai_api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
+
+        let resp = self
+            .http
+            .post("https://api.openai.com/v1/chat/completions")
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({
+                "model": model.model_id,
+                "messages": [{"role": "user", "content": prompt}],
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("OpenAI API error {}: {}", status, body));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        body["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("unexpected OpenAI response format"))
+    }
+
+    async fn generate_anthropic(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let api_key = self
+            .anthropic_api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
+
+        let resp = self
+            .http
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": model.model_id,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Anthropic API error {}: {}", status, body));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        body["content"][0]["text"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic response format"))
+    }
+
+    async fn generate_gemini(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let api_key = self
+            .gemini_api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("GEMINI_API_KEY not set"))?;
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model.model_id, api_key
         );
 
         let resp = self
             .http
-            .post(endpoint)
+            .post(&url)
             .json(&serde_json::json!({
-                "model": model.model_id,
-                "prompt": prompt,
-                "stream": false
+                "contents": [{"parts": [{"text": prompt}]}],
             }))
             .send()
-            .await;
+            .await?;
 
-        let Ok(resp) = resp else {
-            // Local model unavailable: fallback to deterministic stub.
-            return Ok(mock_inference(model, prompt));
-        };
-
-        if resp.status() != StatusCode::OK {
-            return Ok(mock_inference(model, prompt));
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Gemini API error {}: {}", status, body));
         }
 
         let body: serde_json::Value = resp.json().await?;
-        let text = body
-            .get("response")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| mock_inference(model, prompt));
-        Ok(text)
+        body["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("unexpected Gemini response format"))
+    }
+
+    async fn generate_vllm(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let endpoint = format!(
+            "{}/v1/chat/completions",
+            self.vllm_base_url.trim_end_matches('/')
+        );
+
+        let resp = self
+            .http
+            .post(&endpoint)
+            .json(&serde_json::json!({
+                "model": model.model_id,
+                "messages": [{"role": "user", "content": prompt}],
+            }))
+            .send()
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("vLLM server unavailable at {}", self.vllm_base_url)
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("vLLM API error {}: {}", status, body));
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        body["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("unexpected vLLM response format"))
     }
 }
 
@@ -343,7 +483,7 @@ fn default_catalog() -> Vec<ModelSpec> {
             local_only: false,
         },
         ModelSpec {
-            provider: ProviderKind::Ollama,
+            provider: ProviderKind::Vllm,
             model_id: "qwen2.5:14b".to_string(),
             quality: 0.78,
             latency: 1700.0,
@@ -375,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn planning_prefers_quality_models() {
-        let router = ModelRouter::new("http://127.0.0.1:11434");
+        let router = ModelRouter::new("http://127.0.0.1:8000", None, None, None);
         let constraints = RoutingConstraints::for_profile(TaskProfile::Planning);
         let decision = router
             .select_model(TaskProfile::Planning, &constraints)
@@ -393,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_chain_works_when_primary_disabled() {
-        let router = ModelRouter::new("http://127.0.0.1:11434");
+        let router = ModelRouter::new("http://127.0.0.1:8000", None, None, None);
         let constraints = RoutingConstraints::for_profile(TaskProfile::General);
         let primary = router
             .select_model(TaskProfile::General, &constraints)
@@ -401,6 +541,14 @@ mod tests {
             .primary;
 
         router.set_provider_disabled(primary.provider, true);
+
+        // Use Mock provider to avoid needing real API keys
+        router.set_provider_disabled(ProviderKind::OpenAi, true);
+        router.set_provider_disabled(ProviderKind::Anthropic, true);
+        router.set_provider_disabled(ProviderKind::Gemini, true);
+        router.set_provider_disabled(ProviderKind::Vllm, true);
+        // Re-enable mock so fallback chain can succeed
+        router.set_provider_disabled(ProviderKind::Mock, false);
 
         let (_decision, result) = router
             .infer(TaskProfile::General, "hello", &constraints)

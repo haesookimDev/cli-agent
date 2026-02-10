@@ -16,7 +16,10 @@ pub struct AppConfig {
     pub max_graph_depth: u8,
     pub webhook_timeout_secs: u64,
     pub max_context_tokens: usize,
-    pub ollama_base_url: String,
+    pub vllm_base_url: String,
+    pub openai_api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub gemini_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -59,8 +62,12 @@ impl AppConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(16_000);
 
-        let ollama_base_url =
-            env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+        let vllm_base_url =
+            env::var("VLLM_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string());
+
+        let openai_api_key = env::var("OPENAI_API_KEY").ok();
+        let anthropic_api_key = env::var("ANTHROPIC_API_KEY").ok();
+        let gemini_api_key = env::var("GEMINI_API_KEY").ok();
 
         let cfg = Self {
             data_dir,
@@ -74,7 +81,10 @@ impl AppConfig {
             max_graph_depth,
             webhook_timeout_secs,
             max_context_tokens,
-            ollama_base_url,
+            vllm_base_url,
+            openai_api_key,
+            anthropic_api_key,
+            gemini_api_key,
         };
 
         cfg.ensure_dirs()?;

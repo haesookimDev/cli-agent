@@ -77,7 +77,12 @@ async fn main() -> anyhow::Result<()> {
 
     let memory =
         Arc::new(MemoryManager::new(cfg.session_dir.clone(), cfg.database_url.as_str()).await?);
-    let router = Arc::new(ModelRouter::new(cfg.ollama_base_url.clone()));
+    let router = Arc::new(ModelRouter::new(
+        cfg.vllm_base_url.clone(),
+        cfg.openai_api_key.clone(),
+        cfg.anthropic_api_key.clone(),
+        cfg.gemini_api_key.clone(),
+    ));
     let context = Arc::new(ContextManager::new(cfg.max_context_tokens));
     let auth = Arc::new(AuthManager::new(
         cfg.api_key.clone(),
