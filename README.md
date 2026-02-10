@@ -87,12 +87,14 @@ TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시
 - `POST /v1/webhooks/test`
 
 `trace`는 동작 이벤트와 그래프 스냅샷을 반환합니다.
-`behavior`는 시각화 친화적인 실행 lane/오프셋/행동 분포를 반환합니다.
+`behavior`는 시각화 친화적인 실행 lane/오프셋/행동 분포와 요약 지표(critical path, peak parallelism, bottleneck)를 반환합니다.
 `stream`은 실시간 행동 이벤트를 SSE로 전송합니다.
+- `stream` 쿼리: `poll_ms`, `behavior=true`, `behavior_limit=<n>`
 `/v1/webhooks/deliveries?dead_letter=true`로 DLQ 대상 전달 이력을 조회할 수 있습니다.
 
 ### SSE 이벤트 타입
 - `action_event`: 런타임 행동 이벤트 payload
+- `behavior_snapshot`: 동작 시각화 스냅샷 payload (`behavior=true`일 때)
 - `run_terminal`: 런 종료 상태 이벤트
 - `error`: 스트림 오류
 

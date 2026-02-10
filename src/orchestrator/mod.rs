@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -20,9 +20,9 @@ use crate::runtime::{
 };
 use crate::types::{
     AgentExecutionRecord, AgentRole, NodeTraceState, RunActionEvent, RunActionType,
-    RunBehaviorActionCount, RunBehaviorLane, RunBehaviorView, RunRecord, RunRequest, RunStatus,
-    RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType, TraceEdge,
-    WebhookDeliveryRecord, WebhookEndpoint,
+    RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView, RunRecord,
+    RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
+    TraceEdge, WebhookDeliveryRecord, WebhookEndpoint,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -1651,6 +1651,16 @@ fn build_behavior_view(trace: &RunTrace) -> RunBehaviorView {
         .collect::<Vec<_>>();
     action_mix.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.action.cmp(&b.action)));
 
+    let total_duration_ms = match (window_start, window_end) {
+        (Some(start), Some(end)) if end >= start => {
+            Some(end.signed_duration_since(start).num_milliseconds().max(0) as u128)
+        }
+        _ => None,
+    };
+    let peak_parallelism = compute_peak_parallelism(lanes.as_slice());
+    let (critical_path_nodes, critical_path_duration_ms) = compute_critical_path(lanes.as_slice());
+    let (bottleneck_node_id, bottleneck_duration_ms) = compute_bottleneck(lanes.as_slice());
+
     RunBehaviorView {
         run_id: trace.run_id,
         session_id: trace.session_id,
@@ -1660,6 +1670,182 @@ fn build_behavior_view(trace: &RunTrace) -> RunBehaviorView {
         active_nodes: trace.graph.active_nodes.clone(),
         lanes,
         action_mix,
+        summary: RunBehaviorSummary {
+            total_duration_ms,
+            lane_count: trace.graph.nodes.len(),
+            completed_nodes: trace.graph.completed_nodes,
+            failed_nodes: trace.graph.failed_nodes,
+            critical_path_nodes,
+            critical_path_duration_ms,
+            bottleneck_node_id,
+            bottleneck_duration_ms,
+            peak_parallelism,
+        },
+    }
+}
+
+fn compute_peak_parallelism(lanes: &[RunBehaviorLane]) -> usize {
+    let mut points = Vec::<(i64, i32)>::new();
+
+    for lane in lanes {
+        let Some(start) = lane.start_offset_ms else {
+            continue;
+        };
+        let end = lane
+            .end_offset_ms
+            .or_else(|| {
+                lane.duration_ms
+                    .map(|d| start.saturating_add(d.min(i64::MAX as u128) as i64))
+            })
+            .unwrap_or(start.saturating_add(1));
+        let normalized_end = if end <= start {
+            start.saturating_add(1)
+        } else {
+            end
+        };
+
+        points.push((start, 1));
+        points.push((normalized_end, -1));
+    }
+
+    points.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut current = 0_i32;
+    let mut peak = 0_i32;
+    for (_, delta) in points {
+        current = (current + delta).max(0);
+        peak = peak.max(current);
+    }
+    peak as usize
+}
+
+fn compute_critical_path(lanes: &[RunBehaviorLane]) -> (Vec<String>, u128) {
+    if lanes.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let node_ids = lanes
+        .iter()
+        .map(|lane| lane.node_id.clone())
+        .collect::<HashSet<_>>();
+    let duration = lanes
+        .iter()
+        .map(|lane| (lane.node_id.clone(), lane.duration_ms.unwrap_or(0)))
+        .collect::<HashMap<_, _>>();
+
+    let mut indegree = lanes
+        .iter()
+        .map(|lane| (lane.node_id.clone(), 0_usize))
+        .collect::<HashMap<_, _>>();
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+
+    for lane in lanes {
+        for dep in &lane.dependencies {
+            if !node_ids.contains(dep) {
+                continue;
+            }
+            adjacency
+                .entry(dep.clone())
+                .or_default()
+                .push(lane.node_id.clone());
+            let next = indegree.get(lane.node_id.as_str()).copied().unwrap_or(0) + 1;
+            indegree.insert(lane.node_id.clone(), next);
+        }
+    }
+
+    for children in adjacency.values_mut() {
+        children.sort();
+        children.dedup();
+    }
+
+    let mut roots = indegree
+        .iter()
+        .filter_map(|(node, deg)| if *deg == 0 { Some(node.clone()) } else { None })
+        .collect::<Vec<_>>();
+    roots.sort();
+
+    let mut queue = VecDeque::from(roots);
+    let mut dist = duration.clone();
+    let mut prev = HashMap::<String, String>::new();
+    let mut visited = 0_usize;
+
+    while let Some(node) = queue.pop_front() {
+        visited = visited.saturating_add(1);
+        let base = dist.get(node.as_str()).copied().unwrap_or(0);
+        if let Some(children) = adjacency.get(node.as_str()) {
+            for child in children {
+                let child_weight = duration.get(child.as_str()).copied().unwrap_or(0);
+                let candidate = base.saturating_add(child_weight);
+                if candidate > dist.get(child.as_str()).copied().unwrap_or(0) {
+                    dist.insert(child.clone(), candidate);
+                    prev.insert(child.clone(), node.clone());
+                }
+
+                if let Some(entry) = indegree.get_mut(child.as_str()) {
+                    *entry = entry.saturating_sub(1);
+                    if *entry == 0 {
+                        queue.push_back(child.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if visited != node_ids.len() {
+        // Cycles should not happen for DAG runs; keep output stable with best-effort fallback.
+        let mut longest = lanes
+            .iter()
+            .map(|lane| (lane.node_id.clone(), lane.duration_ms.unwrap_or(0)))
+            .collect::<Vec<_>>();
+        longest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if let Some((node, dur)) = longest.into_iter().next() {
+            return (vec![node], dur);
+        }
+        return (Vec::new(), 0);
+    }
+
+    let mut best = dist.into_iter().collect::<Vec<_>>();
+    best.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let Some((tail, total)) = best.into_iter().next() else {
+        return (Vec::new(), 0);
+    };
+
+    let mut path = Vec::<String>::new();
+    let mut cursor = Some(tail);
+    while let Some(node) = cursor {
+        path.push(node.clone());
+        cursor = prev.get(node.as_str()).cloned();
+    }
+    path.reverse();
+    (path, total)
+}
+
+fn compute_bottleneck(lanes: &[RunBehaviorLane]) -> (Option<String>, Option<u128>) {
+    let mut best_node: Option<String> = None;
+    let mut best_dur: u128 = 0;
+    let mut has_duration = false;
+
+    for lane in lanes {
+        let Some(dur) = lane.duration_ms else {
+            continue;
+        };
+        has_duration = true;
+        let replace = dur > best_dur
+            || (dur == best_dur
+                && best_node
+                    .as_ref()
+                    .map(|id| lane.node_id.as_str() < id.as_str())
+                    .unwrap_or(true));
+        if replace {
+            best_node = Some(lane.node_id.clone());
+            best_dur = dur;
+        }
+    }
+
+    if has_duration {
+        (best_node, Some(best_dur))
+    } else {
+        (None, None)
     }
 }
 
@@ -1977,5 +2163,55 @@ mod tests {
 
         assert_eq!(started_count, 2);
         assert_eq!(failed_count, 1);
+        assert_eq!(view.summary.total_duration_ms, Some(50));
+        assert_eq!(
+            view.summary.critical_path_nodes,
+            vec!["plan".to_string(), "code".to_string()]
+        );
+        assert_eq!(view.summary.critical_path_duration_ms, 35);
+        assert_eq!(view.summary.bottleneck_node_id.as_deref(), Some("code"));
+        assert_eq!(view.summary.bottleneck_duration_ms, Some(20));
+        assert_eq!(view.summary.peak_parallelism, 1);
+    }
+
+    #[test]
+    fn compute_peak_parallelism_counts_overlap() {
+        let lanes = vec![
+            RunBehaviorLane {
+                node_id: "a".to_string(),
+                role: None,
+                status: "succeeded".to_string(),
+                dependencies: vec![],
+                start_offset_ms: Some(0),
+                end_offset_ms: Some(20),
+                duration_ms: Some(20),
+                retries: 0,
+                model: None,
+            },
+            RunBehaviorLane {
+                node_id: "b".to_string(),
+                role: None,
+                status: "succeeded".to_string(),
+                dependencies: vec![],
+                start_offset_ms: Some(5),
+                end_offset_ms: Some(25),
+                duration_ms: Some(20),
+                retries: 0,
+                model: None,
+            },
+            RunBehaviorLane {
+                node_id: "c".to_string(),
+                role: None,
+                status: "succeeded".to_string(),
+                dependencies: vec![],
+                start_offset_ms: Some(10),
+                end_offset_ms: Some(30),
+                duration_ms: Some(20),
+                retries: 0,
+                model: None,
+            },
+        ];
+
+        assert_eq!(compute_peak_parallelism(lanes.as_slice()), 3);
     }
 }

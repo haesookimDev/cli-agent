@@ -347,6 +347,19 @@ pub struct RunBehaviorActionCount {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunBehaviorSummary {
+    pub total_duration_ms: Option<u128>,
+    pub lane_count: usize,
+    pub completed_nodes: usize,
+    pub failed_nodes: usize,
+    pub critical_path_nodes: Vec<String>,
+    pub critical_path_duration_ms: u128,
+    pub bottleneck_node_id: Option<String>,
+    pub bottleneck_duration_ms: Option<u128>,
+    pub peak_parallelism: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunBehaviorView {
     pub run_id: Uuid,
     pub session_id: Uuid,
@@ -356,4 +369,5 @@ pub struct RunBehaviorView {
     pub active_nodes: Vec<String>,
     pub lanes: Vec<RunBehaviorLane>,
     pub action_mix: Vec<RunBehaviorActionCount>,
+    pub summary: RunBehaviorSummary,
 }

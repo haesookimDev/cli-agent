@@ -48,6 +48,8 @@ struct TraceQuery {
 #[derive(Debug, Deserialize)]
 struct StreamQuery {
     poll_ms: Option<u64>,
+    behavior: Option<bool>,
+    behavior_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -618,6 +620,8 @@ async fn stream_run_handler(
     };
 
     let poll_ms = query.poll_ms.unwrap_or(500).clamp(200, 5_000);
+    let include_behavior = query.behavior.unwrap_or(false);
+    let behavior_limit = query.behavior_limit.unwrap_or(2_000).clamp(1, 20_000);
     let orchestrator = state.orchestrator.clone();
 
     let event_stream = stream! {
@@ -639,6 +643,7 @@ async fn stream_run_handler(
                     break;
                 }
             };
+            let had_new_events = !events.is_empty();
 
             for event in events {
                 last_seq = event.seq;
@@ -651,8 +656,27 @@ async fn stream_run_handler(
                 );
             }
 
+            if include_behavior && had_new_events {
+                if let Ok(Some(behavior)) = orchestrator.get_run_behavior(run_id, behavior_limit).await {
+                    if let Ok(payload) = serde_json::to_string(&behavior) {
+                        yield Ok::<SseEvent, std::convert::Infallible>(
+                            SseEvent::default().event("behavior_snapshot").data(payload),
+                        );
+                    }
+                }
+            }
+
             match orchestrator.get_run(run_id).await {
                 Ok(Some(run)) if run.status.is_terminal() => {
+                    if include_behavior {
+                        if let Ok(Some(behavior)) = orchestrator.get_run_behavior(run_id, behavior_limit).await {
+                            if let Ok(payload) = serde_json::to_string(&behavior) {
+                                yield Ok::<SseEvent, std::convert::Infallible>(
+                                    SseEvent::default().event("behavior_snapshot").data(payload),
+                                );
+                            }
+                        }
+                    }
                     if last_seq > 0 {
                         idle_terminal_ticks = idle_terminal_ticks.saturating_add(1);
                         if idle_terminal_ticks >= 2 {
