@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Behavior Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f4efe5;
+      --bg-accent: #d8e6df;
+      --ink: #13202e;
+      --ink-muted: #445469;
+      --panel: rgba(255, 255, 255, 0.8);
+      --line: rgba(19, 32, 46, 0.16);
+      --teal: #0d7f80;
+      --orange: #d66832;
+      --olive: #5f7f34;
+      --red: #b53a3a;
+      --amber: #b08012;
+      --blue: #2b5db2;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --ui: "Space Grotesk", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--ui);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 18% 12%, rgba(214, 104, 50, 0.22), transparent 44%),
+        radial-gradient(circle at 88% 20%, rgba(13, 127, 128, 0.18), transparent 42%),
+        linear-gradient(160deg, var(--bg), var(--bg-accent));
+    }
+
+    .shell {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px 16px 24px;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px 20px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.85), rgba(255,255,255,0.62));
+      backdrop-filter: blur(4px);
+      margin-bottom: 14px;
+    }
+
+    .hero h1 {
+      margin: 0 0 6px;
+      font-size: clamp(20px, 2.5vw, 30px);
+      line-height: 1.2;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--ink-muted);
+      font-size: 14px;
+    }
+
+    .controls {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 12px;
+      background: var(--panel);
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .field label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.3px;
+      color: var(--ink-muted);
+      text-transform: uppercase;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0 10px;
+      font-family: var(--ui);
+      font-size: 14px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.84);
+    }
+
+    .field input:focus,
+    .field select:focus {
+      outline: 2px solid rgba(13, 127, 128, 0.35);
+      outline-offset: 1px;
+    }
+
+    .field.span-2 { grid-column: span 2; }
+    .field.span-3 { grid-column: span 3; }
+    .field.span-4 { grid-column: span 4; }
+    .field.span-6 { grid-column: span 6; }
+
+    .actions {
+      grid-column: span 12;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    button {
+      height: 36px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 0 12px;
+      cursor: pointer;
+      font-family: var(--ui);
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      transition: transform 100ms ease, box-shadow 120ms ease, background-color 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    .btn-main {
+      background: var(--teal);
+      color: #f2f8f8;
+      box-shadow: 0 6px 14px rgba(13, 127, 128, 0.22);
+    }
+
+    .btn-alt {
+      background: #fff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .btn-warm {
+      background: var(--orange);
+      color: #fff;
+      box-shadow: 0 6px 14px rgba(214, 104, 50, 0.24);
+    }
+
+    .status-chip {
+      margin-left: auto;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.74);
+      color: var(--ink-muted);
+    }
+
+    .status-chip.ok {
+      color: var(--olive);
+      border-color: rgba(95, 127, 52, 0.35);
+      background: rgba(95, 127, 52, 0.12);
+    }
+
+    .status-chip.error {
+      color: var(--red);
+      border-color: rgba(181, 58, 58, 0.35);
+      background: rgba(181, 58, 58, 0.12);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 14px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: var(--ink-muted);
+      font-family: var(--mono);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.72);
+      min-height: 72px;
+    }
+
+    .card .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.25px;
+      color: var(--ink-muted);
+      font-family: var(--mono);
+    }
+
+    .card .value {
+      margin-top: 8px;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.2;
+      word-break: break-word;
+    }
+
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 480px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: 160px 1fr 66px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .lane .meta {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-size: 13px;
+    }
+
+    .lane .meta small {
+      display: block;
+      color: var(--ink-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      margin-top: 2px;
+    }
+
+    .track {
+      position: relative;
+      height: 17px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:
+        linear-gradient(90deg, rgba(43, 93, 178, 0.06), rgba(43, 93, 178, 0.12)),
+        repeating-linear-gradient(
+          to right,
+          rgba(19,32,46,0.1) 0,
+          rgba(19,32,46,0.1) 1px,
+          transparent 1px,
+          transparent 20px
+        );
+      overflow: hidden;
+    }
+
+    .bar {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      border-radius: 999px;
+      min-width: 4px;
+    }
+
+    .bar.running { background: var(--blue); }
+    .bar.succeeded { background: var(--olive); }
+    .bar.failed { background: var(--red); }
+    .bar.cancelled { background: #6e757e; }
+    .bar.skipped { background: #8e8a76; }
+    .bar.pending { background: var(--amber); }
+
+    .dur {
+      text-align: right;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--ink-muted);
+    }
+
+    .mix {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .mix-row {
+      display: grid;
+      grid-template-columns: 1fr 62px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mix-track {
+      position: relative;
+      height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.7);
+      overflow: hidden;
+    }
+
+    .mix-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      background: linear-gradient(90deg, rgba(214,104,50,0.9), rgba(13,127,128,0.9));
+    }
+
+    .mix-label {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #112;
+    }
+
+    .mix-count {
+      text-align: right;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--ink-muted);
+    }
+
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      color: var(--ink-muted);
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    @media (max-width: 980px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .lane {
+        grid-template-columns: 1fr;
+      }
+
+      .lane .dur {
+        text-align: left;
+      }
+
+      .field.span-2,
+      .field.span-3,
+      .field.span-4,
+      .field.span-6 {
+        grid-column: span 12;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Agent Behavior Dashboard</h1>
+      <p>Run-level visualization driven by behavior graph, lane offsets, critical path, and action mix.</p>
+    </section>
+
+    <section class="controls">
+      <div class="field span-3">
+        <label for="apiKey">API Key</label>
+        <input id="apiKey" value="local-dev-key" autocomplete="off">
+      </div>
+      <div class="field span-3">
+        <label for="apiSecret">API Secret</label>
+        <input id="apiSecret" value="local-dev-secret" autocomplete="off">
+      </div>
+      <div class="field span-2">
+        <label for="pollMs">Poll (ms)</label>
+        <input id="pollMs" type="number" value="1200" min="250" max="10000">
+      </div>
+      <div class="field span-2">
+        <label for="behaviorLimit">Behavior Limit</label>
+        <input id="behaviorLimit" type="number" value="2000" min="100" max="20000">
+      </div>
+      <div class="field span-2">
+        <label for="runSelect">Recent Runs</label>
+        <select id="runSelect"></select>
+      </div>
+      <div class="field span-6">
+        <label for="runId">Run ID</label>
+        <input id="runId" placeholder="enter run id">
+      </div>
+      <div class="actions">
+        <button id="loadRuns" class="btn-alt">Load Runs</button>
+        <button id="useSelected" class="btn-alt">Use Selected</button>
+        <button id="refreshOnce" class="btn-main">Refresh Once</button>
+        <button id="toggleLive" class="btn-warm">Start Live</button>
+        <span id="statusChip" class="status-chip">idle</span>
+      </div>
+    </section>
+
+    <section class="grid">
+      <section class="panel">
+        <h2>Summary</h2>
+        <div id="metrics" class="metrics"></div>
+        <h2>Action Mix</h2>
+        <div id="actionMix" class="mix"></div>
+      </section>
+      <section class="panel">
+        <h2>Execution Timeline</h2>
+        <div id="timeline" class="timeline"></div>
+      </section>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      runs: [],
+      timer: null,
+      latest: null,
+    };
+
+    const el = {
+      apiKey: document.getElementById("apiKey"),
+      apiSecret: document.getElementById("apiSecret"),
+      pollMs: document.getElementById("pollMs"),
+      behaviorLimit: document.getElementById("behaviorLimit"),
+      runSelect: document.getElementById("runSelect"),
+      runId: document.getElementById("runId"),
+      loadRuns: document.getElementById("loadRuns"),
+      useSelected: document.getElementById("useSelected"),
+      refreshOnce: document.getElementById("refreshOnce"),
+      toggleLive: document.getElementById("toggleLive"),
+      statusChip: document.getElementById("statusChip"),
+      metrics: document.getElementById("metrics"),
+      actionMix: document.getElementById("actionMix"),
+      timeline: document.getElementById("timeline"),
+    };
+
+    function shortId(id) {
+      return (id || "").slice(0, 8);
+    }
+
+    function runLabel(run) {
+      const task = (run.task || "").replace(/\s+/g, " ").slice(0, 42);
+      return `${shortId(run.run_id)} [${run.status}] ${task}`;
+    }
+
+    function nonceHex() {
+      const buf = new Uint8Array(16);
+      crypto.getRandomValues(buf);
+      return Array.from(buf).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    async function hmacSha256Hex(secret, message) {
+      const enc = new TextEncoder();
+      const key = await crypto.subtle.importKey(
+        "raw",
+        enc.encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+      const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
+      return Array.from(new Uint8Array(sig))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
+    async function buildAuthHeaders(rawBody = "") {
+      const apiKey = el.apiKey.value.trim();
+      const apiSecret = el.apiSecret.value.trim();
+      if (!apiKey || !apiSecret) {
+        throw new Error("api key and secret are required");
+      }
+
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const nonce = nonceHex();
+      const payload = `${timestamp}.${nonce}.${rawBody}`;
+      const signature = await hmacSha256Hex(apiSecret, payload);
+
+      return {
+        "X-API-Key": apiKey,
+        "X-Signature": signature,
+        "X-Timestamp": timestamp,
+        "X-Nonce": nonce,
+      };
+    }
+
+    async function signedGet(url) {
+      const headers = await buildAuthHeaders("");
+      const response = await fetch(url, { method: "GET", headers });
+      const text = await response.text();
+      let payload = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch (err) {
+          throw new Error(`invalid json response: ${text.slice(0, 120)}`);
+        }
+      }
+      if (!response.ok) {
+        const msg = payload && payload.error ? payload.error : `${response.status}`;
+        throw new Error(msg);
+      }
+      return payload;
+    }
+
+    function updateStatus(text, kind) {
+      el.statusChip.textContent = text;
+      el.statusChip.classList.remove("ok", "error");
+      if (kind === "ok") el.statusChip.classList.add("ok");
+      if (kind === "error") el.statusChip.classList.add("error");
+    }
+
+    function renderRuns() {
+      const runs = state.runs || [];
+      el.runSelect.innerHTML = "";
+      if (!runs.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "no runs";
+        el.runSelect.append(option);
+        return;
+      }
+
+      for (const run of runs) {
+        const option = document.createElement("option");
+        option.value = run.run_id;
+        option.textContent = runLabel(run);
+        el.runSelect.append(option);
+      }
+    }
+
+    function metric(label, value) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div>`;
+      return card;
+    }
+
+    function renderSummary(data) {
+      el.metrics.innerHTML = "";
+      if (!data) {
+        el.metrics.innerHTML = `<div class="empty">No behavior data yet.</div>`;
+        return;
+      }
+
+      const summary = data.summary || {};
+      const critical = (summary.critical_path_nodes || []).join(" -> ") || "-";
+      const total = summary.total_duration_ms != null ? `${summary.total_duration_ms}ms` : "-";
+      const bottleneck = summary.bottleneck_node_id
+        ? `${summary.bottleneck_node_id} (${summary.bottleneck_duration_ms || 0}ms)`
+        : "-";
+
+      el.metrics.append(
+        metric("Run Status", String(data.status || "-")),
+        metric("Total Duration", total),
+        metric("Peak Parallelism", String(summary.peak_parallelism || 0)),
+        metric("Failed Nodes", String(summary.failed_nodes || 0)),
+        metric("Critical Path", critical),
+        metric("Bottleneck", bottleneck)
+      );
+    }
+
+    function barStatus(status) {
+      if (["running", "succeeded", "failed", "cancelled", "skipped"].includes(status)) {
+        return status;
+      }
+      return "pending";
+    }
+
+    function renderTimeline(data) {
+      el.timeline.innerHTML = "";
+      if (!data || !Array.isArray(data.lanes) || data.lanes.length === 0) {
+        el.timeline.innerHTML = `<div class="empty">Timeline unavailable.</div>`;
+        return;
+      }
+
+      const lanes = [...data.lanes];
+      lanes.sort((a, b) => {
+        const as = a.start_offset_ms == null ? Number.MAX_SAFE_INTEGER : a.start_offset_ms;
+        const bs = b.start_offset_ms == null ? Number.MAX_SAFE_INTEGER : b.start_offset_ms;
+        return as - bs || String(a.node_id).localeCompare(String(b.node_id));
+      });
+
+      const total = Number((data.summary && data.summary.total_duration_ms) || 0);
+      const fallbackTotal = Math.max(
+        1,
+        ...lanes.map((lane) => Number(lane.end_offset_ms || lane.duration_ms || 0))
+      );
+      const widthBase = total > 0 ? total : fallbackTotal;
+
+      for (const lane of lanes) {
+        const start = Number(lane.start_offset_ms || 0);
+        const end = lane.end_offset_ms != null
+          ? Number(lane.end_offset_ms)
+          : start + Number(lane.duration_ms || 0);
+        const effectiveEnd = end <= start ? start + 1 : end;
+        const leftPct = Math.max(0, Math.min(100, (start / widthBase) * 100));
+        const widthPct = Math.max(0.8, Math.min(100 - leftPct, ((effectiveEnd - start) / widthBase) * 100));
+
+        const row = document.createElement("div");
+        row.className = "lane";
+        row.innerHTML = `
+          <div class="meta">
+            <strong>${lane.node_id}</strong>
+            <small>${lane.status} / retries:${lane.retries || 0}</small>
+          </div>
+          <div class="track">
+            <div class="bar ${barStatus(String(lane.status || ""))}" style="left:${leftPct}%;width:${widthPct}%;"></div>
+          </div>
+          <div class="dur">${lane.duration_ms != null ? `${lane.duration_ms}ms` : "-"}</div>
+        `;
+        el.timeline.append(row);
+      }
+    }
+
+    function renderActionMix(data) {
+      el.actionMix.innerHTML = "";
+      const mix = data && Array.isArray(data.action_mix) ? data.action_mix : [];
+      if (!mix.length) {
+        el.actionMix.innerHTML = `<div class="empty">No action events.</div>`;
+        return;
+      }
+
+      const maxCount = Math.max(1, ...mix.map((item) => Number(item.count || 0)));
+      for (const item of mix.slice(0, 10)) {
+        const width = Math.max(2, (Number(item.count || 0) / maxCount) * 100);
+        const row = document.createElement("div");
+        row.className = "mix-row";
+        row.innerHTML = `
+          <div class="mix-track">
+            <div class="mix-fill" style="width:${width}%;"></div>
+            <div class="mix-label">${item.action}</div>
+          </div>
+          <div class="mix-count">${item.count}</div>
+        `;
+        el.actionMix.append(row);
+      }
+    }
+
+    function renderBehavior(data) {
+      state.latest = data;
+      renderSummary(data);
+      renderTimeline(data);
+      renderActionMix(data);
+    }
+
+    async function loadRuns() {
+      updateStatus("loading runs...");
+      const runs = await signedGet("/v1/runs?limit=120");
+      state.runs = Array.isArray(runs) ? runs : [];
+      renderRuns();
+      updateStatus(`runs loaded: ${state.runs.length}`, "ok");
+    }
+
+    async function loadBehaviorOnce() {
+      const runId = el.runId.value.trim();
+      if (!runId) {
+        throw new Error("run id is required");
+      }
+      const limit = Number(el.behaviorLimit.value || 2000);
+      const behavior = await signedGet(`/v1/runs/${encodeURIComponent(runId)}/behavior?limit=${Math.max(1, Math.min(20000, limit))}`);
+      renderBehavior(behavior);
+      updateStatus(`updated ${shortId(runId)} @ ${new Date().toLocaleTimeString()}`, "ok");
+    }
+
+    function stopLive() {
+      if (state.timer) {
+        clearInterval(state.timer);
+        state.timer = null;
+      }
+      el.toggleLive.textContent = "Start Live";
+    }
+
+    function startLive() {
+      stopLive();
+      const pollMs = Number(el.pollMs.value || 1200);
+      const safeMs = Math.max(250, Math.min(10000, pollMs));
+      el.toggleLive.textContent = "Stop Live";
+      state.timer = setInterval(() => {
+        loadBehaviorOnce().catch((err) => updateStatus(`live error: ${err.message}`, "error"));
+      }, safeMs);
+    }
+
+    el.loadRuns.addEventListener("click", async () => {
+      try {
+        await loadRuns();
+      } catch (err) {
+        updateStatus(`load runs failed: ${err.message}`, "error");
+      }
+    });
+
+    el.useSelected.addEventListener("click", () => {
+      if (!el.runSelect.value) return;
+      el.runId.value = el.runSelect.value;
+      updateStatus(`run selected: ${shortId(el.runSelect.value)}`, "ok");
+    });
+
+    el.refreshOnce.addEventListener("click", async () => {
+      try {
+        await loadBehaviorOnce();
+      } catch (err) {
+        updateStatus(`refresh failed: ${err.message}`, "error");
+      }
+    });
+
+    el.toggleLive.addEventListener("click", async () => {
+      if (state.timer) {
+        stopLive();
+        updateStatus("live stopped");
+        return;
+      }
+      try {
+        await loadBehaviorOnce();
+        startLive();
+        updateStatus("live started", "ok");
+      } catch (err) {
+        stopLive();
+        updateStatus(`live start failed: ${err.message}`, "error");
+      }
+    });
+
+    window.addEventListener("beforeunload", stopLive);
+    renderRuns();
+    renderSummary(null);
+    renderActionMix(null);
+    renderTimeline(null);
+    updateStatus("ready");
+  </script>
+</body>
+</html>

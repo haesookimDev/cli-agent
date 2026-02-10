@@ -39,6 +39,15 @@ cargo run -- memory compact --session <SESSION_UUID>
 cargo run -- memory vacuum
 ```
 
+## Web Dashboard
+- URL: `http://127.0.0.1:8080/dashboard`
+- 기능:
+  - 최근 run 목록 조회
+  - run 선택 후 behavior 시각화(타임라인 lane, action mix, critical path, 병목 노드)
+  - live polling 모드(주기/limit 조정 가능)
+- 인증:
+  - 대시보드에서 `API Key` + `API Secret`를 입력하면 브라우저가 HMAC 헤더를 직접 생성해 API를 호출합니다.
+
 ## TUI 조작
 - 포커스/이동: `Tab`, `↑/↓` 또는 `j/k`
 - 작업 실행: `i` (입력 모드) -> 작업 입력 -> `Enter`
@@ -71,6 +80,7 @@ TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시
 - `GET /v1/sessions/{session_id}`
 - `GET /v1/sessions/{session_id}/runs`
 - `POST /v1/runs`
+- `GET /v1/runs`
 - `GET /v1/runs/{run_id}`
 - `POST /v1/runs/{run_id}/cancel`
 - `POST /v1/runs/{run_id}/pause`

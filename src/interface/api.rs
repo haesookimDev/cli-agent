@@ -5,8 +5,8 @@ use async_stream::stream;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,8 @@ use uuid::Uuid;
 use crate::orchestrator::Orchestrator;
 use crate::types::{RunRequest, TaskProfile};
 use crate::webhook::AuthManager;
+
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -83,6 +85,7 @@ struct TestWebhookRequest {
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/dashboard", get(dashboard_handler))
         .route(
             "/v1/sessions",
             post(create_session_handler).get(list_sessions_handler),
@@ -92,7 +95,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/sessions/:session_id/runs",
             get(list_session_runs_handler),
         )
-        .route("/v1/runs", post(create_run_handler))
+        .route("/v1/runs", post(create_run_handler).get(list_runs_handler))
         .route("/v1/runs/:run_id", get(get_run_handler))
         .route("/v1/runs/:run_id/cancel", post(cancel_run_handler))
         .route("/v1/runs/:run_id/pause", post(pause_run_handler))
@@ -163,6 +166,10 @@ async fn create_session_handler(
         StatusCode::CREATED,
         Json(serde_json::to_value(CreateSessionResponse { session_id }).unwrap()),
     )
+}
+
+async fn dashboard_handler() -> Html<&'static str> {
+    Html(DASHBOARD_HTML)
 }
 
 async fn list_sessions_handler(
@@ -295,6 +302,28 @@ async fn create_run_handler(
             StatusCode::ACCEPTED,
             Json(serde_json::to_value(submission).unwrap()),
         ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_runs_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    match state.orchestrator.list_recent_runs(limit).await {
+        Ok(runs) => (StatusCode::OK, Json(serde_json::to_value(runs).unwrap())),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
