@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
@@ -22,6 +23,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 thiserror = "2.0"
 tokio = { version = "1.43", features = ["full"] }
+tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.13", features = ["v4", "serde"] }

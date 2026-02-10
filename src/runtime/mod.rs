@@ -46,6 +46,8 @@ pub enum RuntimeEvent {
     DynamicNodeAdded {
         node_id: String,
         from_node: String,
+        role: AgentRole,
+        dependencies: Vec<String>,
     },
     GraphCompleted,
 }
@@ -166,11 +168,15 @@ impl AgentRuntime {
                         let dynamic_nodes = on_completed(node.clone(), ok.clone()).await?;
                         for dynamic in dynamic_nodes {
                             let dynamic_id = dynamic.id.clone();
+                            let dynamic_role = dynamic.role;
+                            let dynamic_dependencies = dynamic.dependencies.clone();
                             graph.add_node(dynamic)?;
                             if let Some(sink) = &on_event {
                                 sink(RuntimeEvent::DynamicNodeAdded {
                                     node_id: dynamic_id,
                                     from_node: node.id.clone(),
+                                    role: dynamic_role,
+                                    dependencies: dynamic_dependencies,
                                 });
                             }
                         }

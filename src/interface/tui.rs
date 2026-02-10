@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::orchestrator::Orchestrator;
-use crate::types::{RunRecord, RunRequest, SessionSummary, TaskProfile};
+use crate::types::{RunRecord, RunRequest, RunTrace, SessionSummary, TaskProfile};
 
 const MIN_REFRESH_MS: u64 = 500;
 const MAX_REFRESH_MS: u64 = 10_000;
@@ -81,6 +81,7 @@ struct TuiState {
     task_input: String,
     status_text: String,
     replay_preview: Vec<String>,
+    trace: Option<RunTrace>,
     show_help: bool,
     should_quit: bool,
 }
@@ -99,6 +100,7 @@ impl TuiState {
             task_input: String::new(),
             status_text: "loading...".to_string(),
             replay_preview: Vec::new(),
+            trace: None,
             show_help: false,
             should_quit: false,
         }
@@ -223,6 +225,13 @@ async fn refresh_state(orchestrator: &Orchestrator, state: &mut TuiState) -> any
     }
 
     state.clamp_selection();
+
+    state.trace = if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
+        orchestrator.get_run_trace(run_id, 2_000).await?
+    } else {
+        None
+    };
+
     state.set_status(format!(
         "sessions={} runs={} refresh={}ms",
         state.sessions.len(),
@@ -712,6 +721,57 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
         lines.push(Line::from("<no run selected>"));
     }
 
+    if let Some(trace) = &state.trace {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Behavior Graph",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "nodes={} active={} completed={} failed={}",
+            trace.graph.nodes.len(),
+            trace.graph.active_nodes.len(),
+            trace.graph.completed_nodes,
+            trace.graph.failed_nodes
+        )));
+
+        for node in trace.graph.nodes.iter().take(8) {
+            let deps = if node.dependencies.is_empty() {
+                "-".to_string()
+            } else {
+                compact_json(node.dependencies.join(",").as_str(), 24)
+            };
+            lines.push(Line::from(format!(
+                "{} {} deps={} model={}",
+                status_marker(node.status.as_str()),
+                node.node_id,
+                deps,
+                node.model.clone().unwrap_or_else(|| "-".to_string())
+            )));
+        }
+        if trace.graph.nodes.len() > 8 {
+            lines.push(Line::from(format!("... +{}", trace.graph.nodes.len() - 8)));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Recent Actions",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for event in trace.events.iter().rev().take(6).rev() {
+            lines.push(Line::from(format!(
+                "#{} {} {}",
+                event.seq,
+                event.action,
+                compact_json(event.payload.to_string().as_str(), 46)
+            )));
+        }
+    }
+
     if !state.replay_preview.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -788,6 +848,16 @@ fn footer_lines(state: &TuiState) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn status_marker(status: &str) -> &'static str {
+    match status {
+        "running" => "[RUN]",
+        "succeeded" => "[OK ]",
+        "failed" => "[ERR]",
+        "skipped" => "[SKIP]",
+        _ => "[WAIT]",
+    }
 }
 
 fn short_uuid(id: Uuid) -> String {

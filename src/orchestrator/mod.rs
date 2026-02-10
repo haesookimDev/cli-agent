@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,8 +18,9 @@ use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
 };
 use crate::types::{
-    AgentExecutionRecord, AgentRole, RunRecord, RunRequest, RunStatus, RunSubmission, SessionEvent,
-    SessionEventType,
+    AgentExecutionRecord, AgentRole, NodeTraceState, RunActionEvent, RunActionType, RunRecord,
+    RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
+    TraceEdge,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -69,6 +71,20 @@ impl Orchestrator {
 
         self.runs.insert(run_id, record.clone());
         self.memory.upsert_run(&record).await?;
+        let run_id_text = run_id.to_string();
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::RunQueued,
+            Some("run"),
+            Some(run_id_text.as_str()),
+            None,
+            serde_json::json!({
+                "profile": req.profile,
+                "task": req.task,
+            }),
+        )
+        .await;
 
         let this = self.clone();
         tokio::spawn(async move {
@@ -122,6 +138,44 @@ impl Orchestrator {
         runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         runs.truncate(limit);
         Ok(runs)
+    }
+
+    pub async fn list_run_action_events(
+        &self,
+        run_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunActionEvent>> {
+        self.memory.list_run_action_events(run_id, limit).await
+    }
+
+    pub async fn list_run_action_events_since(
+        &self,
+        run_id: Uuid,
+        after_seq: i64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunActionEvent>> {
+        self.memory
+            .list_run_action_events_since(run_id, after_seq, limit)
+            .await
+    }
+
+    pub async fn get_run_trace(
+        &self,
+        run_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Option<RunTrace>> {
+        let Some(run) = self.get_run(run_id).await? else {
+            return Ok(None);
+        };
+        let events = self.memory.list_run_action_events(run_id, limit).await?;
+        let graph = build_trace_graph(&run, events.as_slice());
+        Ok(Some(RunTrace {
+            run_id: run.run_id,
+            session_id: run.session_id,
+            status: Some(run.status),
+            events,
+            graph,
+        }))
     }
 
     pub async fn list_session_runs(
@@ -199,6 +253,30 @@ impl Orchestrator {
         self.webhook.dispatch(event, payload).await
     }
 
+    async fn record_action_event(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        action: RunActionType,
+        actor_type: Option<&str>,
+        actor_id: Option<&str>,
+        cause_event_id: Option<&str>,
+        payload: serde_json::Value,
+    ) {
+        let _ = self
+            .memory
+            .append_run_action_event(
+                run_id,
+                session_id,
+                action,
+                actor_type,
+                actor_id,
+                cause_event_id,
+                payload,
+            )
+            .await;
+    }
+
     async fn execute_run(&self, run_id: Uuid, req: RunRequest) -> anyhow::Result<()> {
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
         self.set_running(run_id).await?;
@@ -225,6 +303,43 @@ impl Orchestrator {
             .await?;
 
         let graph = self.build_graph(req.task.as_str())?;
+        let graph_nodes = graph.nodes();
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::GraphInitialized,
+            Some("orchestrator"),
+            Some("graph"),
+            None,
+            serde_json::json!({
+                "nodes": graph_nodes.iter().map(|n| {
+                    serde_json::json!({
+                        "id": n.id.clone(),
+                        "role": n.role,
+                        "dependencies": n.dependencies.clone(),
+                        "depth": n.depth,
+                        "policy": {
+                            "retry": n.policy.retry,
+                            "timeout_ms": n.policy.timeout_ms,
+                            "max_parallelism": n.policy.max_parallelism,
+                            "on_dependency_failure": n.policy.on_dependency_failure,
+                            "fallback_node": n.policy.fallback_node.clone(),
+                        }
+                    })
+                }).collect::<Vec<_>>()
+            }),
+        )
+        .await;
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::WebhookDispatched,
+            Some("webhook"),
+            Some("run.started"),
+            None,
+            serde_json::json!({ "event": "run.started" }),
+        )
+        .await;
 
         let event_sink = self.build_event_sink(run_id, session_id);
         let run_node = self.build_run_node_fn(run_id, session_id, req.clone());
@@ -462,6 +577,25 @@ impl Orchestrator {
                 let run = agents.run_role(node.role, input, router.clone()).await;
                 match run {
                     Ok(output) => {
+                        let node_id = node.id.clone();
+                        let role = node.role;
+                        let model = output.model.clone();
+                        let _ = memory
+                            .append_run_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::ModelSelected,
+                                Some("node"),
+                                Some(node_id.as_str()),
+                                None,
+                                serde_json::json!({
+                                    "node_id": node_id.clone(),
+                                    "role": role,
+                                    "model": model.clone(),
+                                }),
+                            )
+                            .await;
+
                         memory
                             .remember_short(
                                 session_id,
@@ -477,13 +611,13 @@ impl Orchestrator {
                                 "agent_output",
                                 output.content.as_str(),
                                 0.65,
-                                Some(node.id.as_str()),
+                                Some(node_id.as_str()),
                             )
                             .await;
 
                         Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
+                            node_id,
+                            role,
                             model: output.model,
                             output: output.content,
                             duration_ms: started.elapsed().as_millis(),
@@ -583,10 +717,17 @@ impl Orchestrator {
                         "phase": "skipped",
                         "reason": reason
                     }),
-                    RuntimeEvent::DynamicNodeAdded { node_id, from_node } => serde_json::json!({
+                    RuntimeEvent::DynamicNodeAdded {
+                        node_id,
+                        from_node,
+                        role,
+                        dependencies,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "phase": "dynamic_added",
-                        "from": from_node
+                        "from": from_node,
+                        "role": role,
+                        "dependencies": dependencies,
                     }),
                     RuntimeEvent::GraphCompleted => {
                         serde_json::json!({ "phase": "graph_completed" })
@@ -602,6 +743,25 @@ impl Orchestrator {
                     | RuntimeEvent::GraphCompleted => SessionEventType::RunProgress,
                 };
 
+                let (action, actor_id) = match &event_clone {
+                    RuntimeEvent::NodeStarted { node_id, .. } => {
+                        (RunActionType::NodeStarted, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::NodeCompleted { node_id, .. } => {
+                        (RunActionType::NodeCompleted, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::NodeFailed { node_id, .. } => {
+                        (RunActionType::NodeFailed, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::NodeSkipped { node_id, .. } => {
+                        (RunActionType::NodeSkipped, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::DynamicNodeAdded { node_id, .. } => {
+                        (RunActionType::DynamicNodeAdded, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::GraphCompleted => (RunActionType::GraphCompleted, Some("graph")),
+                };
+
                 let _ = memory
                     .append_event(SessionEvent {
                         session_id,
@@ -610,6 +770,18 @@ impl Orchestrator {
                         timestamp: Utc::now(),
                         payload: payload.clone(),
                     })
+                    .await;
+
+                let _ = memory
+                    .append_run_action_event(
+                        run_id,
+                        session_id,
+                        action,
+                        Some("runtime"),
+                        actor_id,
+                        None,
+                        payload.clone(),
+                    )
                     .await;
 
                 let _ = webhook.dispatch("run.progress", payload).await;
@@ -624,8 +796,20 @@ impl Orchestrator {
             entry
                 .timeline
                 .push(format!("{} run started", Utc::now().to_rfc3339()));
+            let session_id = entry.session_id;
+            let run_id_text = run_id.to_string();
 
             self.memory.upsert_run(&entry).await?;
+            self.record_action_event(
+                run_id,
+                session_id,
+                RunActionType::RunStarted,
+                Some("run"),
+                Some(run_id_text.as_str()),
+                None,
+                serde_json::json!({ "status": "running" }),
+            )
+            .await;
             return Ok(());
         }
 
@@ -666,12 +850,31 @@ impl Orchestrator {
             Utc::now().to_rfc3339(),
             status_text
         ));
+        let session_id = entry.session_id;
+        let run_status = entry.status;
+        let output_len = entry.outputs.len();
+        let run_error = entry.error.clone();
+        let run_id_text = run_id.to_string();
 
         self.memory.upsert_run(&entry).await?;
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::RunFinished,
+            Some("run"),
+            Some(run_id_text.as_str()),
+            None,
+            serde_json::json!({
+                "status": run_status,
+                "outputs": output_len,
+                "error": run_error,
+            }),
+        )
+        .await;
 
         self.memory
             .append_event(SessionEvent {
-                session_id: entry.session_id,
+                session_id,
                 run_id: Some(entry.run_id),
                 event_type: if entry.status == RunStatus::Succeeded {
                     SessionEventType::RunCompleted
@@ -681,7 +884,7 @@ impl Orchestrator {
                 timestamp: Utc::now(),
                 payload: serde_json::json!({
                     "status": entry.status,
-                    "outputs": entry.outputs.len(),
+                    "outputs": output_len,
                     "error": entry.error,
                 }),
             })
@@ -698,6 +901,16 @@ impl Orchestrator {
                     }),
                 )
                 .await?;
+            self.record_action_event(
+                run_id,
+                session_id,
+                RunActionType::WebhookDispatched,
+                Some("webhook"),
+                Some("run.completed"),
+                None,
+                serde_json::json!({ "event": "run.completed" }),
+            )
+            .await;
         } else {
             self.webhook
                 .dispatch(
@@ -709,6 +922,16 @@ impl Orchestrator {
                     }),
                 )
                 .await?;
+            self.record_action_event(
+                run_id,
+                session_id,
+                RunActionType::WebhookDispatched,
+                Some("webhook"),
+                Some("run.failed"),
+                None,
+                serde_json::json!({ "event": "run.failed" }),
+            )
+            .await;
         }
 
         info!("run {} finished with status {}", run_id, entry.status);
@@ -721,8 +944,345 @@ impl Orchestrator {
     }
 }
 
+fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGraph {
+    let mut nodes = HashMap::<String, NodeTraceState>::new();
+    let mut edges = HashSet::<(String, String)>::new();
+    let mut start_counts = HashMap::<String, u32>::new();
+
+    for output in &run.outputs {
+        nodes
+            .entry(output.node_id.clone())
+            .or_insert(NodeTraceState {
+                node_id: output.node_id.clone(),
+                role: Some(output.role),
+                dependencies: Vec::new(),
+                status: if output.succeeded {
+                    "succeeded".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                started_at: None,
+                finished_at: None,
+                duration_ms: Some(output.duration_ms),
+                retries: 0,
+                model: Some(output.model.clone()),
+            });
+    }
+
+    for event in events {
+        match event.action {
+            RunActionType::GraphInitialized => {
+                let Some(items) = event.payload.get("nodes").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                for item in items {
+                    let Some(node_id) = item.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let role = item
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_agent_role);
+                    let dependencies = item
+                        .get("dependencies")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|dep| dep.as_str().map(ToString::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+
+                    let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                        node_id: node_id.to_string(),
+                        role,
+                        dependencies: dependencies.clone(),
+                        status: "pending".to_string(),
+                        started_at: None,
+                        finished_at: None,
+                        duration_ms: None,
+                        retries: 0,
+                        model: None,
+                    });
+
+                    if node.role.is_none() {
+                        node.role = role;
+                    }
+                    if node.dependencies.is_empty() && !dependencies.is_empty() {
+                        node.dependencies = dependencies.clone();
+                    }
+                    if node.status.is_empty() {
+                        node.status = "pending".to_string();
+                    }
+
+                    for dep in dependencies {
+                        edges.insert((dep, node_id.to_string()));
+                    }
+                }
+            }
+            RunActionType::NodeStarted => {
+                if let Some(node_id) = event.payload.get("node_id").and_then(|v| v.as_str()) {
+                    let role = event
+                        .payload
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_agent_role);
+                    let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                        node_id: node_id.to_string(),
+                        role,
+                        dependencies: Vec::new(),
+                        status: "running".to_string(),
+                        started_at: Some(event.timestamp),
+                        finished_at: None,
+                        duration_ms: None,
+                        retries: 0,
+                        model: None,
+                    });
+
+                    if node.started_at.is_none() {
+                        node.started_at = Some(event.timestamp);
+                    }
+                    node.status = "running".to_string();
+                    if node.role.is_none() {
+                        node.role = role;
+                    }
+                    let starts = start_counts.entry(node_id.to_string()).or_insert(0);
+                    *starts = starts.saturating_add(1);
+                }
+            }
+            RunActionType::NodeCompleted => {
+                if let Some(node_id) = event.payload.get("node_id").and_then(|v| v.as_str()) {
+                    let role = event
+                        .payload
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_agent_role);
+                    let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                        node_id: node_id.to_string(),
+                        role,
+                        dependencies: Vec::new(),
+                        status: "succeeded".to_string(),
+                        started_at: None,
+                        finished_at: Some(event.timestamp),
+                        duration_ms: None,
+                        retries: 0,
+                        model: None,
+                    });
+                    node.status = "succeeded".to_string();
+                    node.finished_at = Some(event.timestamp);
+                    if node.role.is_none() {
+                        node.role = role;
+                    }
+                }
+            }
+            RunActionType::NodeFailed => {
+                if let Some(node_id) = event.payload.get("node_id").and_then(|v| v.as_str()) {
+                    let role = event
+                        .payload
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_agent_role);
+                    let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                        node_id: node_id.to_string(),
+                        role,
+                        dependencies: Vec::new(),
+                        status: "failed".to_string(),
+                        started_at: None,
+                        finished_at: Some(event.timestamp),
+                        duration_ms: None,
+                        retries: 0,
+                        model: None,
+                    });
+                    node.status = "failed".to_string();
+                    node.finished_at = Some(event.timestamp);
+                    if node.role.is_none() {
+                        node.role = role;
+                    }
+                }
+            }
+            RunActionType::NodeSkipped => {
+                if let Some(node_id) = event.payload.get("node_id").and_then(|v| v.as_str()) {
+                    let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                        node_id: node_id.to_string(),
+                        role: None,
+                        dependencies: Vec::new(),
+                        status: "skipped".to_string(),
+                        started_at: None,
+                        finished_at: Some(event.timestamp),
+                        duration_ms: None,
+                        retries: 0,
+                        model: None,
+                    });
+                    node.status = "skipped".to_string();
+                    node.finished_at = Some(event.timestamp);
+                }
+            }
+            RunActionType::DynamicNodeAdded => {
+                let Some(node_id) = event.payload.get("node_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let role = event
+                    .payload
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_agent_role);
+                let dependencies = event
+                    .payload
+                    .get("dependencies")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|dep| dep.as_str().map(ToString::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                    node_id: node_id.to_string(),
+                    role,
+                    dependencies: dependencies.clone(),
+                    status: "pending".to_string(),
+                    started_at: None,
+                    finished_at: None,
+                    duration_ms: None,
+                    retries: 0,
+                    model: None,
+                });
+                if node.role.is_none() {
+                    node.role = role;
+                }
+                if node.dependencies.is_empty() && !dependencies.is_empty() {
+                    node.dependencies = dependencies.clone();
+                }
+
+                for dep in dependencies {
+                    edges.insert((dep, node_id.to_string()));
+                }
+            }
+            RunActionType::ModelSelected => {
+                let node_id = event
+                    .payload
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| event.actor_id.as_deref());
+                if let Some(node_id) = node_id {
+                    let model = event
+                        .payload
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    let role = event
+                        .payload
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_agent_role);
+
+                    let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
+                        node_id: node_id.to_string(),
+                        role,
+                        dependencies: Vec::new(),
+                        status: "pending".to_string(),
+                        started_at: None,
+                        finished_at: None,
+                        duration_ms: None,
+                        retries: 0,
+                        model: model.clone(),
+                    });
+                    node.model = model;
+                    if node.role.is_none() {
+                        node.role = role;
+                    }
+                }
+            }
+            RunActionType::RunQueued
+            | RunActionType::RunStarted
+            | RunActionType::GraphCompleted
+            | RunActionType::RunFinished
+            | RunActionType::WebhookDispatched => {}
+        }
+    }
+
+    for output in &run.outputs {
+        let node = nodes
+            .entry(output.node_id.clone())
+            .or_insert(NodeTraceState {
+                node_id: output.node_id.clone(),
+                role: Some(output.role),
+                dependencies: Vec::new(),
+                status: if output.succeeded {
+                    "succeeded".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                started_at: None,
+                finished_at: None,
+                duration_ms: Some(output.duration_ms),
+                retries: 0,
+                model: Some(output.model.clone()),
+            });
+        node.role = Some(output.role);
+        node.model = Some(output.model.clone());
+        node.duration_ms = Some(output.duration_ms);
+        if output.succeeded {
+            if node.status == "pending" || node.status == "running" {
+                node.status = "succeeded".to_string();
+            }
+        } else {
+            node.status = "failed".to_string();
+        }
+    }
+
+    for (node_id, starts) in start_counts {
+        if let Some(node) = nodes.get_mut(node_id.as_str()) {
+            node.retries = starts.saturating_sub(1);
+        }
+    }
+
+    let mut node_list = nodes.into_values().collect::<Vec<_>>();
+    node_list.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+
+    let mut edge_list = edges
+        .into_iter()
+        .map(|(from, to)| TraceEdge { from, to })
+        .collect::<Vec<_>>();
+    edge_list
+        .sort_by(|a, b| (a.from.as_str(), a.to.as_str()).cmp(&(b.from.as_str(), b.to.as_str())));
+
+    let active_nodes = node_list
+        .iter()
+        .filter(|n| n.status == "running")
+        .map(|n| n.node_id.clone())
+        .collect::<Vec<_>>();
+    let completed_nodes = node_list
+        .iter()
+        .filter(|n| n.status == "succeeded" || n.status == "skipped")
+        .count();
+    let failed_nodes = node_list.iter().filter(|n| n.status == "failed").count();
+
+    RunTraceGraph {
+        nodes: node_list,
+        edges: edge_list,
+        active_nodes,
+        completed_nodes,
+        failed_nodes,
+    }
+}
+
+fn parse_agent_role(value: &str) -> Option<AgentRole> {
+    match value {
+        "planner" => Some(AgentRole::Planner),
+        "extractor" => Some(AgentRole::Extractor),
+        "coder" => Some(AgentRole::Coder),
+        "summarizer" => Some(AgentRole::Summarizer),
+        "fallback" => Some(AgentRole::Fallback),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::*;
 
     #[tokio::test]
@@ -759,5 +1319,115 @@ mod tests {
         assert!(graph.node("plan").is_some());
         assert!(graph.node("code").is_some());
         assert!(graph.node("webhook_validation").is_some());
+    }
+
+    #[test]
+    fn build_trace_graph_reconstructs_node_states() {
+        let run_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut run = RunRecord::new_queued(
+            run_id,
+            session_id,
+            "trace test".to_string(),
+            crate::types::TaskProfile::General,
+        );
+        run.status = RunStatus::Succeeded;
+
+        let events = vec![
+            RunActionEvent {
+                seq: 1,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: Utc::now(),
+                action: RunActionType::GraphInitialized,
+                actor_type: Some("orchestrator".to_string()),
+                actor_id: Some("graph".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({
+                    "nodes": [
+                        {"id":"plan","role":"planner","dependencies":[]},
+                        {"id":"code","role":"coder","dependencies":["plan"]}
+                    ]
+                }),
+            },
+            RunActionEvent {
+                seq: 2,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: Utc::now(),
+                action: RunActionType::NodeStarted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("plan".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"plan","role":"planner"}),
+            },
+            RunActionEvent {
+                seq: 3,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: Utc::now(),
+                action: RunActionType::NodeCompleted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("plan".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"plan","role":"planner"}),
+            },
+            RunActionEvent {
+                seq: 4,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: Utc::now(),
+                action: RunActionType::NodeStarted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("code".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"code","role":"coder"}),
+            },
+            RunActionEvent {
+                seq: 5,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: Utc::now(),
+                action: RunActionType::ModelSelected,
+                actor_type: Some("node".to_string()),
+                actor_id: Some("code".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"code","role":"coder","model":"mock:model"}),
+            },
+            RunActionEvent {
+                seq: 6,
+                event_id: Uuid::new_v4().to_string(),
+                run_id,
+                session_id,
+                timestamp: Utc::now(),
+                action: RunActionType::NodeCompleted,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some("code".to_string()),
+                cause_event_id: None,
+                payload: serde_json::json!({"node_id":"code","role":"coder"}),
+            },
+        ];
+
+        let graph = build_trace_graph(&run, events.as_slice());
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "plan" && e.to == "code")
+        );
+
+        let code = graph
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "code")
+            .expect("code node should exist");
+        assert_eq!(code.status, "succeeded");
+        assert_eq!(code.model.as_deref(), Some("mock:model"));
     }
 }

@@ -206,3 +206,91 @@ pub struct SessionSummary {
     pub last_run_at: Option<DateTime<Utc>>,
     pub last_task: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunActionType {
+    RunQueued,
+    RunStarted,
+    GraphInitialized,
+    NodeStarted,
+    NodeCompleted,
+    NodeFailed,
+    NodeSkipped,
+    DynamicNodeAdded,
+    GraphCompleted,
+    ModelSelected,
+    RunFinished,
+    WebhookDispatched,
+}
+
+impl Display for RunActionType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            RunActionType::RunQueued => "run_queued",
+            RunActionType::RunStarted => "run_started",
+            RunActionType::GraphInitialized => "graph_initialized",
+            RunActionType::NodeStarted => "node_started",
+            RunActionType::NodeCompleted => "node_completed",
+            RunActionType::NodeFailed => "node_failed",
+            RunActionType::NodeSkipped => "node_skipped",
+            RunActionType::DynamicNodeAdded => "dynamic_node_added",
+            RunActionType::GraphCompleted => "graph_completed",
+            RunActionType::ModelSelected => "model_selected",
+            RunActionType::RunFinished => "run_finished",
+            RunActionType::WebhookDispatched => "webhook_dispatched",
+        };
+        write!(f, "{s}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunActionEvent {
+    pub seq: i64,
+    pub event_id: String,
+    pub run_id: Uuid,
+    pub session_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub action: RunActionType,
+    pub actor_type: Option<String>,
+    pub actor_id: Option<String>,
+    pub cause_event_id: Option<String>,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeTraceState {
+    pub node_id: String,
+    pub role: Option<AgentRole>,
+    pub dependencies: Vec<String>,
+    pub status: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<u128>,
+    pub retries: u32,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunTraceGraph {
+    pub nodes: Vec<NodeTraceState>,
+    pub edges: Vec<TraceEdge>,
+    pub active_nodes: Vec<String>,
+    pub completed_nodes: usize,
+    pub failed_nodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunTrace {
+    pub run_id: Uuid,
+    pub session_id: Uuid,
+    pub status: Option<RunStatus>,
+    pub events: Vec<RunActionEvent>,
+    pub graph: RunTraceGraph,
+}

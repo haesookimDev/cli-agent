@@ -57,12 +57,26 @@ cargo run -- memory vacuum
 
 TUI 사용자 설정은 `data/tui-settings.json`에 저장됩니다.
 
+TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시됩니다.
+- `Behavior Graph`: 노드 상태(`WAIT/RUN/OK/ERR/SKIP`), 의존성, 선택 모델
+- `Recent Actions`: 런타임 행동 이벤트 시퀀스(`node_started`, `model_selected`, `dynamic_node_added` 등)
+
 ## REST 엔드포인트
 - `POST /v1/sessions`
 - `POST /v1/runs`
 - `GET /v1/runs/{run_id}`
+- `GET /v1/runs/{run_id}/trace`
+- `GET /v1/runs/{run_id}/stream` (SSE)
 - `POST /v1/webhooks/endpoints`
 - `POST /v1/webhooks/test`
+
+`trace`는 동작 이벤트와 그래프 스냅샷을 반환합니다.
+`stream`은 실시간 행동 이벤트를 SSE로 전송합니다.
+
+### SSE 이벤트 타입
+- `action_event`: 런타임 행동 이벤트 payload
+- `run_terminal`: 런 종료 상태 이벤트
+- `error`: 스트림 오류
 
 ## 인증 시그니처
 시그니처 원문:

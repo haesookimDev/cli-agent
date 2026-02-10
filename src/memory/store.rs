@@ -5,7 +5,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::types::{MemoryHit, RunRecord, SessionSummary, WebhookEndpoint};
+use crate::types::{
+    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionSummary, WebhookEndpoint,
+};
 
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
@@ -97,6 +99,34 @@ impl SqliteStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS run_action_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                action TEXT NOT NULL,
+                actor_type TEXT,
+                actor_id TEXT,
+                cause_event_id TEXT,
+                payload TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_run_action_events_run_seq
+            ON run_action_events (run_id, seq);
             "#,
         )
         .execute(&self.pool)
@@ -243,6 +273,172 @@ impl SqliteStore {
             runs.push(serde_json::from_str(&run_json)?);
         }
         Ok(runs)
+    }
+
+    pub async fn append_run_action_event(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        action: RunActionType,
+        actor_type: Option<&str>,
+        actor_id: Option<&str>,
+        cause_event_id: Option<&str>,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<RunActionEvent> {
+        let event_id = Uuid::new_v4().to_string();
+        let timestamp = Utc::now();
+        let payload_raw = serde_json::to_string(&payload)?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO run_action_events (
+                event_id,
+                run_id,
+                session_id,
+                timestamp,
+                action,
+                actor_type,
+                actor_id,
+                cause_event_id,
+                payload
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+        )
+        .bind(event_id.as_str())
+        .bind(run_id.to_string())
+        .bind(session_id.to_string())
+        .bind(timestamp.to_rfc3339())
+        .bind(action.to_string())
+        .bind(actor_type)
+        .bind(actor_id)
+        .bind(cause_event_id)
+        .bind(payload_raw)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(RunActionEvent {
+            seq: result.last_insert_rowid(),
+            event_id,
+            run_id,
+            session_id,
+            timestamp,
+            action,
+            actor_type: actor_type.map(ToString::to_string),
+            actor_id: actor_id.map(ToString::to_string),
+            cause_event_id: cause_event_id.map(ToString::to_string),
+            payload,
+        })
+    }
+
+    pub async fn list_run_action_events(
+        &self,
+        run_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunActionEvent>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                seq,
+                event_id,
+                run_id,
+                session_id,
+                timestamp,
+                action,
+                actor_type,
+                actor_id,
+                cause_event_id,
+                payload
+            FROM run_action_events
+            WHERE run_id = ?1
+            ORDER BY seq ASC
+            LIMIT ?2
+            "#,
+        )
+        .bind(run_id.to_string())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let run_raw: String = row.get("run_id");
+            let session_raw: String = row.get("session_id");
+            let ts_raw: String = row.get("timestamp");
+            let action_raw: String = row.get("action");
+            let payload_raw: String = row.get("payload");
+
+            events.push(RunActionEvent {
+                seq: row.get("seq"),
+                event_id: row.get("event_id"),
+                run_id: Uuid::parse_str(run_raw.as_str())?,
+                session_id: Uuid::parse_str(session_raw.as_str())?,
+                timestamp: parse_rfc3339(ts_raw.as_str())?,
+                action: parse_run_action(action_raw.as_str())?,
+                actor_type: row.get("actor_type"),
+                actor_id: row.get("actor_id"),
+                cause_event_id: row.get("cause_event_id"),
+                payload: serde_json::from_str(payload_raw.as_str())?,
+            });
+        }
+
+        Ok(events)
+    }
+
+    pub async fn list_run_action_events_since(
+        &self,
+        run_id: Uuid,
+        after_seq: i64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunActionEvent>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                seq,
+                event_id,
+                run_id,
+                session_id,
+                timestamp,
+                action,
+                actor_type,
+                actor_id,
+                cause_event_id,
+                payload
+            FROM run_action_events
+            WHERE run_id = ?1 AND seq > ?2
+            ORDER BY seq ASC
+            LIMIT ?3
+            "#,
+        )
+        .bind(run_id.to_string())
+        .bind(after_seq)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let run_raw: String = row.get("run_id");
+            let session_raw: String = row.get("session_id");
+            let ts_raw: String = row.get("timestamp");
+            let action_raw: String = row.get("action");
+            let payload_raw: String = row.get("payload");
+
+            events.push(RunActionEvent {
+                seq: row.get("seq"),
+                event_id: row.get("event_id"),
+                run_id: Uuid::parse_str(run_raw.as_str())?,
+                session_id: Uuid::parse_str(session_raw.as_str())?,
+                timestamp: parse_rfc3339(ts_raw.as_str())?,
+                action: parse_run_action(action_raw.as_str())?,
+                actor_type: row.get("actor_type"),
+                actor_id: row.get("actor_id"),
+                cause_event_id: row.get("cause_event_id"),
+                payload: serde_json::from_str(payload_raw.as_str())?,
+            });
+        }
+
+        Ok(events)
     }
 
     pub async fn list_session_runs(
@@ -564,4 +760,25 @@ impl SqliteStore {
 
 fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
+}
+
+fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
+    let action = match value {
+        "run_queued" => RunActionType::RunQueued,
+        "run_started" => RunActionType::RunStarted,
+        "graph_initialized" => RunActionType::GraphInitialized,
+        "node_started" => RunActionType::NodeStarted,
+        "node_completed" => RunActionType::NodeCompleted,
+        "node_failed" => RunActionType::NodeFailed,
+        "node_skipped" => RunActionType::NodeSkipped,
+        "dynamic_node_added" => RunActionType::DynamicNodeAdded,
+        "graph_completed" => RunActionType::GraphCompleted,
+        "model_selected" => RunActionType::ModelSelected,
+        "run_finished" => RunActionType::RunFinished,
+        "webhook_dispatched" => RunActionType::WebhookDispatched,
+        _ => {
+            return Err(anyhow::anyhow!("unknown run action event type: {value}"));
+        }
+    };
+    Ok(action)
 }

@@ -1,9 +1,12 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
+use async_stream::stream;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,16 @@ struct CreateRunRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamQuery {
+    poll_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterWebhookRequest {
     url: String,
     events: Vec<String>,
@@ -55,6 +68,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/sessions", post(create_session_handler))
         .route("/v1/runs", post(create_run_handler))
         .route("/v1/runs/:run_id", get(get_run_handler))
+        .route("/v1/runs/:run_id/trace", get(get_run_trace_handler))
+        .route("/v1/runs/:run_id/stream", get(stream_run_handler))
         .route("/v1/webhooks/endpoints", post(register_webhook_handler))
         .route("/v1/webhooks/test", post(test_webhook_handler))
         .with_state(state)
@@ -180,6 +195,154 @@ async fn get_run_handler(
             Json(serde_json::json!({"error": err.to_string()})),
         ),
     }
+}
+
+async fn get_run_trace_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    Query(query): Query<TraceQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let limit = query.limit.unwrap_or(5_000).clamp(1, 20_000);
+    match state.orchestrator.get_run_trace(run_id, limit).await {
+        Ok(Some(trace)) => (StatusCode::OK, Json(serde_json::to_value(trace).unwrap())),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "run not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn stream_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    Query(query): Query<StreamQuery>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response();
+    }
+
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let poll_ms = query.poll_ms.unwrap_or(500).clamp(200, 5_000);
+    let orchestrator = state.orchestrator.clone();
+
+    let event_stream = stream! {
+        let mut last_seq: i64 = 0;
+        let mut idle_terminal_ticks = 0_u8;
+
+        loop {
+            let events_result = orchestrator
+                .list_run_action_events_since(run_id, last_seq, 500)
+                .await;
+
+            let events = match events_result {
+                Ok(events) => events,
+                Err(err) => {
+                    let payload = serde_json::json!({"error": err.to_string()});
+                    yield Ok::<SseEvent, std::convert::Infallible>(
+                        SseEvent::default().event("error").data(payload.to_string())
+                    );
+                    break;
+                }
+            };
+
+            for event in events {
+                last_seq = event.seq;
+                let payload = match serde_json::to_string(&event) {
+                    Ok(v) => v,
+                    Err(_) => "{\"error\":\"serialization_failed\"}".to_string(),
+                };
+                yield Ok::<SseEvent, std::convert::Infallible>(
+                    SseEvent::default().event("action_event").data(payload),
+                );
+            }
+
+            match orchestrator.get_run(run_id).await {
+                Ok(Some(run)) if run.status.is_terminal() => {
+                    if last_seq > 0 {
+                        idle_terminal_ticks = idle_terminal_ticks.saturating_add(1);
+                        if idle_terminal_ticks >= 2 {
+                            let payload = serde_json::json!({
+                                "run_id": run.run_id,
+                                "status": run.status,
+                            });
+                            yield Ok::<SseEvent, std::convert::Infallible>(
+                                SseEvent::default().event("run_terminal").data(payload.to_string()),
+                            );
+                            break;
+                        }
+                    } else {
+                        let payload = serde_json::json!({
+                            "run_id": run.run_id,
+                            "status": run.status,
+                        });
+                        yield Ok::<SseEvent, std::convert::Infallible>(
+                            SseEvent::default().event("run_terminal").data(payload.to_string()),
+                        );
+                        break;
+                    }
+                }
+                Ok(Some(_)) => {
+                    idle_terminal_ticks = 0;
+                }
+                Ok(None) => {
+                    yield Ok::<SseEvent, std::convert::Infallible>(
+                        SseEvent::default().event("error").data("{\"error\":\"run_not_found\"}"),
+                    );
+                    break;
+                }
+                Err(err) => {
+                    let payload = serde_json::json!({"error": err.to_string()});
+                    yield Ok::<SseEvent, std::convert::Infallible>(
+                        SseEvent::default().event("error").data(payload.to_string())
+                    );
+                    break;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+        }
+    };
+
+    Sse::new(event_stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+        .into_response()
 }
 
 async fn register_webhook_handler(

@@ -9,7 +9,8 @@ use dashmap::DashMap;
 use uuid::Uuid;
 
 use crate::types::{
-    MemoryHit, RunRecord, SessionEvent, SessionEventType, SessionSummary, WebhookEndpoint,
+    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionEvent, SessionEventType,
+    SessionSummary, WebhookEndpoint,
 };
 
 pub use self::session_log::SessionLogger;
@@ -77,6 +78,48 @@ impl MemoryManager {
 
     pub async fn list_recent_runs(&self, limit: usize) -> anyhow::Result<Vec<RunRecord>> {
         self.store.list_recent_runs(limit).await
+    }
+
+    pub async fn append_run_action_event(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        action: RunActionType,
+        actor_type: Option<&str>,
+        actor_id: Option<&str>,
+        cause_event_id: Option<&str>,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<RunActionEvent> {
+        self.store
+            .append_run_action_event(
+                run_id,
+                session_id,
+                action,
+                actor_type,
+                actor_id,
+                cause_event_id,
+                payload,
+            )
+            .await
+    }
+
+    pub async fn list_run_action_events(
+        &self,
+        run_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunActionEvent>> {
+        self.store.list_run_action_events(run_id, limit).await
+    }
+
+    pub async fn list_run_action_events_since(
+        &self,
+        run_id: Uuid,
+        after_seq: i64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunActionEvent>> {
+        self.store
+            .list_run_action_events_since(run_id, after_seq, limit)
+            .await
     }
 
     pub async fn list_session_runs(
