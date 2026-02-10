@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -31,12 +31,14 @@ const MAX_LIST_LIMIT: usize = 200;
 enum FocusPane {
     Sessions,
     Runs,
+    Details,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InputMode {
     Normal,
     TaskInput,
+    Filter(FocusPane),
     ConfirmDelete(Uuid),
 }
 
@@ -76,14 +78,19 @@ struct TuiState {
     mode: InputMode,
     focus: FocusPane,
     sessions: Vec<SessionSummary>,
+    filtered_sessions: Vec<usize>,
     runs: Vec<RunRecord>,
+    filtered_runs: Vec<usize>,
     selected_session: usize,
     selected_run: usize,
     active_session: Option<Uuid>,
+    session_filter: String,
+    run_filter: String,
     task_input: String,
     status_text: String,
     replay_preview: Vec<String>,
     trace: Option<RunTrace>,
+    details_scroll: u16,
     show_help: bool,
     should_quit: bool,
 }
@@ -95,25 +102,31 @@ impl TuiState {
             mode: InputMode::Normal,
             focus: FocusPane::Sessions,
             sessions: Vec::new(),
+            filtered_sessions: Vec::new(),
             runs: Vec::new(),
+            filtered_runs: Vec::new(),
             selected_session: 0,
             selected_run: 0,
             active_session: None,
+            session_filter: String::new(),
+            run_filter: String::new(),
             task_input: String::new(),
             status_text: "loading...".to_string(),
             replay_preview: Vec::new(),
             trace: None,
+            details_scroll: 0,
             show_help: false,
             should_quit: false,
         }
     }
 
     fn selected_session(&self) -> Option<&SessionSummary> {
-        self.sessions.get(self.selected_session)
+        self.selected_session_index()
+            .and_then(|idx| self.sessions.get(idx))
     }
 
     fn selected_run(&self) -> Option<&RunRecord> {
-        self.runs.get(self.selected_run)
+        self.selected_run_index().and_then(|idx| self.runs.get(idx))
     }
 
     fn active_or_selected_session_id(&self) -> Option<Uuid> {
@@ -122,21 +135,79 @@ impl TuiState {
     }
 
     fn clamp_selection(&mut self) {
-        if self.sessions.is_empty() {
+        if self.filtered_sessions.is_empty() {
             self.selected_session = 0;
         } else {
-            self.selected_session = self.selected_session.min(self.sessions.len() - 1);
+            self.selected_session = self
+                .selected_session
+                .min(self.filtered_sessions.len().saturating_sub(1));
         }
 
-        if self.runs.is_empty() {
+        if self.filtered_runs.is_empty() {
             self.selected_run = 0;
         } else {
-            self.selected_run = self.selected_run.min(self.runs.len() - 1);
+            self.selected_run = self
+                .selected_run
+                .min(self.filtered_runs.len().saturating_sub(1));
         }
     }
 
     fn set_status(&mut self, text: impl Into<String>) {
         self.status_text = text.into();
+    }
+
+    fn selected_session_index(&self) -> Option<usize> {
+        self.filtered_sessions.get(self.selected_session).copied()
+    }
+
+    fn selected_run_index(&self) -> Option<usize> {
+        self.filtered_runs.get(self.selected_run).copied()
+    }
+
+    fn session_view_len(&self) -> usize {
+        self.filtered_sessions.len()
+    }
+
+    fn run_view_len(&self) -> usize {
+        self.filtered_runs.len()
+    }
+
+    fn rebuild_views(&mut self) {
+        self.filtered_sessions = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, session)| {
+                if matches_session_filter(session, self.session_filter.as_str()) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        self.filtered_runs = self
+            .runs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, run)| {
+                if matches_run_filter(run, self.run_filter.as_str()) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        self.clamp_selection();
+    }
+
+    fn active_filter_mut(&mut self, pane: FocusPane) -> &mut String {
+        match pane {
+            FocusPane::Sessions => &mut self.session_filter,
+            FocusPane::Runs => &mut self.run_filter,
+            FocusPane::Details => &mut self.session_filter, // unused; Details has no filter
+        }
     }
 }
 
@@ -226,17 +297,23 @@ async fn refresh_state(orchestrator: &Orchestrator, state: &mut TuiState) -> any
         }
     }
 
-    state.clamp_selection();
+    state.rebuild_views();
 
+    let old_trace_run_id = state.trace.as_ref().map(|t| t.run_id);
     state.trace = if let Some(run_id) = state.selected_run().map(|r| r.run_id) {
         orchestrator.get_run_trace(run_id, 2_000).await?
     } else {
         None
     };
+    if state.trace.as_ref().map(|t| t.run_id) != old_trace_run_id {
+        state.details_scroll = 0;
+    }
 
     state.set_status(format!(
-        "sessions={} runs={} refresh={}ms",
+        "sessions={}/{} runs={}/{} refresh={}ms",
+        state.filtered_sessions.len(),
         state.sessions.len(),
+        state.filtered_runs.len(),
         state.runs.len(),
         state.settings.auto_refresh_ms
     ));
@@ -255,7 +332,7 @@ async fn handle_key(
         return Ok(());
     }
 
-    match &mut state.mode {
+    match state.mode.clone() {
         InputMode::TaskInput => {
             match key.code {
                 KeyCode::Esc => {
@@ -301,10 +378,49 @@ async fn handle_key(
             }
             return Ok(());
         }
+        InputMode::Filter(target) => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    state.mode = InputMode::Normal;
+                    state.set_status("filter mode closed");
+                }
+                KeyCode::Backspace => {
+                    {
+                        let filter = state.active_filter_mut(target);
+                        filter.pop();
+                    }
+                    state.rebuild_views();
+                    let current = match &target {
+                        FocusPane::Sessions => state.session_filter.as_str(),
+                        FocusPane::Runs => state.run_filter.as_str(),
+                        FocusPane::Details => "",
+                    };
+                    state.set_status(format!("{} filter: '{}'", pane_label(target), current));
+                }
+                KeyCode::Char(ch) => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        return Ok(());
+                    }
+                    {
+                        let filter = state.active_filter_mut(target);
+                        filter.push(ch);
+                    }
+                    state.rebuild_views();
+                    let current = match &target {
+                        FocusPane::Sessions => state.session_filter.as_str(),
+                        FocusPane::Runs => state.run_filter.as_str(),
+                        FocusPane::Details => "",
+                    };
+                    state.set_status(format!("{} filter: '{}'", pane_label(target), current));
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         InputMode::ConfirmDelete(session_id) => {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let target = *session_id;
+                    let target = session_id;
                     match orchestrator.delete_session(target).await {
                         Ok(()) => {
                             if state.active_session == Some(target) {
@@ -335,10 +451,52 @@ async fn handle_key(
         KeyCode::Char('q') => {
             state.should_quit = true;
         }
+        KeyCode::Char('/') => {
+            if state.focus == FocusPane::Details {
+                state.set_status("details pane does not support filtering");
+            } else {
+                state.mode = InputMode::Filter(state.focus);
+                let current = match state.focus {
+                    FocusPane::Sessions => state.session_filter.as_str(),
+                    FocusPane::Runs => state.run_filter.as_str(),
+                    FocusPane::Details => "",
+                };
+                state.set_status(format!(
+                    "{} filter mode: '{}'",
+                    pane_label(state.focus),
+                    current
+                ));
+            }
+        }
+        KeyCode::Char('0') => {
+            if state.focus == FocusPane::Details {
+                state.set_status("details pane does not support filtering");
+            } else {
+                let cleared = {
+                    let filter = state.active_filter_mut(state.focus);
+                    if filter.is_empty() {
+                        false
+                    } else {
+                        filter.clear();
+                        true
+                    }
+                };
+                if cleared {
+                    state.rebuild_views();
+                    state.set_status(format!("{} filter cleared", pane_label(state.focus)));
+                } else {
+                    state.set_status(format!(
+                        "{} filter already empty",
+                        pane_label(state.focus)
+                    ));
+                }
+            }
+        }
         KeyCode::Tab => {
             state.focus = match state.focus {
                 FocusPane::Sessions => FocusPane::Runs,
-                FocusPane::Runs => FocusPane::Sessions,
+                FocusPane::Runs => FocusPane::Details,
+                FocusPane::Details => FocusPane::Sessions,
             };
         }
         KeyCode::Up | KeyCode::Char('k') => match state.focus {
@@ -348,19 +506,69 @@ async fn handle_key(
             FocusPane::Runs => {
                 state.selected_run = state.selected_run.saturating_sub(1);
             }
+            FocusPane::Details => {
+                state.details_scroll = state.details_scroll.saturating_sub(1);
+            }
         },
         KeyCode::Down | KeyCode::Char('j') => match state.focus {
             FocusPane::Sessions => {
-                if !state.sessions.is_empty() {
-                    state.selected_session =
-                        (state.selected_session + 1).min(state.sessions.len().saturating_sub(1));
+                if state.session_view_len() > 0 {
+                    state.selected_session = (state.selected_session + 1)
+                        .min(state.session_view_len().saturating_sub(1));
                 }
             }
             FocusPane::Runs => {
-                if !state.runs.is_empty() {
+                if state.run_view_len() > 0 {
                     state.selected_run =
-                        (state.selected_run + 1).min(state.runs.len().saturating_sub(1));
+                        (state.selected_run + 1).min(state.run_view_len().saturating_sub(1));
                 }
+            }
+            FocusPane::Details => {
+                state.details_scroll = state.details_scroll.saturating_add(1);
+            }
+        },
+        KeyCode::PageUp => match state.focus {
+            FocusPane::Sessions => {
+                state.selected_session = state.selected_session.saturating_sub(8);
+            }
+            FocusPane::Runs => {
+                state.selected_run = state.selected_run.saturating_sub(8);
+            }
+            FocusPane::Details => {
+                state.details_scroll = state.details_scroll.saturating_sub(8);
+            }
+        },
+        KeyCode::PageDown => match state.focus {
+            FocusPane::Sessions => {
+                if state.session_view_len() > 0 {
+                    state.selected_session = (state.selected_session + 8)
+                        .min(state.session_view_len().saturating_sub(1));
+                }
+            }
+            FocusPane::Runs => {
+                if state.run_view_len() > 0 {
+                    state.selected_run =
+                        (state.selected_run + 8).min(state.run_view_len().saturating_sub(1));
+                }
+            }
+            FocusPane::Details => {
+                state.details_scroll = state.details_scroll.saturating_add(8);
+            }
+        },
+        KeyCode::Home => match state.focus {
+            FocusPane::Sessions => state.selected_session = 0,
+            FocusPane::Runs => state.selected_run = 0,
+            FocusPane::Details => state.details_scroll = 0,
+        },
+        KeyCode::End => match state.focus {
+            FocusPane::Sessions => {
+                state.selected_session = state.session_view_len().saturating_sub(1);
+            }
+            FocusPane::Runs => {
+                state.selected_run = state.run_view_len().saturating_sub(1);
+            }
+            FocusPane::Details => {
+                state.details_scroll = u16::MAX / 2;
             }
         },
         KeyCode::Enter => match state.focus {
@@ -380,6 +588,9 @@ async fn handle_key(
                     ));
                     *immediate_refresh = true;
                 }
+            }
+            FocusPane::Details => {
+                state.details_scroll = 0;
             }
         },
         KeyCode::Char('?') => {
@@ -627,9 +838,9 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(12),
-            Constraint::Length(6),
+            Constraint::Length(4),
         ])
         .split(frame.area());
 
@@ -653,23 +864,50 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     draw_details(frame, body[2], state);
 
     let footer_text = footer_lines(state);
+    let (footer_title, footer_border_color) = match &state.mode {
+        InputMode::Normal => ("Controls", Color::DarkGray),
+        InputMode::TaskInput => ("Task Input", Color::Blue),
+        InputMode::Filter(_) => ("Filter", Color::Yellow),
+        InputMode::ConfirmDelete(_) => ("Confirm Delete", Color::Red),
+    };
     frame.render_widget(
         Paragraph::new(footer_text).wrap(Wrap { trim: true }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Status/Controls"),
+                .title(Span::styled(
+                    format!(" {} ", footer_title),
+                    Style::default()
+                        .fg(footer_border_color)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(footer_border_color)),
         ),
         root[2],
     );
+
+    if state.show_help {
+        draw_help_overlay(frame);
+    }
 }
 
 fn draw_sessions(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, state: &TuiState) {
-    let items = if state.sessions.is_empty() {
-        vec![ListItem::new("<no sessions>")]
+    let items = if state.filtered_sessions.is_empty() {
+        if state.sessions.is_empty() {
+            vec![ListItem::new(Span::styled(
+                "  No sessions yet. Press 'n' to create one.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            vec![ListItem::new(Span::styled(
+                "  No sessions match filter. Press '0' to clear.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        }
     } else {
         state
-            .sessions
+            .filtered_sessions
             .iter()
+            .filter_map(|idx| state.sessions.get(*idx))
             .map(|s| {
                 let active_marker = if Some(s.session_id) == state.active_session {
                     "*"
@@ -679,24 +917,50 @@ fn draw_sessions(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, st
                 let last = s
                     .last_task
                     .as_deref()
-                    .map(|t| compact_json(t, 34))
+                    .map(|t| compact_json(t, 24))
                     .unwrap_or_else(|| "-".to_string());
-                ListItem::new(format!(
-                    "{} {} runs={} last={}",
-                    active_marker,
-                    short_uuid(s.session_id),
-                    s.run_count,
-                    last
-                ))
+                let time_str = s
+                    .last_run_at
+                    .map(relative_time)
+                    .unwrap_or_else(|| "new".to_string());
+                let line = Line::from(vec![
+                    Span::styled(
+                        active_marker.to_string(),
+                        if active_marker == "*" {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::styled(
+                        short_uuid(s.session_id),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(format!("{}", s.run_count), Style::default().fg(Color::Cyan)),
+                    Span::styled("r ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(time_str, Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(last, Style::default().fg(Color::White)),
+                ]);
+                ListItem::new(line)
             })
             .collect::<Vec<_>>()
     };
 
-    let title = if state.focus == FocusPane::Sessions {
-        "Sessions [focus]"
+    let filter_display = if state.session_filter.is_empty() {
+        String::new()
     } else {
-        "Sessions"
+        format!(" [/{}]", compact_json(state.session_filter.as_str(), 14))
     };
+    let title = format!(
+        " Sessions {}/{}{}",
+        state.filtered_sessions.len(),
+        state.sessions.len(),
+        filter_display,
+    );
 
     let list = List::new(items)
         .highlight_style(
@@ -705,38 +969,76 @@ fn draw_sessions(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, st
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::ALL).title(title));
+        .block(pane_block(title, FocusPane::Sessions, state.focus));
 
     let mut list_state = ListState::default();
-    if !state.sessions.is_empty() {
+    if !state.filtered_sessions.is_empty() {
         list_state.select(Some(state.selected_session));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 fn draw_runs(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, state: &TuiState) {
-    let items = if state.runs.is_empty() {
-        vec![ListItem::new("<no runs>")]
+    let items = if state.filtered_runs.is_empty() {
+        if state.runs.is_empty() {
+            vec![ListItem::new(Span::styled(
+                "  No runs yet. Press 'i' to submit a task.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            vec![ListItem::new(Span::styled(
+                "  No runs match filter. Press '0' to clear.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        }
     } else {
         state
-            .runs
+            .filtered_runs
             .iter()
+            .filter_map(|idx| state.runs.get(*idx))
             .map(|r| {
-                ListItem::new(format!(
-                    "{} [{}] {}",
-                    short_uuid(r.run_id),
-                    r.status,
-                    compact_json(r.task.as_str(), 36)
-                ))
+                let status = r.status.to_string();
+                let duration_text = if r.status.is_terminal() {
+                    match (r.started_at, r.finished_at) {
+                        (Some(start), Some(end)) => {
+                            let ms = end
+                                .signed_duration_since(start)
+                                .num_milliseconds()
+                                .max(0) as u128;
+                            format!(" {}", format_duration_ms(ms))
+                        }
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+                let line = Line::from(vec![
+                    Span::styled(
+                        short_uuid(r.run_id),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(format!("[{}]", status), run_status_style(status.as_str())),
+                    Span::styled(duration_text, Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::raw(compact_json(r.task.as_str(), 28)),
+                ]);
+                ListItem::new(line)
             })
             .collect::<Vec<_>>()
     };
 
-    let title = if state.focus == FocusPane::Runs {
-        "Runs [focus]"
+    let filter_display = if state.run_filter.is_empty() {
+        String::new()
     } else {
-        "Runs"
+        format!(" [/{}]", compact_json(state.run_filter.as_str(), 14))
     };
+    let title = format!(
+        " Runs {}/{}{}",
+        state.filtered_runs.len(),
+        state.runs.len(),
+        filter_display,
+    );
 
     let list = List::new(items)
         .highlight_style(
@@ -745,10 +1047,10 @@ fn draw_runs(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, state:
                 .bg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::ALL).title(title));
+        .block(pane_block(title, FocusPane::Runs, state.focus));
 
     let mut list_state = ListState::default();
-    if !state.runs.is_empty() {
+    if !state.filtered_runs.is_empty() {
         list_state.select(Some(state.selected_run));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -789,12 +1091,22 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
     )));
 
     if let Some(run) = state.selected_run() {
-        lines.push(Line::from(format!(
-            "run={} session={} status={}",
-            short_uuid(run.run_id),
-            short_uuid(run.session_id),
-            run.status
-        )));
+        let status_text = run.status.to_string();
+        lines.push(Line::from(vec![
+            Span::styled("run=", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                short_uuid(run.run_id),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("session=", Style::default().fg(Color::DarkGray)),
+            Span::styled(short_uuid(run.session_id), Style::default()),
+            Span::raw("  "),
+            Span::styled(
+                format!("[{}]", status_text),
+                run_status_style(status_text.as_str()),
+            ),
+        ]));
         lines.push(Line::from(format!("profile={}", run.profile)));
         lines.push(Line::from(format!(
             "task={}",
@@ -803,16 +1115,37 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
         lines.push(Line::from(format!("outputs={}", run.outputs.len())));
 
         for output in run.outputs.iter().take(5) {
-            lines.push(Line::from(format!(
-                "- {} {} {}ms",
-                output.node_id, output.succeeded, output.duration_ms
-            )));
+            let ok_marker = if output.succeeded { "ok" } else { "err" };
+            let ok_style = if output.succeeded {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  - ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    output.node_id.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(ok_marker.to_string(), ok_style),
+                Span::styled(
+                    format!(" {}ms", output.duration_ms),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
         }
         if run.outputs.len() > 5 {
-            lines.push(Line::from(format!("... +{}", run.outputs.len() - 5)));
+            lines.push(Line::from(Span::styled(
+                format!("  ... +{}", run.outputs.len() - 5),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
     } else {
-        lines.push(Line::from("<no run selected>"));
+        lines.push(Line::from(Span::styled(
+            "<no run selected>",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     if let Some(trace) = &state.trace {
@@ -837,16 +1170,35 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
             } else {
                 compact_json(node.dependencies.join(",").as_str(), 24)
             };
-            lines.push(Line::from(format!(
-                "{} {} deps={} model={}",
-                status_marker(node.status.as_str()),
-                node.node_id,
-                deps,
-                node.model.clone().unwrap_or_else(|| "-".to_string())
-            )));
+            let marker = status_marker(node.status.as_str());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    marker.to_string(),
+                    run_status_style(node.status.as_str()),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    node.node_id.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" deps={}", deps),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!(
+                        " model={}",
+                        node.model.clone().unwrap_or_else(|| "-".to_string())
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
         }
         if trace.graph.nodes.len() > 8 {
-            lines.push(Line::from(format!("... +{}", trace.graph.nodes.len() - 8)));
+            lines.push(Line::from(Span::styled(
+                format!("... +{}", trace.graph.nodes.len() - 8),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
 
         lines.push(Line::from(""));
@@ -900,77 +1252,347 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
         }
     }
 
+    let scroll_indicator = if state.details_scroll > 0 {
+        format!(" [+{}]", state.details_scroll)
+    } else {
+        String::new()
+    };
+    let title = format!(" Details{}", scroll_indicator);
+
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("Details")),
+            .scroll((state.details_scroll, 0))
+            .block(pane_block(title, FocusPane::Details, state.focus)),
         area,
     );
 }
 
 fn header_lines(state: &TuiState) -> Vec<Line<'static>> {
-    let mode = match &state.mode {
-        InputMode::Normal => "normal".to_string(),
-        InputMode::TaskInput => "task-input".to_string(),
-        InputMode::ConfirmDelete(id) => format!("confirm-delete({})", short_uuid(*id)),
+    let (mode_text, mode_color) = match &state.mode {
+        InputMode::Normal => (" NORMAL ", Color::Green),
+        InputMode::TaskInput => (" INPUT ", Color::Blue),
+        InputMode::Filter(_) => (" FILTER ", Color::Yellow),
+        InputMode::ConfirmDelete(_) => (" DELETE? ", Color::Red),
+    };
+    let mode_span = Span::styled(
+        mode_text.to_string(),
+        Style::default()
+            .fg(Color::Black)
+            .bg(mode_color)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let focus_text = match state.focus {
+        FocusPane::Sessions => "Sessions",
+        FocusPane::Runs => "Runs",
+        FocusPane::Details => "Details",
+    };
+    let focus_span = Span::styled(
+        focus_text.to_string(),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let profile_color = match state.settings.default_profile {
+        TaskProfile::Planning => Color::Magenta,
+        TaskProfile::Extraction => Color::Cyan,
+        TaskProfile::Coding => Color::Green,
+        TaskProfile::General => Color::White,
+    };
+    let profile_span = Span::styled(
+        format!("{}", state.settings.default_profile),
+        Style::default()
+            .fg(profile_color)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let session_span = match state.active_session {
+        Some(id) => Span::styled(
+            short_uuid(id),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        None => Span::styled("none".to_string(), Style::default().fg(Color::DarkGray)),
     };
 
-    let focus = match state.focus {
-        FocusPane::Sessions => "sessions",
-        FocusPane::Runs => "runs",
-    };
+    let sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
 
-    vec![Line::from(format!(
-        "mode={} focus={} profile={} active_session={}",
-        mode,
-        focus,
-        state.settings.default_profile,
-        state
-            .active_session
-            .map(short_uuid)
-            .unwrap_or_else(|| "<none>".to_string())
-    ))]
+    let line1 = Line::from(vec![
+        Span::raw(" "),
+        mode_span,
+        sep.clone(),
+        Span::styled("Focus: ", Style::default().fg(Color::DarkGray)),
+        focus_span,
+        sep.clone(),
+        Span::styled("Profile: ", Style::default().fg(Color::DarkGray)),
+        profile_span,
+        sep.clone(),
+        Span::styled("Session: ", Style::default().fg(Color::DarkGray)),
+        session_span,
+    ]);
+
+    let line2 = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(state.status_text.clone(), Style::default().fg(Color::White)),
+    ]);
+
+    vec![line1, line2]
 }
 
 fn footer_lines(state: &TuiState) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(Color::DarkGray);
+    let input_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
 
     match &state.mode {
         InputMode::TaskInput => {
-            lines.push(Line::from(format!("task> {}", state.task_input)));
-            lines.push(Line::from("enter=submit esc=cancel"));
+            vec![
+                Line::from(vec![
+                    Span::styled(" task> ", key_style),
+                    Span::styled(state.task_input.clone(), input_style),
+                    Span::styled("_", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Enter", key_style),
+                    Span::styled(" submit  ", desc_style),
+                    Span::styled("Esc", key_style),
+                    Span::styled(" cancel", desc_style),
+                ]),
+            ]
+        }
+        InputMode::Filter(target) => {
+            let current = match target {
+                FocusPane::Sessions => state.session_filter.as_str(),
+                FocusPane::Runs => state.run_filter.as_str(),
+                FocusPane::Details => "",
+            };
+            vec![
+                Line::from(vec![
+                    Span::styled(format!(" {} filter> ", pane_label(*target)), key_style),
+                    Span::styled(current.to_string(), input_style),
+                    Span::styled("_", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Enter/Esc", key_style),
+                    Span::styled(" close  ", desc_style),
+                    Span::styled("0", key_style),
+                    Span::styled(" clear filter", desc_style),
+                ]),
+            ]
         }
         InputMode::ConfirmDelete(id) => {
-            lines.push(Line::from(format!(
-                "delete session {} ? y=confirm any=cancel",
-                short_uuid(*id)
-            )));
+            vec![Line::from(vec![
+                Span::styled(
+                    format!(" Delete session {}?  ", short_uuid(*id)),
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("y", key_style),
+                Span::styled(" confirm  ", desc_style),
+                Span::styled("any key", key_style),
+                Span::styled(" cancel", desc_style),
+            ])]
         }
         InputMode::Normal => {
-            lines.push(Line::from(state.status_text.clone()));
-            lines.push(Line::from(
-                "tab switch pane | i add task | enter set active | c continue | n new session | d delete | x clear active",
-            ));
-            lines.push(Line::from(
-                "s cancel run | z pause run | u resume run | t retry run | g clone run | v replay | m compact | r refresh | q quit",
-            ));
-            lines.push(Line::from(
-                "1/2/3/4 profile | p cycle | [/ ] refresh-ms | ,/. session-limit | -/= run-limit | f follow-active",
-            ));
-            if state.show_help {
-                lines.push(Line::from(
-                    "help: select session then enter/c, tasks run into active session for continuation.",
-                ));
-            }
+            let nav_line = Line::from(vec![
+                Span::styled(" Tab", key_style),
+                Span::styled(" pane  ", desc_style),
+                Span::styled("j/k", key_style),
+                Span::styled(" move  ", desc_style),
+                Span::styled("/", key_style),
+                Span::styled(" filter  ", desc_style),
+                Span::styled("i", key_style),
+                Span::styled(" task  ", desc_style),
+                Span::styled("?", key_style),
+                Span::styled(" help  ", desc_style),
+                Span::styled("q", key_style),
+                Span::styled(" quit", desc_style),
+            ]);
+
+            let context_line = match state.focus {
+                FocusPane::Sessions => Line::from(vec![
+                    Span::styled(" Enter", key_style),
+                    Span::styled(" activate  ", desc_style),
+                    Span::styled("n", key_style),
+                    Span::styled(" new  ", desc_style),
+                    Span::styled("c", key_style),
+                    Span::styled(" continue  ", desc_style),
+                    Span::styled("d", key_style),
+                    Span::styled(" delete  ", desc_style),
+                    Span::styled("x", key_style),
+                    Span::styled(" clear  ", desc_style),
+                    Span::styled("p", key_style),
+                    Span::styled(" profile", desc_style),
+                ]),
+                FocusPane::Runs => Line::from(vec![
+                    Span::styled(" s", key_style),
+                    Span::styled(" cancel  ", desc_style),
+                    Span::styled("z", key_style),
+                    Span::styled(" pause  ", desc_style),
+                    Span::styled("u", key_style),
+                    Span::styled(" resume  ", desc_style),
+                    Span::styled("t", key_style),
+                    Span::styled(" retry  ", desc_style),
+                    Span::styled("g", key_style),
+                    Span::styled(" clone  ", desc_style),
+                    Span::styled("r", key_style),
+                    Span::styled(" refresh", desc_style),
+                ]),
+                FocusPane::Details => Line::from(vec![
+                    Span::styled(" j/k", key_style),
+                    Span::styled(" scroll  ", desc_style),
+                    Span::styled("r", key_style),
+                    Span::styled(" refresh  ", desc_style),
+                    Span::styled("v", key_style),
+                    Span::styled(" replay  ", desc_style),
+                    Span::styled("Home", key_style),
+                    Span::styled(" top  ", desc_style),
+                    Span::styled("End", key_style),
+                    Span::styled(" bottom", desc_style),
+                ]),
+            };
+
+            vec![nav_line, context_line]
         }
     }
+}
 
-    lines
+fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
+    let popup = centered_rect(74, 72, frame.area());
+    frame.render_widget(Clear, popup);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Quick Help",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Navigation:"),
+        Line::from("- tab switch pane, j/k or up/down move"),
+        Line::from("- pgup/pgdn jump, home/end to first/last"),
+        Line::from(""),
+        Line::from("Filtering:"),
+        Line::from("- / start filter on focused pane"),
+        Line::from("- enter/esc close filter, 0 clear current filter"),
+        Line::from(""),
+        Line::from("Session / Run Actions:"),
+        Line::from("- i add task, enter/c continue session, n new session"),
+        Line::from("- s cancel, z pause, u resume, t retry, g clone"),
+        Line::from("- d delete session, m compact, v replay preview"),
+        Line::from(""),
+        Line::from("Settings:"),
+        Line::from("- 1/2/3/4 profile, p cycle"),
+        Line::from("- [ ] refresh, , . session-limit, - = run-limit"),
+        Line::from("- f follow active session"),
+        Line::from(""),
+        Line::from("q quit, ? toggle this help"),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title("Help")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        popup,
+    );
+}
+
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
+}
+
+fn pane_label(pane: FocusPane) -> &'static str {
+    match pane {
+        FocusPane::Sessions => "sessions",
+        FocusPane::Runs => "runs",
+        FocusPane::Details => "details",
+    }
+}
+
+fn run_status_style(status: &str) -> Style {
+    match status {
+        "running" => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        "paused" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        "cancelling" | "cancelled" => Style::default().fg(Color::Gray),
+        "succeeded" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn matches_session_filter(session: &SessionSummary, filter: &str) -> bool {
+    let term = filter.trim().to_lowercase();
+    if term.is_empty() {
+        return true;
+    }
+    let session_id = session.session_id.to_string();
+    let last = session
+        .last_task
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
+    session_id.contains(term.as_str())
+        || short_uuid(session.session_id).contains(term.as_str())
+        || last.contains(term.as_str())
+}
+
+fn matches_run_filter(run: &RunRecord, filter: &str) -> bool {
+    let term = filter.trim().to_lowercase();
+    if term.is_empty() {
+        return true;
+    }
+    let run_id = run.run_id.to_string();
+    let task = run.task.to_lowercase();
+    let status = run.status.to_string();
+    run_id.contains(term.as_str())
+        || short_uuid(run.run_id).contains(term.as_str())
+        || task.contains(term.as_str())
+        || status.contains(term.as_str())
 }
 
 fn status_marker(status: &str) -> &'static str {
     match status {
         "running" => "[RUN]",
+        "paused" => "[PAU]",
+        "cancelling" => "[CNG]",
         "cancelled" => "[CXL]",
         "succeeded" => "[OK ]",
         "failed" => "[ERR]",
@@ -1097,6 +1719,8 @@ fn lane_marker(status: &str) -> char {
         "succeeded" => '=',
         "failed" => '!',
         "running" => '>',
+        "paused" => ':',
+        "cancelling" => '~',
         "cancelled" => 'x',
         "skipped" => '-',
         _ => '.',
@@ -1154,4 +1778,61 @@ fn cycle_profile(current: TaskProfile) -> TaskProfile {
         TaskProfile::Coding => TaskProfile::General,
         TaskProfile::General => TaskProfile::Planning,
     }
+}
+
+fn relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let diff = now.signed_duration_since(dt);
+    let secs = diff.num_seconds();
+    if secs < 0 {
+        return "just now".to_string();
+    }
+    if secs < 60 {
+        return format!("{}s ago", secs);
+    }
+    let mins = diff.num_minutes();
+    if mins < 60 {
+        return format!("{}m ago", mins);
+    }
+    let hours = diff.num_hours();
+    if hours < 24 {
+        return format!("{}h ago", hours);
+    }
+    let days = diff.num_days();
+    format!("{}d ago", days)
+}
+
+fn format_duration_ms(ms: u128) -> String {
+    if ms < 1_000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let secs = ms / 1_000;
+        format!("{}m{}s", secs / 60, secs % 60)
+    }
+}
+
+fn pane_block(title: String, pane: FocusPane, current_focus: FocusPane) -> Block<'static> {
+    let is_focused = pane == current_focus;
+    let border_color = if is_focused {
+        match pane {
+            FocusPane::Sessions => Color::Cyan,
+            FocusPane::Runs => Color::Green,
+            FocusPane::Details => Color::Yellow,
+        }
+    } else {
+        Color::DarkGray
+    };
+    let title_style = if is_focused {
+        Style::default()
+            .fg(border_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(title, title_style))
 }
