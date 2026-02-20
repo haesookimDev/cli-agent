@@ -2,11 +2,12 @@ import { generateNonce, hmacSha256Hex } from "./hmac";
 
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "local-dev-key";
 const API_SECRET = process.env.NEXT_PUBLIC_API_SECRET ?? "local-dev-secret";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 export type SSEHandler = (eventType: string, data: string) => void;
 
 export async function connectSSE(
-  url: string,
+  path: string,
   onEvent: SSEHandler,
   onError?: (err: Error) => void,
 ): Promise<AbortController> {
@@ -20,7 +21,7 @@ export async function connectSSE(
   );
 
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(`${API_URL}${path}`, {
       headers: {
         "X-API-Key": API_KEY,
         "X-Signature": signature,
