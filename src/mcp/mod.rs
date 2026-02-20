@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::types::{McpToolCallResult, McpToolDefinition};
 
