@@ -1405,7 +1405,7 @@ impl Orchestrator {
             description,
             created_at: now,
             updated_at: now,
-            source_run_id: Some(run_id.to_string()),
+            source_run_id: Some(run_id),
             graph_template,
             parameters: Vec::new(),
         };
@@ -1443,16 +1443,12 @@ impl Orchestrator {
 
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
         for wn in &template.graph_template.nodes {
-            let role = wn
-                .role
-                .as_deref()
-                .and_then(parse_agent_role)
-                .unwrap_or(AgentRole::Coder);
-            let instructions = wn.instructions.clone().unwrap_or_default();
+            let role = wn.role;
+            let instructions = wn.instructions.clone();
             let mut node = AgentNode::new(wn.id.clone(), role, instructions);
             node.dependencies = wn.dependencies.clone();
-            if let Some(policy_val) = &wn.policy {
-                if let Ok(policy) = serde_json::from_value::<ExecutionPolicy>(policy_val.clone()) {
+            if !wn.policy.is_null() {
+                if let Ok(policy) = serde_json::from_value::<ExecutionPolicy>(wn.policy.clone()) {
                     node.policy = policy;
                 }
             }
