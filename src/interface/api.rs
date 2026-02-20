@@ -1424,11 +1424,10 @@ async fn create_schedule_handler(
 
 async fn list_schedules_handler(
     State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
     Query(q): Query<ListQuery>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -1449,9 +1448,8 @@ async fn get_schedule_handler(
     State(state): State<ApiState>,
     Path(schedule_id): Path<Uuid>,
     headers: HeaderMap,
-    body: Bytes,
 ) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": err.to_string()})),

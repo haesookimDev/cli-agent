@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use cron::Schedule;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::memory::MemoryManager;
 use crate::orchestrator::Orchestrator;
