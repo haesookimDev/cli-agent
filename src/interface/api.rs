@@ -1075,9 +1075,9 @@ async fn create_workflow_handler(
 
 async fn delete_workflow_handler(
     State(state): State<ApiState>,
+    Path(workflow_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-    Path(workflow_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
         return (
@@ -1100,9 +1100,9 @@ async fn delete_workflow_handler(
 
 async fn execute_workflow_handler(
     State(state): State<ApiState>,
+    Path(workflow_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-    Path(workflow_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
         return (
