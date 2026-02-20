@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
 use anyhow::Context;
+
+use crate::types::McpServerConfig;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -21,8 +24,7 @@ pub struct AppConfig {
     pub anthropic_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
     pub github_token: Option<String>,
-    pub mcp_server_command: Option<String>,
-    pub mcp_server_args: Option<String>,
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl AppConfig {
@@ -72,8 +74,27 @@ impl AppConfig {
         let anthropic_api_key = env::var("ANTHROPIC_API_KEY").ok();
         let gemini_api_key = env::var("GEMINI_API_KEY").ok();
         let github_token = env::var("GITHUB_TOKEN").ok();
-        let mcp_server_command = env::var("MCP_SERVER_COMMAND").ok();
-        let mcp_server_args = env::var("MCP_SERVER_ARGS").ok();
+
+        let mcp_servers = if let Ok(json) = env::var("MCP_SERVERS") {
+            serde_json::from_str(&json).unwrap_or_else(|_| Vec::new())
+        } else if github_token.is_some() {
+            let command = env::var("MCP_SERVER_COMMAND")
+                .unwrap_or_else(|_| "npx".to_string());
+            let args = env::var("MCP_SERVER_ARGS")
+                .unwrap_or_else(|_| "-y @modelcontextprotocol/server-github".to_string());
+            let mut env_map = HashMap::new();
+            if let Some(ref token) = github_token {
+                env_map.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token.clone());
+            }
+            vec![McpServerConfig {
+                name: "github".to_string(),
+                command,
+                args,
+                env: env_map,
+            }]
+        } else {
+            Vec::new()
+        };
 
         let cfg = Self {
             data_dir,
@@ -92,8 +113,7 @@ impl AppConfig {
             anthropic_api_key,
             gemini_api_key,
             github_token,
-            mcp_server_command,
-            mcp_server_args,
+            mcp_servers,
         };
 
         cfg.ensure_dirs()?;

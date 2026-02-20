@@ -173,6 +173,7 @@ impl McpClient {
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or(serde_json::json!({})),
+                server_name: None,
             })
             .collect();
 

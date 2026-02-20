@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use chrono::{DateTime, Utc};
@@ -387,6 +388,8 @@ pub struct McpToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +399,15 @@ pub struct McpToolCallResult {
     pub content: String,
     pub error: Option<String>,
     pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: String,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 // --- Task Decomposition Types ---
