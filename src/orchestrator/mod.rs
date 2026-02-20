@@ -582,7 +582,7 @@ impl Orchestrator {
 
         let event_sink = self.build_event_sink(run_id, session_id);
         let run_node = self.build_run_node_fn(run_id, session_id, req.clone());
-        let on_complete = self.build_on_completed_fn(run_id, req.task.clone());
+        let on_complete = self.build_on_completed_fn(run_id, session_id, req.task.clone());
 
         let outputs = self
             .runtime
@@ -971,7 +971,7 @@ impl Orchestrator {
         })
     }
 
-    fn build_on_completed_fn(&self, run_id: Uuid, task: String) -> OnNodeCompletedFn {
+    fn build_on_completed_fn(&self, run_id: Uuid, session_id: Uuid, task: String) -> OnNodeCompletedFn {
         let memory = self.memory.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
@@ -986,7 +986,7 @@ impl Orchestrator {
                             let _ = memory
                                 .append_run_action_event(
                                     run_id,
-                                    result.node_id.as_str().parse().unwrap_or_default(),
+                                    session_id,
                                     RunActionType::SubtaskPlanned,
                                     Some("node"),
                                     Some(node.id.as_str()),
@@ -999,8 +999,12 @@ impl Orchestrator {
                                 .await;
 
                             for subtask in plan.subtasks {
-                                let role = subtask.agent_role.unwrap_or(AgentRole::Coder);
-                                let instructions = subtask.instructions.unwrap_or(subtask.description.clone());
+                                let role = subtask.agent_role;
+                                let instructions = if subtask.instructions.is_empty() {
+                                    subtask.description.clone()
+                                } else {
+                                    subtask.instructions.clone()
+                                };
                                 let mut sub_node = AgentNode::new(
                                     subtask.id.clone(),
                                     role,
