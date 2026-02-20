@@ -78,6 +78,17 @@ pub struct OptimizedContext {
 }
 
 impl OptimizedContext {
+    pub fn empty() -> Self {
+        Self {
+            system: Vec::new(),
+            instructions: Vec::new(),
+            history: Vec::new(),
+            retrieval: Vec::new(),
+            tool_results: Vec::new(),
+            token_estimate: 0,
+        }
+    }
+
     pub fn flatten(&self) -> String {
         [
             section("SYSTEM", &self.system),

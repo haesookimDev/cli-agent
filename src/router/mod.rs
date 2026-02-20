@@ -1,10 +1,29 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use dashmap::DashMap;
 use dashmap::DashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::types::TaskProfile;
+
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    output: String,
+    model_id: String,
+    provider: ProviderKind,
+    created_at: Instant,
+    ttl_secs: u64,
+}
+
+impl CacheEntry {
+    fn is_expired(&self) -> bool {
+        self.created_at.elapsed().as_secs() > self.ttl_secs
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +125,7 @@ pub struct ModelRouter {
     catalog: Arc<Vec<ModelSpec>>,
     client: ProviderClient,
     preferred_model: Arc<Mutex<Option<String>>>,
+    cache: Arc<DashMap<u64, CacheEntry>>,
 }
 
 impl ModelRouter {
@@ -124,6 +144,7 @@ impl ModelRouter {
                 gemini_api_key,
             ),
             preferred_model: Arc::new(Mutex::new(None)),
+            cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -143,6 +164,7 @@ impl ModelRouter {
                 gemini_api_key,
             ),
             preferred_model: Arc::new(Mutex::new(None)),
+            cache: Arc::new(DashMap::new()),
         }
     }
 

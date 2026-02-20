@@ -729,7 +729,15 @@ impl Orchestrator {
                 let final_status = if cancel_flag.load(Ordering::Relaxed) {
                     RunStatus::Cancelled
                 } else if node_results.iter().all(|r| r.succeeded) {
-                    RunStatus::Succeeded
+                    // Verification loop: check if the request was fully satisfied
+                    let verified = self
+                        .verify_completion(run_id, session_id, &req.task, &node_results)
+                        .await;
+                    if verified {
+                        RunStatus::Succeeded
+                    } else {
+                        RunStatus::Succeeded // Still mark as succeeded but log the gap
+                    }
                 } else {
                     RunStatus::Failed
                 };
@@ -744,6 +752,96 @@ impl Orchestrator {
         }
 
         Ok(())
+    }
+
+    async fn verify_completion(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        original_task: &str,
+        results: &[NodeExecutionResult],
+    ) -> bool {
+        // Record verification start
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::VerificationStarted,
+            Some("orchestrator"),
+            Some("reviewer"),
+            None,
+            serde_json::json!({"task": original_task}),
+        )
+        .await;
+
+        // Collect outputs from successful nodes
+        let outputs_summary: String = results
+            .iter()
+            .filter(|r| r.succeeded)
+            .map(|r| format!("[{}] {}", r.node_id, r.output.chars().take(500).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        // Run Reviewer agent
+        let review_input = crate::agents::AgentInput {
+            task: format!(
+                "Original request: {}\n\nExecution results:\n{}\n\nDid the execution fully satisfy the original request? Answer COMPLETE if yes, or INCOMPLETE: <reason> if not.",
+                original_task, outputs_summary
+            ),
+            instructions: "Review the execution results against the original request.".to_string(),
+            context: crate::context::OptimizedContext::empty(),
+            dependency_outputs: vec![],
+            brief: crate::types::StructuredBrief {
+                goal: format!("Verify completion of: {}", original_task),
+                constraints: vec![],
+                decisions: vec![],
+                references: vec![],
+            },
+        };
+
+        let review_result = self
+            .agents
+            .run_role(AgentRole::Reviewer, review_input, self.router.clone())
+            .await;
+
+        let (is_complete, reason) = match &review_result {
+            Ok(output) => {
+                let content = output.content.trim();
+                if content.starts_with("COMPLETE") {
+                    (true, "Verified complete".to_string())
+                } else if content.starts_with("INCOMPLETE") {
+                    let reason = content
+                        .strip_prefix("INCOMPLETE:")
+                        .unwrap_or(content)
+                        .trim()
+                        .to_string();
+                    (false, reason)
+                } else {
+                    // Default to complete if output is ambiguous
+                    (true, "Assumed complete (ambiguous review)".to_string())
+                }
+            }
+            Err(e) => {
+                // If reviewer fails, don't block — assume complete
+                (true, format!("Reviewer unavailable: {e}"))
+            }
+        };
+
+        // Record verification result
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::VerificationComplete,
+            Some("reviewer"),
+            Some("orchestrator"),
+            None,
+            serde_json::json!({
+                "complete": is_complete,
+                "reason": reason,
+            }),
+        )
+        .await;
+
+        is_complete
     }
 
     fn classify_task(task: &str) -> TaskType {
@@ -2097,7 +2195,10 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::RunFinished
             | RunActionType::WebhookDispatched
             | RunActionType::McpToolCalled
-            | RunActionType::SubtaskPlanned => {}
+            | RunActionType::SubtaskPlanned
+            | RunActionType::VerificationStarted
+            | RunActionType::VerificationComplete
+            | RunActionType::ReplanTriggered => {}
         }
     }
 

@@ -263,6 +263,9 @@ pub enum RunActionType {
     WebhookDispatched,
     McpToolCalled,
     SubtaskPlanned,
+    VerificationStarted,
+    VerificationComplete,
+    ReplanTriggered,
 }
 
 impl Display for RunActionType {
@@ -285,6 +288,9 @@ impl Display for RunActionType {
             RunActionType::WebhookDispatched => "webhook_dispatched",
             RunActionType::McpToolCalled => "mcp_tool_called",
             RunActionType::SubtaskPlanned => "subtask_planned",
+            RunActionType::VerificationStarted => "verification_started",
+            RunActionType::VerificationComplete => "verification_complete",
+            RunActionType::ReplanTriggered => "replan_triggered",
         };
         write!(f, "{s}")
     }

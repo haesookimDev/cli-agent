@@ -7,7 +7,8 @@ export type RunActionType =
   | "run_resumed" | "graph_initialized" | "node_started" | "node_completed"
   | "node_failed" | "node_skipped" | "dynamic_node_added" | "graph_completed"
   | "model_selected" | "run_finished" | "webhook_dispatched"
-  | "mcp_tool_called" | "subtask_planned";
+  | "mcp_tool_called" | "subtask_planned"
+  | "verification_started" | "verification_complete" | "replan_triggered";
 
 export interface RunRequest {
   task: string;
