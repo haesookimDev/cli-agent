@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { Suspense, useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiGet } from "@/lib/api-client";
 import { useInterval } from "@/hooks/use-interval";
@@ -9,7 +9,7 @@ import { SwimLane } from "@/components/behavior/swim-lane";
 import { ActionMix } from "@/components/behavior/action-mix";
 import type { RunBehaviorView } from "@/lib/types";
 
-export default function BehaviorPage() {
+function BehaviorContent() {
   const searchParams = useSearchParams();
   const initialRunId = searchParams.get("run") ?? "";
 
@@ -28,7 +28,6 @@ export default function BehaviorPage() {
       );
       setData(result);
       setError(null);
-      // auto-stop live polling when terminal
       if (
         result.status === "succeeded" ||
         result.status === "failed" ||
@@ -123,5 +122,17 @@ export default function BehaviorPage() {
         </>
       )}
     </div>
+  );
+}
+
+export default function BehaviorPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="p-6 text-center text-sm text-slate-400">Loading...</div>
+      }
+    >
+      <BehaviorContent />
+    </Suspense>
   );
 }
