@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Orchestrator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f4efe5;
+      --bg-accent: #d8e6df;
+      --ink: #13202e;
+      --ink-muted: #445469;
+      --panel: rgba(255, 255, 255, 0.8);
+      --line: rgba(19, 32, 46, 0.16);
+      --teal: #0d7f80;
+      --orange: #d66832;
+      --olive: #5f7f34;
+      --red: #b53a3a;
+      --amber: #b08012;
+      --blue: #2b5db2;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --ui: "Space Grotesk", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      font-family: var(--ui);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 18% 12%, rgba(214, 104, 50, 0.22), transparent 44%),
+        radial-gradient(circle at 88% 20%, rgba(13, 127, 128, 0.18), transparent 42%),
+        linear-gradient(160deg, var(--bg), var(--bg-accent));
+    }
+
+    .shell { max-width: 1360px; margin: 0 auto; padding: 16px; }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.85), rgba(255,255,255,0.62));
+      backdrop-filter: blur(4px);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .hero h1 { font-size: 22px; }
+    .hero .auth-row { display: flex; gap: 8px; align-items: center; }
+    .hero .auth-row input {
+      height: 32px; border: 1px solid var(--line); border-radius: 8px;
+      padding: 0 8px; font-size: 12px; font-family: var(--mono); width: 140px;
+      background: rgba(255,255,255,0.84);
+    }
+
+    .tabs {
+      display: flex; gap: 4px; margin-bottom: 12px;
+    }
+
+    .tab-btn {
+      height: 36px; border: 1px solid var(--line); border-radius: 10px;
+      padding: 0 16px; cursor: pointer; font-family: var(--ui); font-weight: 600;
+      font-size: 13px; background: var(--panel); color: var(--ink-muted);
+      transition: all 100ms ease;
+    }
+    .tab-btn.active { background: var(--teal); color: #f2f8f8; border-color: transparent; }
+    .tab-btn:hover:not(.active) { background: rgba(255,255,255,0.95); }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .panel {
+      border: 1px solid var(--line); border-radius: 16px;
+      padding: 14px; background: var(--panel); margin-bottom: 12px;
+    }
+    .panel h2 {
+      margin: 0 0 10px; font-size: 13px; letter-spacing: 0.3px;
+      text-transform: uppercase; color: var(--ink-muted); font-family: var(--mono);
+    }
+
+    button {
+      height: 34px; border: 1px solid transparent; border-radius: 10px;
+      padding: 0 12px; cursor: pointer; font-family: var(--ui); font-weight: 600;
+      font-size: 13px; transition: transform 100ms ease, background-color 120ms ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+
+    .btn-main { background: var(--teal); color: #f2f8f8; }
+    .btn-alt { background: #fff; color: var(--ink); border-color: var(--line); }
+    .btn-warn { background: var(--orange); color: #fff; }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-sm { height: 28px; font-size: 11px; padding: 0 8px; border-radius: 8px; }
+
+    input, select, textarea {
+      border: 1px solid var(--line); border-radius: 10px; padding: 0 10px;
+      font-family: var(--ui); font-size: 14px; color: var(--ink);
+      background: rgba(255,255,255,0.84); height: 38px;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: 2px solid rgba(13, 127, 128, 0.35); outline-offset: 1px;
+    }
+    textarea { height: auto; padding: 10px; resize: vertical; min-height: 80px; }
+
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.3px;
+      color: var(--ink-muted); text-transform: uppercase;
+    }
+
+    .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .row .field { flex: 1; min-width: 140px; }
+
+    .status-chip {
+      display: inline-block; border-radius: 999px; padding: 3px 10px;
+      font-family: var(--mono); font-size: 11px; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.74); color: var(--ink-muted);
+    }
+    .status-chip.ok { color: var(--olive); border-color: rgba(95,127,52,0.35); background: rgba(95,127,52,0.12); }
+    .status-chip.error { color: var(--red); border-color: rgba(181,58,58,0.35); background: rgba(181,58,58,0.12); }
+    .status-chip.running { color: var(--blue); border-color: rgba(43,93,178,0.35); background: rgba(43,93,178,0.12); }
+    .status-chip.queued { color: var(--amber); border-color: rgba(176,128,18,0.35); background: rgba(176,128,18,0.12); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+         color: var(--ink-muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    td { padding: 6px 8px; border-bottom: 1px solid rgba(19,32,46,0.08); vertical-align: top; }
+    tr:hover td { background: rgba(13,127,128,0.04); }
+    tr.selected td { background: rgba(13,127,128,0.1); }
+    td.mono { font-family: var(--mono); font-size: 11px; }
+    td.task-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .clickable { cursor: pointer; }
+
+    .stream-log {
+      max-height: 360px; overflow-y: auto; font-family: var(--mono); font-size: 11px;
+      background: rgba(19,32,46,0.04); border: 1px solid var(--line);
+      border-radius: 10px; padding: 10px; line-height: 1.7;
+    }
+    .stream-log .ev { padding: 2px 0; border-bottom: 1px solid rgba(19,32,46,0.06); }
+    .stream-log .ev-type { color: var(--teal); font-weight: 600; }
+    .stream-log .ev-data { color: var(--ink-muted); }
+
+    .empty {
+      border: 1px dashed var(--line); border-radius: 10px; padding: 16px;
+      color: var(--ink-muted); font-size: 13px; background: rgba(255,255,255,0.55);
+      text-align: center;
+    }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+    .card {
+      border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+      background: rgba(255,255,255,0.72);
+    }
+    .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.25px;
+                    color: var(--ink-muted); font-family: var(--mono); }
+    .card .value { margin-top: 6px; font-size: 16px; font-weight: 700; word-break: break-word; }
+
+    .timeline { display: flex; flex-direction: column; gap: 6px; max-height: 400px; overflow-y: auto; }
+    .lane { display: grid; grid-template-columns: 140px 1fr 60px; align-items: center; gap: 6px; }
+    .lane .meta { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+    .lane .meta small { display: block; color: var(--ink-muted); font-family: var(--mono); font-size: 10px; }
+    .track { position: relative; height: 16px; border: 1px solid var(--line); border-radius: 999px;
+             background: repeating-linear-gradient(to right, rgba(19,32,46,0.08) 0, rgba(19,32,46,0.08) 1px, transparent 1px, transparent 20px);
+             overflow: hidden; }
+    .bar { position: absolute; top: 2px; bottom: 2px; border-radius: 999px; min-width: 4px; }
+    .bar.running { background: var(--blue); }
+    .bar.succeeded { background: var(--olive); }
+    .bar.failed { background: var(--red); }
+    .bar.pending { background: var(--amber); }
+    .bar.skipped { background: #8e8a76; }
+    .dur { text-align: right; font-family: var(--mono); font-size: 11px; color: var(--ink-muted); }
+
+    .mix { display: flex; flex-direction: column; gap: 6px; }
+    .mix-row { display: grid; grid-template-columns: 1fr 50px; align-items: center; gap: 6px; }
+    .mix-track { position: relative; height: 22px; border: 1px solid var(--line); border-radius: 8px;
+                 background: rgba(255,255,255,0.7); overflow: hidden; }
+    .mix-fill { position: absolute; top: 0; left: 0; bottom: 0;
+                background: linear-gradient(90deg, rgba(214,104,50,0.9), rgba(13,127,128,0.9)); }
+    .mix-label { position: absolute; inset: 0; display: flex; align-items: center;
+                 padding: 0 8px; font-family: var(--mono); font-size: 10px; }
+    .mix-count { text-align: right; font-family: var(--mono); font-size: 11px; color: var(--ink-muted); }
+
+    @media (max-width: 900px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .lane { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Agent Orchestrator</h1>
+      <div class="auth-row">
+        <input id="apiKey" value="local-dev-key" placeholder="API Key">
+        <input id="apiSecret" value="local-dev-secret" placeholder="API Secret" type="password">
+      </div>
+    </section>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="runner">Task Runner</button>
+      <button class="tab-btn" data-tab="sessions">Sessions</button>
+      <button class="tab-btn" data-tab="runs">Runs</button>
+      <button class="tab-btn" data-tab="behavior">Behavior</button>
+    </div>
+
+    <!-- TAB: Task Runner -->
+    <div id="tab-runner" class="tab-content active">
+      <div class="panel">
+        <h2>Submit Task</h2>
+        <div class="row" style="margin-bottom:10px;">
+          <div class="field" style="flex:3;">
+            <label>Task</label>
+            <textarea id="taskInput" rows="2" placeholder="Describe the task to execute..."></textarea>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Profile</label>
+            <select id="profileSelect">
+              <option value="general">General</option>
+              <option value="planning">Planning</option>
+              <option value="extraction">Extraction</option>
+              <option value="coding">Coding</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Session ID (optional)</label>
+            <input id="sessionInput" placeholder="auto-create if empty">
+          </div>
+          <div class="field" style="flex:0;">
+            <label>&nbsp;</label>
+            <button id="submitRun" class="btn-main">Submit Run</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="runnerStatusPanel" style="display:none;">
+        <h2>Current Run</h2>
+        <div id="runnerInfo" style="margin-bottom:10px;font-size:13px;"></div>
+        <div style="display:flex;gap:6px;margin-bottom:10px;">
+          <button id="runnerCancel" class="btn-danger btn-sm">Cancel</button>
+          <button id="runnerPause" class="btn-warn btn-sm">Pause</button>
+          <button id="runnerResume" class="btn-alt btn-sm">Resume</button>
+          <button id="runnerRetry" class="btn-alt btn-sm">Retry</button>
+          <span id="runnerStatus" class="status-chip">-</span>
+        </div>
+        <h2>Event Stream</h2>
+        <div id="streamLog" class="stream-log"></div>
+      </div>
+    </div>
+
+    <!-- TAB: Sessions -->
+    <div id="tab-sessions" class="tab-content">
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h2 style="margin:0;">Sessions</h2>
+          <div style="display:flex;gap:6px;">
+            <button id="refreshSessions" class="btn-alt btn-sm">Refresh</button>
+            <button id="newSession" class="btn-main btn-sm">New Session</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>Session ID</th><th>Runs</th><th>Last Run</th><th>Last Task</th></tr></thead>
+          <tbody id="sessionsBody"></tbody>
+        </table>
+        <div id="sessionsEmpty" class="empty" style="margin-top:10px;">No sessions loaded. Click Refresh.</div>
+      </div>
+
+      <div class="panel" id="sessionRunsPanel" style="display:none;">
+        <h2 id="sessionRunsTitle">Session Runs</h2>
+        <table>
+          <thead><tr><th>Run ID</th><th>Status</th><th>Profile</th><th>Task</th><th>Created</th></tr></thead>
+          <tbody id="sessionRunsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB: Runs -->
+    <div id="tab-runs" class="tab-content">
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h2 style="margin:0;">Recent Runs</h2>
+          <button id="refreshRuns" class="btn-alt btn-sm">Refresh</button>
+        </div>
+        <table>
+          <thead><tr><th>Run ID</th><th>Session</th><th>Status</th><th>Profile</th><th>Task</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="runsBody"></tbody>
+        </table>
+        <div id="runsEmpty" class="empty" style="margin-top:10px;">No runs loaded.</div>
+      </div>
+
+      <div class="panel" id="runDetailPanel" style="display:none;">
+        <h2>Run Details</h2>
+        <div id="runDetailContent"></div>
+      </div>
+    </div>
+
+    <!-- TAB: Behavior -->
+    <div id="tab-behavior" class="tab-content">
+      <div class="panel">
+        <div class="row" style="margin-bottom:10px;">
+          <div class="field">
+            <label>Run ID</label>
+            <input id="behaviorRunId" placeholder="enter run id">
+          </div>
+          <div class="field" style="flex:0;">
+            <label>&nbsp;</label>
+            <button id="loadBehavior" class="btn-main">Load</button>
+          </div>
+          <div class="field" style="flex:0;">
+            <label>&nbsp;</label>
+            <button id="toggleLive" class="btn-warn">Live</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <h2>Summary</h2>
+          <div id="bMetrics" class="metrics"></div>
+          <h2>Action Mix</h2>
+          <div id="bActionMix" class="mix"></div>
+        </div>
+        <div class="panel">
+          <h2>Timeline</h2>
+          <div id="bTimeline" class="timeline"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* ===== AUTH ===== */
+    function nonceHex() {
+      const buf = new Uint8Array(16);
+      crypto.getRandomValues(buf);
+      return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function hmacSha256Hex(secret, message) {
+      const enc = new TextEncoder();
+      const key = await crypto.subtle.importKey('raw', enc.encode(secret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+      const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+      return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2,'0')).join('');
+    }
+
+    async function authHeaders(rawBody = '') {
+      const apiKey = document.getElementById('apiKey').value.trim();
+      const apiSecret = document.getElementById('apiSecret').value.trim();
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const nonce = nonceHex();
+      const signature = await hmacSha256Hex(apiSecret, `${timestamp}.${nonce}.${rawBody}`);
+      return { 'X-API-Key': apiKey, 'X-Signature': signature, 'X-Timestamp': timestamp, 'X-Nonce': nonce };
+    }
+
+    async function apiGet(path) {
+      const headers = await authHeaders('');
+      const resp = await fetch(path, { headers });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      return data;
+    }
+
+    async function apiPost(path, body) {
+      const raw = body ? JSON.stringify(body) : '';
+      const headers = await authHeaders(raw);
+      headers['Content-Type'] = 'application/json';
+      const resp = await fetch(path, { method: 'POST', headers, body: raw || undefined });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      return data;
+    }
+
+    /* ===== UTILS ===== */
+    function shortId(id) { return (id||'').slice(0,8); }
+    function shortTime(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts);
+      return d.toLocaleTimeString();
+    }
+    function statusClass(s) {
+      if (['succeeded'].includes(s)) return 'ok';
+      if (['failed','cancelled'].includes(s)) return 'error';
+      if (['running','cancelling'].includes(s)) return 'running';
+      if (['queued','paused'].includes(s)) return 'queued';
+      return '';
+    }
+
+    /* ===== TABS ===== */
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      });
+    });
+
+    /* ===== TASK RUNNER ===== */
+    let currentRunId = null;
+    let currentEventSource = null;
+
+    document.getElementById('submitRun').addEventListener('click', async () => {
+      const task = document.getElementById('taskInput').value.trim();
+      if (!task) return alert('Task is required');
+      const profile = document.getElementById('profileSelect').value;
+      const sessionId = document.getElementById('sessionInput').value.trim() || undefined;
+      try {
+        const body = { task, profile };
+        if (sessionId) body.session_id = sessionId;
+        const sub = await apiPost('/v1/runs', body);
+        currentRunId = sub.run_id;
+        showRunnerPanel(sub);
+        startStream(sub.run_id);
+      } catch (err) {
+        alert('Submit failed: ' + err.message);
+      }
+    });
+
+    function showRunnerPanel(sub) {
+      const panel = document.getElementById('runnerStatusPanel');
+      panel.style.display = 'block';
+      document.getElementById('runnerInfo').innerHTML =
+        `<strong>Run:</strong> <code>${sub.run_id}</code> &nbsp; <strong>Session:</strong> <code>${sub.session_id}</code>`;
+      updateRunnerStatus(sub.status);
+    }
+
+    function updateRunnerStatus(status) {
+      const chip = document.getElementById('runnerStatus');
+      chip.textContent = status;
+      chip.className = 'status-chip ' + statusClass(status);
+    }
+
+    function startStream(runId) {
+      if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
+      const log = document.getElementById('streamLog');
+      log.innerHTML = '';
+      const url = `/v1/runs/${runId}/stream?poll_ms=400&behavior=false`;
+      const es = new EventSource(url);
+      currentEventSource = es;
+
+      function addLog(type, data) {
+        const div = document.createElement('div');
+        div.className = 'ev';
+        div.innerHTML = `<span class="ev-type">${type}</span> <span class="ev-data">${escapeHtml(data).slice(0,200)}</span>`;
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      es.addEventListener('action_event', e => {
+        try {
+          const ev = JSON.parse(e.data);
+          addLog(ev.action, JSON.stringify(ev.payload || {}));
+        } catch { addLog('action_event', e.data); }
+      });
+
+      es.addEventListener('run_terminal', e => {
+        try {
+          const ev = JSON.parse(e.data);
+          updateRunnerStatus(ev.status);
+          addLog('TERMINAL', `status=${ev.status}`);
+        } catch { addLog('run_terminal', e.data); }
+        es.close();
+        currentEventSource = null;
+      });
+
+      es.addEventListener('error', e => {
+        addLog('ERROR', 'stream error');
+      });
+
+      es.onerror = () => { /* EventSource auto-reconnect */ };
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    document.getElementById('runnerCancel').addEventListener('click', async () => {
+      if (!currentRunId) return;
+      try { await apiPost(`/v1/runs/${currentRunId}/cancel`); updateRunnerStatus('cancelling'); }
+      catch (e) { alert(e.message); }
+    });
+    document.getElementById('runnerPause').addEventListener('click', async () => {
+      if (!currentRunId) return;
+      try { await apiPost(`/v1/runs/${currentRunId}/pause`); updateRunnerStatus('paused'); }
+      catch (e) { alert(e.message); }
+    });
+    document.getElementById('runnerResume').addEventListener('click', async () => {
+      if (!currentRunId) return;
+      try { await apiPost(`/v1/runs/${currentRunId}/resume`); updateRunnerStatus('running'); }
+      catch (e) { alert(e.message); }
+    });
+    document.getElementById('runnerRetry').addEventListener('click', async () => {
+      if (!currentRunId) return;
+      try {
+        const sub = await apiPost(`/v1/runs/${currentRunId}/retry`);
+        currentRunId = sub.run_id;
+        showRunnerPanel(sub);
+        startStream(sub.run_id);
+      } catch (e) { alert(e.message); }
+    });
+
+    /* ===== SESSIONS ===== */
+    document.getElementById('refreshSessions').addEventListener('click', loadSessions);
+    document.getElementById('newSession').addEventListener('click', async () => {
+      try {
+        const res = await apiPost('/v1/sessions', {});
+        alert('Session created: ' + res.session_id);
+        loadSessions();
+      } catch (e) { alert(e.message); }
+    });
+
+    async function loadSessions() {
+      try {
+        const sessions = await apiGet('/v1/sessions?limit=100');
+        const body = document.getElementById('sessionsBody');
+        const empty = document.getElementById('sessionsEmpty');
+        body.innerHTML = '';
+        if (!sessions || !sessions.length) { empty.style.display = 'block'; return; }
+        empty.style.display = 'none';
+        sessions.forEach(s => {
+          const tr = document.createElement('tr');
+          tr.className = 'clickable';
+          tr.innerHTML = `<td class="mono">${shortId(s.session_id)}</td><td>${s.run_count}</td>
+            <td class="mono">${shortTime(s.last_run_at)}</td>
+            <td class="task-cell">${escapeHtml((s.last_task||'-').slice(0,60))}</td>`;
+          tr.addEventListener('click', () => loadSessionRuns(s.session_id));
+          body.appendChild(tr);
+        });
+      } catch (e) { alert(e.message); }
+    }
+
+    async function loadSessionRuns(sessionId) {
+      try {
+        const runs = await apiGet(`/v1/sessions/${sessionId}/runs?limit=50`);
+        const panel = document.getElementById('sessionRunsPanel');
+        panel.style.display = 'block';
+        document.getElementById('sessionRunsTitle').textContent = `Session ${shortId(sessionId)} Runs`;
+        const body = document.getElementById('sessionRunsBody');
+        body.innerHTML = '';
+        (runs || []).forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="mono">${shortId(r.run_id)}</td>
+            <td><span class="status-chip ${statusClass(r.status)}">${r.status}</span></td>
+            <td>${r.profile}</td><td class="task-cell">${escapeHtml((r.task||'').slice(0,50))}</td>
+            <td class="mono">${shortTime(r.created_at)}</td>`;
+          body.appendChild(tr);
+        });
+      } catch (e) { alert(e.message); }
+    }
+
+    /* ===== RUNS ===== */
+    document.getElementById('refreshRuns').addEventListener('click', loadRuns);
+
+    async function loadRuns() {
+      try {
+        const runs = await apiGet('/v1/runs?limit=50');
+        const body = document.getElementById('runsBody');
+        const empty = document.getElementById('runsEmpty');
+        body.innerHTML = '';
+        if (!runs || !runs.length) { empty.style.display = 'block'; return; }
+        empty.style.display = 'none';
+        runs.forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="mono clickable" onclick="showRunDetail('${r.run_id}')">${shortId(r.run_id)}</td>
+            <td class="mono">${shortId(r.session_id)}</td>
+            <td><span class="status-chip ${statusClass(r.status)}">${r.status}</span></td>
+            <td>${r.profile}</td><td class="task-cell">${escapeHtml((r.task||'').slice(0,50))}</td>
+            <td class="mono">${shortTime(r.created_at)}</td>
+            <td>
+              <button class="btn-sm btn-alt" onclick="runAction('cancel','${r.run_id}')">Cancel</button>
+              <button class="btn-sm btn-alt" onclick="runAction('pause','${r.run_id}')">Pause</button>
+              <button class="btn-sm btn-alt" onclick="runAction('resume','${r.run_id}')">Resume</button>
+              <button class="btn-sm btn-alt" onclick="runAction('retry','${r.run_id}')">Retry</button>
+              <button class="btn-sm btn-alt" onclick="viewBehavior('${r.run_id}')">Behavior</button>
+            </td>`;
+          body.appendChild(tr);
+        });
+      } catch (e) { alert(e.message); }
+    }
+
+    window.runAction = async function(action, runId) {
+      try { await apiPost(`/v1/runs/${runId}/${action}`); loadRuns(); }
+      catch (e) { alert(e.message); }
+    };
+
+    window.showRunDetail = async function(runId) {
+      try {
+        const run = await apiGet(`/v1/runs/${runId}`);
+        const panel = document.getElementById('runDetailPanel');
+        panel.style.display = 'block';
+        const c = document.getElementById('runDetailContent');
+        const outputs = (run.outputs || []).map(o =>
+          `<tr><td class="mono">${o.node_id}</td><td>${o.role}</td><td class="mono">${o.model}</td>
+           <td>${o.succeeded ? 'yes' : 'no'}</td><td class="mono">${o.duration_ms}ms</td>
+           <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml((o.output||'').slice(0,120))}</td></tr>`
+        ).join('');
+        c.innerHTML = `
+          <div style="margin-bottom:10px;font-size:13px;">
+            <strong>ID:</strong> <code>${run.run_id}</code> &nbsp;
+            <strong>Session:</strong> <code>${run.session_id}</code> &nbsp;
+            <strong>Status:</strong> <span class="status-chip ${statusClass(run.status)}">${run.status}</span> &nbsp;
+            <strong>Profile:</strong> ${run.profile}
+            ${run.error ? '<br><strong>Error:</strong> <span style="color:var(--red)">' + escapeHtml(run.error) + '</span>' : ''}
+          </div>
+          <strong>Task:</strong> <p style="margin:4px 0 12px;font-size:13px;">${escapeHtml(run.task)}</p>
+          ${outputs ? `<table><thead><tr><th>Node</th><th>Role</th><th>Model</th><th>OK</th><th>Duration</th><th>Output</th></tr></thead><tbody>${outputs}</tbody></table>` : '<div class="empty">No outputs yet.</div>'}
+        `;
+      } catch (e) { alert(e.message); }
+    };
+
+    window.viewBehavior = function(runId) {
+      document.getElementById('behaviorRunId').value = runId;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelector('[data-tab="behavior"]').classList.add('active');
+      document.getElementById('tab-behavior').classList.add('active');
+      loadBehaviorOnce();
+    };
+
+    /* ===== BEHAVIOR ===== */
+    let liveTimer = null;
+
+    document.getElementById('loadBehavior').addEventListener('click', () => {
+      loadBehaviorOnce().catch(e => alert(e.message));
+    });
+
+    document.getElementById('toggleLive').addEventListener('click', () => {
+      if (liveTimer) {
+        clearInterval(liveTimer);
+        liveTimer = null;
+        document.getElementById('toggleLive').textContent = 'Live';
+        return;
+      }
+      document.getElementById('toggleLive').textContent = 'Stop';
+      liveTimer = setInterval(() => loadBehaviorOnce().catch(() => {}), 1200);
+    });
+
+    async function loadBehaviorOnce() {
+      const runId = document.getElementById('behaviorRunId').value.trim();
+      if (!runId) throw new Error('Run ID required');
+      const data = await apiGet(`/v1/runs/${runId}/behavior?limit=2000`);
+      renderBehavior(data);
+    }
+
+    function renderBehavior(data) {
+      renderBMetrics(data);
+      renderBTimeline(data);
+      renderBActionMix(data);
+    }
+
+    function renderBMetrics(data) {
+      const el = document.getElementById('bMetrics');
+      el.innerHTML = '';
+      if (!data) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+      const s = data.summary || {};
+      const cards = [
+        ['Status', data.status || '-'],
+        ['Duration', s.total_duration_ms != null ? s.total_duration_ms + 'ms' : '-'],
+        ['Peak Parallel', s.peak_parallelism || 0],
+        ['Completed', s.completed_nodes || 0],
+        ['Failed', s.failed_nodes || 0],
+        ['Bottleneck', s.bottleneck_node_id ? `${s.bottleneck_node_id} (${s.bottleneck_duration_ms||0}ms)` : '-'],
+      ];
+      cards.forEach(([label, value]) => {
+        const d = document.createElement('div');
+        d.className = 'card';
+        d.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div>`;
+        el.appendChild(d);
+      });
+    }
+
+    function renderBTimeline(data) {
+      const el = document.getElementById('bTimeline');
+      el.innerHTML = '';
+      if (!data || !data.lanes || !data.lanes.length) {
+        el.innerHTML = '<div class="empty">No timeline data</div>';
+        return;
+      }
+      const lanes = [...data.lanes].sort((a,b) =>
+        (a.start_offset_ms == null ? Infinity : a.start_offset_ms) -
+        (b.start_offset_ms == null ? Infinity : b.start_offset_ms));
+      const total = (data.summary && data.summary.total_duration_ms) || Math.max(1, ...lanes.map(l => l.end_offset_ms || l.duration_ms || 0));
+
+      lanes.forEach(lane => {
+        const start = lane.start_offset_ms || 0;
+        const end = lane.end_offset_ms != null ? lane.end_offset_ms : start + (lane.duration_ms || 0);
+        const leftPct = Math.max(0, Math.min(100, (start / total) * 100));
+        const widthPct = Math.max(0.8, Math.min(100 - leftPct, ((Math.max(end, start+1) - start) / total) * 100));
+        const status = ['running','succeeded','failed','skipped'].includes(lane.status) ? lane.status : 'pending';
+
+        const row = document.createElement('div');
+        row.className = 'lane';
+        row.innerHTML = `
+          <div class="meta"><strong>${lane.node_id}</strong><small>${lane.status} / r:${lane.retries||0}</small></div>
+          <div class="track"><div class="bar ${status}" style="left:${leftPct}%;width:${widthPct}%"></div></div>
+          <div class="dur">${lane.duration_ms != null ? lane.duration_ms + 'ms' : '-'}</div>`;
+        el.appendChild(row);
+      });
+    }
+
+    function renderBActionMix(data) {
+      const el = document.getElementById('bActionMix');
+      el.innerHTML = '';
+      const mix = data && data.action_mix ? data.action_mix : [];
+      if (!mix.length) { el.innerHTML = '<div class="empty">No actions</div>'; return; }
+      const maxCount = Math.max(1, ...mix.map(m => m.count));
+      mix.slice(0, 10).forEach(item => {
+        const width = Math.max(2, (item.count / maxCount) * 100);
+        const row = document.createElement('div');
+        row.className = 'mix-row';
+        row.innerHTML = `<div class="mix-track"><div class="mix-fill" style="width:${width}%"></div>
+          <div class="mix-label">${item.action}</div></div><div class="mix-count">${item.count}</div>`;
+        el.appendChild(row);
+      });
+    }
+  </script>
+</body>
+</html>

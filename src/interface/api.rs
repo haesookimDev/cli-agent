@@ -4,12 +4,13 @@ use std::time::Duration;
 use async_stream::stream;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::orchestrator::Orchestrator;
@@ -17,6 +18,7 @@ use crate::types::{RunRequest, TaskProfile};
 use crate::webhook::AuthManager;
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+const WEB_CLIENT_HTML: &str = include_str!("web_client.html");
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -86,6 +88,7 @@ struct TestWebhookRequest {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/dashboard", get(dashboard_handler))
+        .route("/web-client", get(web_client_handler))
         .route(
             "/v1/sessions",
             post(create_session_handler).get(list_sessions_handler),
@@ -121,8 +124,26 @@ pub fn router(state: ApiState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(addr: SocketAddr, state: ApiState) -> anyhow::Result<()> {
-    let app = router(state);
+pub async fn serve(
+    addr: SocketAddr,
+    state: ApiState,
+    gateway_router: Option<Router>,
+) -> anyhow::Result<()> {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers(Any);
+
+    let mut app = router(state).layer(cors);
+    if let Some(gw) = gateway_router {
+        app = app.merge(gw);
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -170,6 +191,10 @@ async fn create_session_handler(
 
 async fn dashboard_handler() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
+}
+
+async fn web_client_handler() -> Html<&'static str> {
+    Html(WEB_CLIENT_HTML)
 }
 
 async fn list_sessions_handler(
