@@ -179,6 +179,19 @@ export interface ModelWithStatus {
   is_preferred: boolean;
 }
 
+// --- Cron Schedule Types ---
+
+export interface CronSchedule {
+  id: string;
+  workflow_id: string;
+  cron_expr: string;
+  enabled: boolean;
+  parameters: Record<string, unknown> | null;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+}
+
 // --- MCP Types ---
 
 export interface McpToolDefinition {

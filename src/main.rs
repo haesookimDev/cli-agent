@@ -208,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
             let gateway_router = gateway_manager.build_router();
 
             // Start cron scheduler background task
-            let scheduler = CronScheduler::new(memory.clone(), orchestrator.clone());
+            let scheduler = CronScheduler::new(orchestrator.memory().clone(), orchestrator.clone());
             tokio::spawn(scheduler.run_loop());
 
             println!("serving on http://{addr}");
