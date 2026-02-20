@@ -3,15 +3,21 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { apiGet } from "@/lib/api-client";
+import { useRouter } from "next/navigation";
+import { apiGet, apiPost } from "@/lib/api-client";
 import { StatusBadge } from "@/components/status-badge";
 import { RunActions } from "@/components/run-actions";
-import type { RunRecord } from "@/lib/types";
+import type { RunRecord, WorkflowTemplate } from "@/lib/types";
 
 export default function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const [run, setRun] = useState<RunRecord | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showSaveWf, setShowSaveWf] = useState(false);
+  const [wfName, setWfName] = useState("");
+  const [wfDesc, setWfDesc] = useState("");
+  const [saving, setSaving] = useState(false);
 
   function load() {
     if (!id) return;
@@ -110,6 +116,64 @@ export default function RunDetailPage() {
         {run.error && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
             {run.error}
+          </div>
+        )}
+
+        {run.status === "succeeded" && !showSaveWf && (
+          <button
+            onClick={() => setShowSaveWf(true)}
+            className="rounded-md border border-teal-300 bg-teal-50 px-3 py-1.5 text-xs font-medium text-teal-700 hover:bg-teal-100"
+          >
+            Save as Workflow
+          </button>
+        )}
+
+        {showSaveWf && (
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <label className="mb-1 block text-xs text-slate-500">Name</label>
+              <input
+                value={wfName}
+                onChange={(e) => setWfName(e.target.value)}
+                className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm focus:border-teal-500 focus:outline-none"
+                placeholder="My workflow"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="mb-1 block text-xs text-slate-500">Description</label>
+              <input
+                value={wfDesc}
+                onChange={(e) => setWfDesc(e.target.value)}
+                className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm focus:border-teal-500 focus:outline-none"
+                placeholder="Optional description"
+              />
+            </div>
+            <button
+              disabled={!wfName.trim() || saving}
+              onClick={async () => {
+                setSaving(true);
+                try {
+                  const wf = await apiPost<WorkflowTemplate>(
+                    `/v1/runs/${run.run_id}/save-workflow`,
+                    { name: wfName.trim(), description: wfDesc.trim() },
+                  );
+                  router.push(`/workflows/${wf.id}`);
+                } catch (err) {
+                  console.error("save workflow:", err);
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              className="rounded-md bg-teal-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-700 disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save"}
+            </button>
+            <button
+              onClick={() => setShowSaveWf(false)}
+              className="rounded-md border border-slate-300 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+            >
+              Cancel
+            </button>
           </div>
         )}
       </div>
