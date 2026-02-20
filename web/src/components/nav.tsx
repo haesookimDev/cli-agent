@@ -13,6 +13,7 @@ const tabs = [
   { href: "/results", label: "Results" },
   { href: "/trace", label: "Trace" },
   { href: "/workflows", label: "Workflows" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function Nav() {
