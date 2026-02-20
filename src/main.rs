@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
             .mcp_server_args
             .as_deref()
             .unwrap_or("-y @modelcontextprotocol/server-github");
-        let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
+        let args: Vec<&str> = args_str.split_whitespace().collect();
         let mut env = std::collections::HashMap::new();
         if let Some(ref token) = cfg.github_token {
             env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token.clone());
