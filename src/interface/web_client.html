@@ -407,7 +407,7 @@
 
     /* ===== TASK RUNNER ===== */
     let currentRunId = null;
-    let currentEventSource = null;
+    let currentStreamController = null;
 
     document.getElementById('submitRun').addEventListener('click', async () => {
       const task = document.getElementById('taskInput').value.trim();
@@ -440,13 +440,10 @@
       chip.className = 'status-chip ' + statusClass(status);
     }
 
-    function startStream(runId) {
-      if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
+    async function startStream(runId) {
+      if (currentStreamController) { currentStreamController.abort(); currentStreamController = null; }
       const log = document.getElementById('streamLog');
       log.innerHTML = '';
-      const url = `/v1/runs/${runId}/stream?poll_ms=400&behavior=false`;
-      const es = new EventSource(url);
-      currentEventSource = es;
 
       function addLog(type, data) {
         const div = document.createElement('div');
@@ -456,28 +453,66 @@
         log.scrollTop = log.scrollHeight;
       }
 
-      es.addEventListener('action_event', e => {
-        try {
-          const ev = JSON.parse(e.data);
-          addLog(ev.action, JSON.stringify(ev.payload || {}));
-        } catch { addLog('action_event', e.data); }
-      });
+      const controller = new AbortController();
+      currentStreamController = controller;
 
-      es.addEventListener('run_terminal', e => {
-        try {
-          const ev = JSON.parse(e.data);
-          updateRunnerStatus(ev.status);
-          addLog('TERMINAL', `status=${ev.status}`);
-        } catch { addLog('run_terminal', e.data); }
-        es.close();
-        currentEventSource = null;
-      });
+      try {
+        const headers = await authHeaders('');
+        headers['Accept'] = 'text/event-stream';
+        const url = `/v1/runs/${runId}/stream?poll_ms=400&behavior=false`;
+        const resp = await fetch(url, { headers, signal: controller.signal });
 
-      es.addEventListener('error', e => {
-        addLog('ERROR', 'stream error');
-      });
+        if (!resp.ok || !resp.body) {
+          const text = await resp.text().catch(() => '');
+          addLog('ERROR', `stream failed: ${resp.status} ${text}`);
+          return;
+        }
 
-      es.onerror = () => { /* EventSource auto-reconnect */ };
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+
+          for (const part of parts) {
+            let eventType = 'message';
+            let data = '';
+            for (const line of part.split('\n')) {
+              if (line.startsWith('event:')) eventType = line.slice(6).trim();
+              else if (line.startsWith('data:')) data = line.slice(5).trim();
+            }
+            if (!data) continue;
+
+            if (eventType === 'action_event') {
+              try {
+                const ev = JSON.parse(data);
+                addLog(ev.action, JSON.stringify(ev.payload || {}));
+              } catch { addLog('action_event', data); }
+            } else if (eventType === 'run_terminal') {
+              try {
+                const ev = JSON.parse(data);
+                updateRunnerStatus(ev.status);
+                addLog('TERMINAL', `status=${ev.status}`);
+              } catch { addLog('run_terminal', data); }
+              currentStreamController = null;
+              return;
+            } else if (eventType === 'error') {
+              addLog('ERROR', data);
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          addLog('ERROR', err.message);
+        }
+      }
+      currentStreamController = null;
     }
 
     function escapeHtml(s) {

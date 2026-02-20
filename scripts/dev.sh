@@ -3,6 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Load .env into process environment
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  source "$ROOT/.env"
+  set +a
+  echo "[dev] Loaded .env"
+fi
+
 cleanup() {
   echo "Stopping servers..."
   kill $RUST_PID $NEXT_PID 2>/dev/null || true
