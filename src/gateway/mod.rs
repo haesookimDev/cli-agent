@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use axum::Router;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::orchestrator::Orchestrator;

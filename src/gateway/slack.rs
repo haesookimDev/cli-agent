@@ -10,7 +10,6 @@ use axum::{Json, Router};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::gateway::{
     parse_gateway_text, poll_and_deliver, GatewayAdapter, GatewayManager, GatewayResponse,
@@ -181,8 +180,8 @@ async fn slash_command_handler(
         serde_urlencoded::from_bytes(body.as_ref()).unwrap_or_default();
     let get_field = |name: &str| -> String {
         form.iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
+            .find(|(k, _): &&(String, String)| k == name)
+            .map(|(_, v): &(String, String)| v.clone())
             .unwrap_or_default()
     };
 

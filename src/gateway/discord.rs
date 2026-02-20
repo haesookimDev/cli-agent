@@ -12,9 +12,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::gateway::{
-    parse_gateway_text, parse_profile, poll_and_deliver, GatewayAction, GatewayAdapter,
-    GatewayCommand, GatewayManager, GatewayResponse, GatewayResponsePayload, MessageOrigin,
-    Platform,
+    parse_profile, poll_and_deliver, GatewayAction, GatewayAdapter, GatewayCommand,
+    GatewayManager, GatewayResponse, GatewayResponsePayload, MessageOrigin, Platform,
 };
 use crate::types::TaskProfile;
 
