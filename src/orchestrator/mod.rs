@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::agents::{AgentInput, AgentRegistry};
 use crate::context::{ContextChunk, ContextKind, ContextManager, ContextScope};
+use crate::mcp::McpClient;
 use crate::memory::MemoryManager;
 use crate::router::ModelRouter;
 use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
@@ -19,10 +20,11 @@ use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
 };
 use crate::types::{
-    AgentExecutionRecord, AgentRole, NodeTraceState, RunActionEvent, RunActionType,
-    RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView, RunRecord,
-    RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
-    TraceEdge, WebhookDeliveryRecord, WebhookEndpoint,
+    AgentExecutionRecord, AgentRole, McpToolDefinition, NodeTraceState, RunActionEvent,
+    RunActionType, RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView,
+    RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent,
+    SessionEventType, SubtaskPlan, TraceEdge, WebhookDeliveryRecord, WebhookEndpoint,
+    WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -34,8 +36,10 @@ pub struct Orchestrator {
     memory: Arc<MemoryManager>,
     context: Arc<ContextManager>,
     webhook: Arc<WebhookDispatcher>,
+    mcp: Option<Arc<McpClient>>,
     runs: Arc<DashMap<Uuid, RunRecord>>,
     controls: Arc<DashMap<Uuid, RunControl>>,
+    workflow_graphs: Arc<DashMap<Uuid, ExecutionGraph>>,
     max_graph_depth: u8,
 }
 
@@ -54,6 +58,7 @@ impl Orchestrator {
         context: Arc<ContextManager>,
         webhook: Arc<WebhookDispatcher>,
         max_graph_depth: u8,
+        mcp: Option<Arc<McpClient>>,
     ) -> Self {
         Self {
             runtime,
@@ -62,8 +67,10 @@ impl Orchestrator {
             memory,
             context,
             webhook,
+            mcp,
             runs: Arc::new(DashMap::new()),
             controls: Arc::new(DashMap::new()),
+            workflow_graphs: Arc::new(DashMap::new()),
             max_graph_depth,
         }
     }
@@ -526,7 +533,11 @@ impl Orchestrator {
             )
             .await?;
 
-        let graph = self.build_graph(req.task.as_str())?;
+        let graph = self
+            .workflow_graphs
+            .remove(&run_id)
+            .map(|(_, g)| g)
+            .unwrap_or_else(|| self.build_graph(req.task.as_str()).unwrap());
         let graph_nodes = graph.nodes();
         self.record_action_event(
             run_id,
@@ -731,6 +742,7 @@ impl Orchestrator {
         let router = self.router.clone();
         let memory = self.memory.clone();
         let context = self.context.clone();
+        let mcp = self.mcp.clone();
 
         Arc::new(move |node: AgentNode, deps: Vec<NodeExecutionResult>| {
             let agents = agents.clone();
@@ -738,9 +750,71 @@ impl Orchestrator {
             let memory = memory.clone();
             let context = context.clone();
             let req = req.clone();
+            let mcp = mcp.clone();
 
             async move {
                 let started = Instant::now();
+
+                // ToolCaller role: execute MCP tool call instead of agent LLM call
+                if node.role == AgentRole::ToolCaller {
+                    if let Some(mcp) = mcp.as_ref() {
+                        let tool_call: Result<serde_json::Value, _> =
+                            serde_json::from_str(&node.instructions);
+                        let (tool_name, arguments) = match tool_call {
+                            Ok(val) => {
+                                let name = val
+                                    .get("tool_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                let args = val
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                                (name, args)
+                            }
+                            Err(_) => (node.instructions.clone(), serde_json::json!({})),
+                        };
+
+                        let result = mcp.call_tool(&tool_name, arguments).await;
+                        let _ = memory
+                            .append_run_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::McpToolCalled,
+                                Some("node"),
+                                Some(node.id.as_str()),
+                                None,
+                                serde_json::json!({
+                                    "node_id": node.id,
+                                    "tool_name": tool_name,
+                                    "succeeded": result.succeeded,
+                                    "duration_ms": result.duration_ms,
+                                }),
+                            )
+                            .await;
+
+                        return Ok(NodeExecutionResult {
+                            node_id: node.id,
+                            role: node.role,
+                            model: format!("mcp:{tool_name}"),
+                            output: result.content.unwrap_or_default(),
+                            duration_ms: started.elapsed().as_millis(),
+                            succeeded: result.succeeded,
+                            error: result.error,
+                        });
+                    } else {
+                        return Ok(NodeExecutionResult {
+                            node_id: node.id,
+                            role: node.role,
+                            model: "mcp:unavailable".to_string(),
+                            output: String::new(),
+                            duration_ms: started.elapsed().as_millis(),
+                            succeeded: false,
+                            error: Some("MCP client not configured".to_string()),
+                        });
+                    }
+                }
 
                 let dep_outputs = deps
                     .iter()
@@ -880,32 +954,79 @@ impl Orchestrator {
     }
 
     fn build_on_completed_fn(&self, run_id: Uuid, task: String) -> OnNodeCompletedFn {
+        let memory = self.memory.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
+            let memory = memory.clone();
             async move {
                 let mut dynamic_nodes = Vec::new();
 
-                if node.role == AgentRole::Planner
-                    && result.succeeded
-                    && task.split_whitespace().count() > 20
-                    && node.depth < 5
-                {
-                    let mut dynamic = AgentNode::new(
-                        format!("dynamic_checkpoint_{run_id}"),
-                        AgentRole::Summarizer,
-                        "Create checkpoint summary to reduce context pressure.",
-                    );
-                    dynamic.dependencies = vec![node.id];
-                    dynamic.depth = node.depth + 1;
-                    dynamic.policy = ExecutionPolicy {
-                        max_parallelism: 1,
-                        retry: 1,
-                        timeout_ms: 12_000,
-                        circuit_breaker: 2,
-                        on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
-                        fallback_node: None,
-                    };
-                    dynamic_nodes.push(dynamic);
+                if node.role == AgentRole::Planner && result.succeeded && node.depth < 5 {
+                    // Try to parse output as SubtaskPlan JSON
+                    if let Ok(plan) = serde_json::from_str::<SubtaskPlan>(&result.output) {
+                        if !plan.subtasks.is_empty() {
+                            let _ = memory
+                                .append_run_action_event(
+                                    run_id,
+                                    result.node_id.as_str().parse().unwrap_or_default(),
+                                    RunActionType::SubtaskPlanned,
+                                    Some("node"),
+                                    Some(node.id.as_str()),
+                                    None,
+                                    serde_json::json!({
+                                        "subtask_count": plan.subtasks.len(),
+                                        "subtasks": plan.subtasks.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                                    }),
+                                )
+                                .await;
+
+                            for subtask in plan.subtasks {
+                                let role = subtask.agent_role.unwrap_or(AgentRole::Coder);
+                                let instructions = subtask.instructions.unwrap_or(subtask.description.clone());
+                                let mut sub_node = AgentNode::new(
+                                    subtask.id.clone(),
+                                    role,
+                                    instructions,
+                                );
+                                sub_node.dependencies = subtask.dependencies;
+                                // If dependencies are empty, depend on the planner node
+                                if sub_node.dependencies.is_empty() {
+                                    sub_node.dependencies = vec![node.id.clone()];
+                                }
+                                sub_node.depth = node.depth + 1;
+                                sub_node.policy = ExecutionPolicy {
+                                    max_parallelism: 2,
+                                    retry: 1,
+                                    timeout_ms: 30_000,
+                                    circuit_breaker: 3,
+                                    on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
+                                    fallback_node: None,
+                                };
+                                dynamic_nodes.push(sub_node);
+                            }
+                            return Ok(dynamic_nodes);
+                        }
+                    }
+
+                    // Fallback: existing checkpoint logic for long tasks
+                    if task.split_whitespace().count() > 20 {
+                        let mut dynamic = AgentNode::new(
+                            format!("dynamic_checkpoint_{run_id}"),
+                            AgentRole::Summarizer,
+                            "Create checkpoint summary to reduce context pressure.",
+                        );
+                        dynamic.dependencies = vec![node.id];
+                        dynamic.depth = node.depth + 1;
+                        dynamic.policy = ExecutionPolicy {
+                            max_parallelism: 1,
+                            retry: 1,
+                            timeout_ms: 12_000,
+                            circuit_breaker: 2,
+                            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
+                            fallback_node: None,
+                        };
+                        dynamic_nodes.push(dynamic);
+                    }
                 }
 
                 Ok(dynamic_nodes)

@@ -320,6 +320,31 @@ impl MemoryManager {
     pub async fn vacuum(&self) -> anyhow::Result<()> {
         self.store.vacuum().await
     }
+
+    pub async fn save_workflow(
+        &self,
+        template: &crate::types::WorkflowTemplate,
+    ) -> anyhow::Result<()> {
+        self.store.save_workflow(template).await
+    }
+
+    pub async fn get_workflow(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::types::WorkflowTemplate>> {
+        self.store.get_workflow(id).await
+    }
+
+    pub async fn list_workflows(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::types::WorkflowTemplate>> {
+        self.store.list_workflows(limit).await
+    }
+
+    pub async fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
+        self.store.delete_workflow(id).await
+    }
 }
 
 fn recency_score(inserted_at: Instant, now: Instant) -> f64 {

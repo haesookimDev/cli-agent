@@ -192,6 +192,23 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS workflow_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                source_run_id TEXT,
+                graph_json TEXT NOT NULL,
+                parameters_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -996,6 +1013,97 @@ impl SqliteStore {
         sqlx::query("VACUUM").execute(&self.pool).await?;
         Ok(())
     }
+
+    // --- Workflow CRUD ---
+
+    pub async fn save_workflow(
+        &self,
+        template: &crate::types::WorkflowTemplate,
+    ) -> anyhow::Result<()> {
+        let graph_json = serde_json::to_string(&template.graph_template)?;
+        let params_json = serde_json::to_string(&template.parameters)?;
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO workflow_templates
+            (id, name, description, source_run_id, graph_json, parameters_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+        )
+        .bind(&template.id)
+        .bind(&template.name)
+        .bind(&template.description)
+        .bind(template.source_run_id.map(|u| u.to_string()))
+        .bind(&graph_json)
+        .bind(&params_json)
+        .bind(template.created_at.to_rfc3339())
+        .bind(template.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_workflow(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::types::WorkflowTemplate>> {
+        let row = sqlx::query(
+            r#"SELECT id, name, description, source_run_id, graph_json, parameters_json, created_at, updated_at
+               FROM workflow_templates WHERE id = ?1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(parse_workflow_row(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn list_workflows(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::types::WorkflowTemplate>> {
+        let rows = sqlx::query(
+            r#"SELECT id, name, description, source_run_id, graph_json, parameters_json, created_at, updated_at
+               FROM workflow_templates ORDER BY updated_at DESC LIMIT ?1"#,
+        )
+        .bind(limit.min(500) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            out.push(parse_workflow_row(r)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM workflow_templates WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+fn parse_workflow_row(
+    r: &sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<crate::types::WorkflowTemplate> {
+    let graph_json: String = r.get("graph_json");
+    let params_json: String = r.get("parameters_json");
+    let source_run_str: Option<String> = r.get("source_run_id");
+    Ok(crate::types::WorkflowTemplate {
+        id: r.get("id"),
+        name: r.get("name"),
+        description: r.get("description"),
+        source_run_id: source_run_str.and_then(|s| Uuid::parse_str(&s).ok()),
+        graph_template: serde_json::from_str(&graph_json)?,
+        parameters: serde_json::from_str(&params_json)?,
+        created_at: parse_rfc3339(&r.get::<String, _>("created_at"))?,
+        updated_at: parse_rfc3339(&r.get::<String, _>("updated_at"))?,
+    })
 }
 
 fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
