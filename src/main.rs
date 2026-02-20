@@ -9,6 +9,9 @@ use uuid::Uuid;
 use cli_agent::agents::AgentRegistry;
 use cli_agent::config::AppConfig;
 use cli_agent::context::ContextManager;
+use cli_agent::gateway::discord::{DiscordAdapter, DiscordConfig};
+use cli_agent::gateway::slack::{SlackAdapter, SlackConfig};
+use cli_agent::gateway::GatewayManager;
 use cli_agent::interface::api::{self, ApiState};
 use cli_agent::interface::tui;
 use cli_agent::memory::MemoryManager;
@@ -153,8 +156,26 @@ async fn main() -> anyhow::Result<()> {
             let port = port.unwrap_or(cfg.server_port);
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
 
+            let mut gateway_manager = GatewayManager::new(orchestrator.clone());
+
+            if let Some(slack_cfg) = SlackConfig::from_env() {
+                gateway_manager.register_adapter(Arc::new(SlackAdapter::new(slack_cfg)));
+                tracing::info!("Slack gateway adapter registered");
+            }
+
+            if let Some(discord_cfg) = DiscordConfig::from_env() {
+                gateway_manager.register_adapter(Arc::new(DiscordAdapter::new(discord_cfg)));
+                tracing::info!("Discord gateway adapter registered");
+            }
+
+            let gateway_manager = Arc::new(gateway_manager);
+            gateway_manager.start_all_backgrounds().await?;
+            let gateway_router = gateway_manager.build_router();
+
             println!("serving on http://{addr}");
-            api::serve(addr, ApiState { orchestrator, auth }).await?;
+            println!("  web client: http://{addr}/web-client");
+            println!("  dashboard:  http://{addr}/dashboard");
+            api::serve(addr, ApiState { orchestrator, auth }, Some(gateway_router)).await?;
         }
         Commands::Replay { session } => {
             let events = orchestrator.replay_session(session).await?;
