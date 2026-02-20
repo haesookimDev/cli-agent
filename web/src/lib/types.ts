@@ -105,3 +105,36 @@ export interface RunBehaviorView {
   action_mix: RunBehaviorActionCount[];
   summary: RunBehaviorSummary;
 }
+
+export interface NodeTraceState {
+  node_id: string;
+  role: AgentRole | null;
+  dependencies: string[];
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  retries: number;
+  model: string | null;
+}
+
+export interface TraceEdge {
+  from: string;
+  to: string;
+}
+
+export interface RunTraceGraph {
+  nodes: NodeTraceState[];
+  edges: TraceEdge[];
+  active_nodes: string[];
+  completed_nodes: number;
+  failed_nodes: number;
+}
+
+export interface RunTrace {
+  run_id: string;
+  session_id: string;
+  status: RunStatus | null;
+  events: RunActionEvent[];
+  graph: RunTraceGraph;
+}

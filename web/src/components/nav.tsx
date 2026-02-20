@@ -8,6 +8,8 @@ const tabs = [
   { href: "/sessions", label: "Sessions" },
   { href: "/runs", label: "Runs" },
   { href: "/behavior", label: "Behavior" },
+  { href: "/results", label: "Results" },
+  { href: "/trace", label: "Trace" },
 ];
 
 export function Nav() {

@@ -99,6 +99,18 @@ export default function RunsPage() {
                       >
                         Behavior
                       </Link>
+                      <Link
+                        href={`/results?run=${r.run_id}`}
+                        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Results
+                      </Link>
+                      <Link
+                        href={`/trace?run=${r.run_id}`}
+                        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Trace
+                      </Link>
                     </div>
                   </td>
                 </tr>

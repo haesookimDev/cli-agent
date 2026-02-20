@@ -58,7 +58,21 @@ export default function RunDetailPage() {
             </h2>
             <StatusBadge status={run.status} />
           </div>
-          <RunActions runId={run.run_id} status={run.status} onAction={load} />
+          <div className="flex items-center gap-2">
+            <Link
+              href={`/results?run=${run.run_id}`}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Results
+            </Link>
+            <Link
+              href={`/trace?run=${run.run_id}`}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Trace
+            </Link>
+            <RunActions runId={run.run_id} status={run.status} onAction={load} />
+          </div>
         </div>
 
         <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4">
