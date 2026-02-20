@@ -421,6 +421,40 @@ pub struct SettingsPatch {
     pub disabled_providers: Option<Vec<String>>,
 }
 
+// --- Cron Schedule Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronSchedule {
+    pub id: Uuid,
+    pub workflow_id: String,
+    pub cron_expr: String,
+    pub enabled: bool,
+    pub parameters: Option<serde_json::Value>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateScheduleRequest {
+    pub workflow_id: String,
+    pub cron_expr: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub parameters: Option<serde_json::Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateScheduleRequest {
+    pub cron_expr: Option<String>,
+    pub enabled: Option<bool>,
+    pub parameters: Option<Option<serde_json::Value>>,
+}
+
 // --- MCP Types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

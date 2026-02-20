@@ -6,8 +6,8 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::types::{
-    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionSummary, WebhookDeliveryRecord,
-    WebhookEndpoint,
+    CronSchedule, MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionSummary,
+    WebhookDeliveryRecord, WebhookEndpoint,
 };
 
 #[derive(Debug, Clone)]
@@ -203,6 +203,23 @@ impl SqliteStore {
                 parameters_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS cron_schedules (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                cron_expr TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                parameters TEXT,
+                last_run_at TEXT,
+                next_run_at TEXT,
+                created_at TEXT NOT NULL
             );
             "#,
         )
@@ -1045,6 +1062,164 @@ impl SqliteStore {
         Ok(())
     }
 
+    // --- Cron Schedule CRUD ---
+
+    pub async fn create_schedule(&self, schedule: &CronSchedule) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO cron_schedules (id, workflow_id, cron_expr, enabled, parameters, last_run_at, next_run_at, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+        )
+        .bind(schedule.id.to_string())
+        .bind(&schedule.workflow_id)
+        .bind(&schedule.cron_expr)
+        .bind(if schedule.enabled { 1_i64 } else { 0_i64 })
+        .bind(schedule.parameters.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default()))
+        .bind(schedule.last_run_at.map(|t| t.to_rfc3339()))
+        .bind(schedule.next_run_at.map(|t| t.to_rfc3339()))
+        .bind(schedule.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_schedules(&self, limit: usize) -> anyhow::Result<Vec<CronSchedule>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, workflow_id, cron_expr, enabled, parameters, last_run_at, next_run_at, created_at
+            FROM cron_schedules
+            ORDER BY created_at DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(parse_schedule_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn get_schedule(&self, id: Uuid) -> anyhow::Result<Option<CronSchedule>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, workflow_id, cron_expr, enabled, parameters, last_run_at, next_run_at, created_at
+            FROM cron_schedules WHERE id = ?1
+            "#,
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(parse_schedule_row(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn update_schedule(
+        &self,
+        id: Uuid,
+        cron_expr: Option<&str>,
+        enabled: Option<bool>,
+        parameters: Option<Option<&serde_json::Value>>,
+        next_run_at: Option<Option<DateTime<Utc>>>,
+    ) -> anyhow::Result<()> {
+        // Build dynamic update
+        let mut sets = Vec::new();
+        let mut binds: Vec<String> = Vec::new();
+
+        if let Some(expr) = cron_expr {
+            sets.push(format!("cron_expr = ?{}", binds.len() + 2));
+            binds.push(expr.to_string());
+        }
+        if let Some(en) = enabled {
+            sets.push(format!("enabled = ?{}", binds.len() + 2));
+            binds.push(if en { "1".to_string() } else { "0".to_string() });
+        }
+        if let Some(params) = &parameters {
+            sets.push(format!("parameters = ?{}", binds.len() + 2));
+            binds.push(
+                params
+                    .map(|p| serde_json::to_string(p).unwrap_or_default())
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(next) = &next_run_at {
+            sets.push(format!("next_run_at = ?{}", binds.len() + 2));
+            binds.push(next.map(|t| t.to_rfc3339()).unwrap_or_default());
+        }
+
+        if sets.is_empty() {
+            return Ok(());
+        }
+
+        let sql = format!(
+            "UPDATE cron_schedules SET {} WHERE id = ?1",
+            sets.join(", ")
+        );
+
+        let mut query = sqlx::query(&sql).bind(id.to_string());
+        for b in &binds {
+            query = query.bind(b.as_str());
+        }
+        query.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn update_schedule_last_run(
+        &self,
+        id: Uuid,
+        last_run_at: DateTime<Utc>,
+        next_run_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE cron_schedules
+            SET last_run_at = ?2, next_run_at = ?3
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(last_run_at.to_rfc3339())
+        .bind(next_run_at.map(|t| t.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_schedule(&self, id: Uuid) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM cron_schedules WHERE id = ?1")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_due_schedules(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<CronSchedule>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, workflow_id, cron_expr, enabled, parameters, last_run_at, next_run_at, created_at
+            FROM cron_schedules
+            WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1
+            ORDER BY next_run_at ASC
+            "#,
+        )
+        .bind(now.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(parse_schedule_row(&row)?);
+        }
+        Ok(out)
+    }
+
     // --- Workflow CRUD ---
 
     pub async fn save_workflow(
@@ -1117,6 +1292,32 @@ impl SqliteStore {
             .await?;
         Ok(())
     }
+}
+
+fn parse_schedule_row(r: &sqlx::sqlite::SqliteRow) -> anyhow::Result<CronSchedule> {
+    let id_raw: String = r.get("id");
+    let params_raw: Option<String> = r.get("parameters");
+    let last_run_raw: Option<String> = r.get("last_run_at");
+    let next_run_raw: Option<String> = r.get("next_run_at");
+    let created_at_raw: String = r.get("created_at");
+
+    Ok(CronSchedule {
+        id: Uuid::parse_str(&id_raw)?,
+        workflow_id: r.get("workflow_id"),
+        cron_expr: r.get("cron_expr"),
+        enabled: r.get::<i64, _>("enabled") != 0,
+        parameters: params_raw
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?,
+        last_run_at: last_run_raw.as_deref().map(parse_rfc3339).transpose()?,
+        next_run_at: next_run_raw
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(parse_rfc3339)
+            .transpose()?,
+        created_at: parse_rfc3339(&created_at_raw)?,
+    })
 }
 
 fn parse_workflow_row(
