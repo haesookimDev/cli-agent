@@ -10,6 +10,7 @@ const tabs = [
   { href: "/behavior", label: "Behavior" },
   { href: "/results", label: "Results" },
   { href: "/trace", label: "Trace" },
+  { href: "/workflows", label: "Workflows" },
 ];
 
 export function Nav() {

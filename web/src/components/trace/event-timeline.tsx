@@ -24,6 +24,9 @@ const actionColors: Record<string, string> = {
   run_resumed: "text-teal-600",
   // Webhook
   webhook_dispatched: "text-purple-600",
+  // MCP & Subtask
+  mcp_tool_called: "text-violet-600",
+  subtask_planned: "text-amber-600",
 };
 
 interface Props {

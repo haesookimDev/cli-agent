@@ -9,6 +9,10 @@ const statusFill: Record<string, string> = {
   cancelled: "#94a3b8",
 };
 
+const roleBorder: Record<string, string> = {
+  tool_caller: "#8b5cf6",
+};
+
 const NODE_W = 150;
 const NODE_H = 54;
 const GAP_X = 200;
@@ -144,6 +148,7 @@ export function DagGraph({ nodes, edges, activeNodes }: Props) {
           const pos = positions.get(n.node_id);
           if (!pos) return null;
           const fill = statusFill[n.status] ?? "#e2e8f0";
+          const border = (n.role && roleBorder[n.role]) || fill;
           const isActive = activeSet.has(n.node_id);
           return (
             <g key={n.node_id}>
@@ -155,7 +160,7 @@ export function DagGraph({ nodes, edges, activeNodes }: Props) {
                 rx={8}
                 fill={fill}
                 fillOpacity={0.15}
-                stroke={fill}
+                stroke={border}
                 strokeWidth={isActive ? 2.5 : 1.5}
                 className={isActive ? "node-active" : ""}
               />

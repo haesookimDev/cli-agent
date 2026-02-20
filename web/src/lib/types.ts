@@ -6,7 +6,8 @@ export type RunActionType =
   | "run_queued" | "run_started" | "run_cancel_requested" | "run_pause_requested"
   | "run_resumed" | "graph_initialized" | "node_started" | "node_completed"
   | "node_failed" | "node_skipped" | "dynamic_node_added" | "graph_completed"
-  | "model_selected" | "run_finished" | "webhook_dispatched";
+  | "model_selected" | "run_finished" | "webhook_dispatched"
+  | "mcp_tool_called" | "subtask_planned";
 
 export interface RunRequest {
   task: string;
@@ -137,4 +138,44 @@ export interface RunTrace {
   status: RunStatus | null;
   events: RunActionEvent[];
   graph: RunTraceGraph;
+}
+
+// --- MCP Types ---
+
+export interface McpToolDefinition {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+// --- Workflow Types ---
+
+export interface WorkflowParameter {
+  name: string;
+  description: string;
+  default_value: string | null;
+}
+
+export interface WorkflowNodeTemplate {
+  id: string;
+  role: AgentRole;
+  instructions: string;
+  dependencies: string[];
+  mcp_tools: string[];
+  policy: Record<string, unknown>;
+}
+
+export interface WorkflowGraphTemplate {
+  nodes: WorkflowNodeTemplate[];
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  source_run_id: string | null;
+  graph_template: WorkflowGraphTemplate;
+  parameters: WorkflowParameter[];
 }
