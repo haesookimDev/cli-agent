@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --color-teal-600: #0d7f80;
+  --color-teal-700: #0a6263;
+  --color-orange-500: #d66832;
+  --color-olive-500: #5f7f34;
+  --color-sand-50: #faf8f5;
+  --color-sand-100: #f0ece4;
+  --color-sand-200: #e0dbd0;
+  --color-sand-300: #c8c0b4;
+
+  --font-mono: "ui-monospace", "SFMono-Regular", "Menlo", "Consolas", monospace;
+}

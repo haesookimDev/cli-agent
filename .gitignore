@@ -3,3 +3,17 @@
 data
 .env
 CLAUDE.md
+**/node_modules
+**/dist
+**/build
+**/out
+**/.next
+**/.cache
+**/.env
+**/.env.local
+**/.env.development
+**/.env.production
+**/.env.test
+**/.vscode
+**/.idea
+**/.DS_Store
