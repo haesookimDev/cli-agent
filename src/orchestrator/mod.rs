@@ -780,33 +780,47 @@ impl Orchestrator {
                             Err(_) => (node.instructions.clone(), serde_json::json!({})),
                         };
 
-                        let result = mcp.call_tool(&tool_name, arguments).await;
-                        let _ = memory
-                            .append_run_action_event(
-                                run_id,
-                                session_id,
-                                RunActionType::McpToolCalled,
-                                Some("node"),
-                                Some(node.id.as_str()),
-                                None,
-                                serde_json::json!({
-                                    "node_id": node.id,
-                                    "tool_name": tool_name,
-                                    "succeeded": result.succeeded,
-                                    "duration_ms": result.duration_ms,
-                                }),
-                            )
-                            .await;
+                        match mcp.call_tool(&tool_name, arguments).await {
+                            Ok(result) => {
+                                let _ = memory
+                                    .append_run_action_event(
+                                        run_id,
+                                        session_id,
+                                        RunActionType::McpToolCalled,
+                                        Some("node"),
+                                        Some(node.id.as_str()),
+                                        None,
+                                        serde_json::json!({
+                                            "node_id": node.id,
+                                            "tool_name": tool_name,
+                                            "succeeded": result.succeeded,
+                                            "duration_ms": result.duration_ms,
+                                        }),
+                                    )
+                                    .await;
 
-                        return Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
-                            model: format!("mcp:{tool_name}"),
-                            output: result.content.unwrap_or_default(),
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: result.succeeded,
-                            error: result.error,
-                        });
+                                return Ok(NodeExecutionResult {
+                                    node_id: node.id,
+                                    role: node.role,
+                                    model: format!("mcp:{tool_name}"),
+                                    output: result.content,
+                                    duration_ms: started.elapsed().as_millis(),
+                                    succeeded: result.succeeded,
+                                    error: result.error,
+                                });
+                            }
+                            Err(err) => {
+                                return Ok(NodeExecutionResult {
+                                    node_id: node.id,
+                                    role: node.role,
+                                    model: format!("mcp:{tool_name}"),
+                                    output: String::new(),
+                                    duration_ms: started.elapsed().as_millis(),
+                                    succeeded: false,
+                                    error: Some(err.to_string()),
+                                });
+                            }
+                        }
                     } else {
                         return Ok(NodeExecutionResult {
                             node_id: node.id,
