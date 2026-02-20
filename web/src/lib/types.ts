@@ -155,6 +155,30 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+// --- Settings Types ---
+
+export interface AppSettings {
+  default_profile: TaskProfile;
+  preferred_model: string | null;
+  disabled_models: string[];
+  disabled_providers: string[];
+}
+
+export interface ModelWithStatus {
+  spec: {
+    provider: string;
+    model_id: string;
+    quality: number;
+    latency: number;
+    cost: number;
+    context_window: number;
+    tool_call_accuracy: number;
+    local_only: boolean;
+  };
+  enabled: boolean;
+  is_preferred: boolean;
+}
+
 // --- MCP Types ---
 
 export interface McpToolDefinition {
