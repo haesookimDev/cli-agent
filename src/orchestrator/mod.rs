@@ -1539,6 +1539,74 @@ impl Orchestrator {
         self.memory.delete_workflow(id).await
     }
 
+    // --- Cron Schedule methods ---
+
+    pub async fn create_schedule(
+        &self,
+        req: crate::types::CreateScheduleRequest,
+    ) -> anyhow::Result<crate::types::CronSchedule> {
+        // Validate cron expression
+        use std::str::FromStr;
+        let parsed = cron::Schedule::from_str(&req.cron_expr)
+            .map_err(|e| anyhow::anyhow!("invalid cron expression: {e}"))?;
+        let next = parsed.upcoming(Utc).next();
+
+        let schedule = crate::types::CronSchedule {
+            id: Uuid::new_v4(),
+            workflow_id: req.workflow_id,
+            cron_expr: req.cron_expr,
+            enabled: req.enabled,
+            parameters: req.parameters,
+            last_run_at: None,
+            next_run_at: next,
+            created_at: Utc::now(),
+        };
+        self.memory.create_schedule(&schedule).await?;
+        Ok(schedule)
+    }
+
+    pub async fn list_schedules(&self, limit: usize) -> anyhow::Result<Vec<crate::types::CronSchedule>> {
+        self.memory.list_schedules(limit).await
+    }
+
+    pub async fn get_schedule(&self, id: Uuid) -> anyhow::Result<Option<crate::types::CronSchedule>> {
+        self.memory.get_schedule(id).await
+    }
+
+    pub async fn update_schedule(
+        &self,
+        id: Uuid,
+        req: crate::types::UpdateScheduleRequest,
+    ) -> anyhow::Result<Option<crate::types::CronSchedule>> {
+        // If cron_expr changed, validate and recompute next_run_at
+        let new_next = if let Some(ref expr) = req.cron_expr {
+            use std::str::FromStr;
+            let parsed = cron::Schedule::from_str(expr)
+                .map_err(|e| anyhow::anyhow!("invalid cron expression: {e}"))?;
+            Some(parsed.upcoming(Utc).next())
+        } else {
+            None
+        };
+
+        let params_ref = req.parameters.as_ref().map(|opt| opt.as_ref());
+
+        self.memory
+            .update_schedule(
+                id,
+                req.cron_expr.as_deref(),
+                req.enabled,
+                params_ref,
+                new_next,
+            )
+            .await?;
+
+        self.memory.get_schedule(id).await
+    }
+
+    pub async fn delete_schedule(&self, id: Uuid) -> anyhow::Result<()> {
+        self.memory.delete_schedule(id).await
+    }
+
     pub async fn execute_workflow(
         &self,
         workflow_id: &str,

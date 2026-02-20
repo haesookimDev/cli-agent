@@ -353,6 +353,48 @@ impl MemoryManager {
     pub async fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete_workflow(id).await
     }
+
+    // --- Cron Schedule pass-through ---
+
+    pub async fn create_schedule(&self, schedule: &crate::types::CronSchedule) -> anyhow::Result<()> {
+        self.store.create_schedule(schedule).await
+    }
+
+    pub async fn list_schedules(&self, limit: usize) -> anyhow::Result<Vec<crate::types::CronSchedule>> {
+        self.store.list_schedules(limit).await
+    }
+
+    pub async fn get_schedule(&self, id: Uuid) -> anyhow::Result<Option<crate::types::CronSchedule>> {
+        self.store.get_schedule(id).await
+    }
+
+    pub async fn update_schedule(
+        &self,
+        id: Uuid,
+        cron_expr: Option<&str>,
+        enabled: Option<bool>,
+        parameters: Option<Option<&serde_json::Value>>,
+        next_run_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    ) -> anyhow::Result<()> {
+        self.store.update_schedule(id, cron_expr, enabled, parameters, next_run_at).await
+    }
+
+    pub async fn update_schedule_last_run(
+        &self,
+        id: Uuid,
+        last_run_at: chrono::DateTime<chrono::Utc>,
+        next_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<()> {
+        self.store.update_schedule_last_run(id, last_run_at, next_run_at).await
+    }
+
+    pub async fn delete_schedule(&self, id: Uuid) -> anyhow::Result<()> {
+        self.store.delete_schedule(id).await
+    }
+
+    pub async fn list_due_schedules(&self, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Vec<crate::types::CronSchedule>> {
+        self.store.list_due_schedules(now).await
+    }
 }
 
 fn recency_score(inserted_at: Instant, now: Instant) -> f64 {

@@ -161,6 +161,16 @@ pub fn router(state: ApiState) -> Router {
             post(toggle_provider_handler),
         )
         .route(
+            "/v1/schedules",
+            post(create_schedule_handler).get(list_schedules_handler),
+        )
+        .route(
+            "/v1/schedules/:schedule_id",
+            get(get_schedule_handler)
+                .patch(update_schedule_handler)
+                .delete(delete_schedule_handler),
+        )
+        .route(
             "/v1/workflows",
             post(create_workflow_handler).get(list_workflows_handler),
         )
@@ -1372,6 +1382,149 @@ async fn save_workflow_from_run_handler(
         .await
     {
         Ok(template) => (StatusCode::CREATED, Json(serde_json::json!(template))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+// --- Schedule handlers ---
+
+async fn create_schedule_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<crate::types::CreateScheduleRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.create_schedule(req).await {
+        Ok(schedule) => (StatusCode::CREATED, Json(serde_json::json!(schedule))),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_schedules_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let limit = q.limit.unwrap_or(100);
+    match state.orchestrator.list_schedules(limit).await {
+        Ok(list) => (StatusCode::OK, Json(serde_json::json!(list))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn get_schedule_handler(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    match state.orchestrator.get_schedule(schedule_id).await {
+        Ok(Some(schedule)) => (StatusCode::OK, Json(serde_json::json!(schedule))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "schedule not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn update_schedule_handler(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<crate::types::UpdateScheduleRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.update_schedule(schedule_id, req).await {
+        Ok(Some(schedule)) => (StatusCode::OK, Json(serde_json::json!(schedule))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "schedule not found"})),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn delete_schedule_handler(
+    State(state): State<ApiState>,
+    Path(schedule_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    match state.orchestrator.delete_schedule(schedule_id).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
+        ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),

@@ -19,6 +19,7 @@ use cli_agent::orchestrator::Orchestrator;
 use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
 use cli_agent::types::{RunRequest, TaskProfile};
+use cli_agent::scheduler::CronScheduler;
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
 
 #[derive(Debug, Parser)]
@@ -205,6 +206,10 @@ async fn main() -> anyhow::Result<()> {
             let gateway_manager = Arc::new(gateway_manager);
             gateway_manager.start_all_backgrounds().await?;
             let gateway_router = gateway_manager.build_router();
+
+            // Start cron scheduler background task
+            let scheduler = CronScheduler::new(memory.clone(), orchestrator.clone());
+            tokio::spawn(scheduler.run_loop());
 
             println!("serving on http://{addr}");
             println!("  web client: http://{addr}/web-client");

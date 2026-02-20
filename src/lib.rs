@@ -8,6 +8,7 @@ pub mod memory;
 pub mod orchestrator;
 pub mod router;
 pub mod runtime;
+pub mod scheduler;
 pub mod types;
 pub mod webhook;
 
