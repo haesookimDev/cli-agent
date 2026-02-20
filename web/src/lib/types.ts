@@ -140,6 +140,21 @@ export interface RunTrace {
   graph: RunTraceGraph;
 }
 
+// --- Chat Types ---
+
+export type ChatRole = "user" | "agent" | "system";
+
+export interface ChatMessage {
+  id: string;
+  session_id: string;
+  run_id: string | null;
+  role: ChatRole;
+  content: string;
+  agent_role: AgentRole | null;
+  model: string | null;
+  timestamp: string;
+}
+
 // --- MCP Types ---
 
 export interface McpToolDefinition {
