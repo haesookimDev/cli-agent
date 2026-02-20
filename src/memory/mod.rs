@@ -138,6 +138,14 @@ impl MemoryManager {
         self.store.get_session(session_id).await
     }
 
+    pub async fn list_session_messages(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+        self.store.list_session_messages(session_id, limit).await
+    }
+
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
         self.store.delete_session(session_id).await?;
         self.short_term.remove(&session_id);

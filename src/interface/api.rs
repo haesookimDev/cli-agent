@@ -120,6 +120,11 @@ pub fn router(state: ApiState) -> Router {
             "/v1/sessions/:session_id/runs",
             get(list_session_runs_handler),
         )
+        .route(
+            "/v1/sessions/:session_id/messages",
+            get(list_session_messages_handler),
+        )
+        .route("/v1/runs/active", get(list_active_runs_handler))
         .route("/v1/runs", post(create_run_handler).get(list_runs_handler))
         .route("/v1/runs/:run_id", get(get_run_handler))
         .route("/v1/runs/:run_id/cancel", post(cancel_run_handler))
@@ -332,6 +337,61 @@ async fn list_session_runs_handler(
             Json(serde_json::json!({"error": err.to_string()})),
         ),
     }
+}
+
+async fn list_session_messages_handler(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<ListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let session_id = match Uuid::parse_str(session_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+
+    match state
+        .orchestrator
+        .get_session_messages(session_id, limit)
+        .await
+    {
+        Ok(messages) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(messages).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_active_runs_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let active = state.orchestrator.list_active_runs().await;
+    (StatusCode::OK, Json(serde_json::to_value(active).unwrap()))
 }
 
 async fn create_run_handler(

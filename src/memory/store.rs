@@ -247,6 +247,37 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub async fn list_session_messages(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, role, content, created_at
+            FROM messages
+            WHERE session_id = ?1
+            ORDER BY id DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(session_id.to_string())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut msgs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row.get("id");
+            let role: String = row.get("role");
+            let content: String = row.get("content");
+            let created_at: String = row.get("created_at");
+            msgs.push((id, role, content, created_at));
+        }
+        msgs.reverse();
+        Ok(msgs)
+    }
+
     pub async fn upsert_run(&self, run: &RunRecord) -> anyhow::Result<()> {
         sqlx::query(
             r#"

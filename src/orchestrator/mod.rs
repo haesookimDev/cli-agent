@@ -20,11 +20,11 @@ use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
 };
 use crate::types::{
-    AgentExecutionRecord, AgentRole, McpToolDefinition, NodeTraceState, RunActionEvent,
-    RunActionType, RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView,
-    RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent,
-    SessionEventType, SubtaskPlan, TraceEdge, WebhookDeliveryRecord, WebhookEndpoint,
-    WorkflowTemplate,
+    AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, McpToolDefinition, NodeTraceState,
+    RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary,
+    RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph,
+    SessionEvent, SessionEventType, SubtaskPlan, TraceEdge, WebhookDeliveryRecord,
+    WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -170,6 +170,79 @@ impl Orchestrator {
         runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         runs.truncate(limit);
         Ok(runs)
+    }
+
+    pub async fn list_active_runs(&self) -> Vec<RunRecord> {
+        let mut active = Vec::new();
+        for kv in self.runs.iter() {
+            let run = kv.value();
+            if matches!(run.status, RunStatus::Running | RunStatus::Queued) {
+                active.push(run.clone());
+            }
+        }
+        active.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        active
+    }
+
+    pub async fn get_session_messages(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        let mut messages = Vec::new();
+
+        // Gather user messages from store
+        let raw_msgs = self.memory.list_session_messages(session_id, limit).await?;
+        for (id, role, content, created_at) in raw_msgs {
+            let ts = chrono::DateTime::parse_from_rfc3339(&created_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            let chat_role = match role.as_str() {
+                "user" => ChatRole::User,
+                _ => ChatRole::System,
+            };
+            messages.push(ChatMessage {
+                id: format!("msg:{id}"),
+                session_id,
+                run_id: None,
+                role: chat_role,
+                content,
+                agent_role: None,
+                model: None,
+                timestamp: ts,
+            });
+        }
+
+        // Gather agent outputs from runs in this session
+        let runs = self.memory.list_session_runs(session_id, limit).await?;
+        for run in &runs {
+            for output in &run.outputs {
+                if output.succeeded && !output.output.is_empty() {
+                    let ts = run
+                        .finished_at
+                        .unwrap_or(run.created_at);
+                    messages.push(ChatMessage {
+                        id: format!("out:{}:{}", run.run_id, output.node_id),
+                        session_id,
+                        run_id: Some(run.run_id),
+                        role: ChatRole::Agent,
+                        content: output.output.clone(),
+                        agent_role: Some(output.role),
+                        model: Some(output.model.clone()),
+                        timestamp: ts,
+                    });
+                }
+            }
+        }
+
+        // Sort chronologically
+        messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        // Keep last `limit` messages
+        if messages.len() > limit {
+            messages = messages.split_off(messages.len() - limit);
+        }
+        Ok(messages)
     }
 
     pub async fn list_run_action_events(

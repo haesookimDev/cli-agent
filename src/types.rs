@@ -381,6 +381,28 @@ pub struct RunBehaviorView {
     pub summary: RunBehaviorSummary,
 }
 
+// --- Chat Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRole {
+    User,
+    Agent,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: String,
+    pub session_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub role: ChatRole,
+    pub content: String,
+    pub agent_role: Option<AgentRole>,
+    pub model: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
 // --- MCP Types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
