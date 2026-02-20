@@ -243,3 +243,94 @@ impl McpClient {
         debug!("MCP server process terminated");
     }
 }
+
+// ---------------------------------------------------------------------------
+// McpRegistry — routes tool calls across multiple McpClient instances
+// ---------------------------------------------------------------------------
+
+pub struct McpRegistry {
+    clients: HashMap<String, Arc<McpClient>>,
+    /// Maps tool name → server name. Both "server/tool" and bare "tool" forms.
+    tool_index: RwLock<HashMap<String, String>>,
+}
+
+impl McpRegistry {
+    pub fn new() -> Self {
+        Self {
+            clients: HashMap::new(),
+            tool_index: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a client and index its tools.
+    pub async fn register(&mut self, name: String, client: Arc<McpClient>) {
+        let tools = client.list_tools().await;
+        let mut index = self.tool_index.write().await;
+        for tool in &tools {
+            // Qualified form always registered
+            let qualified = format!("{}/{}", name, tool.name);
+            index.insert(qualified, name.clone());
+            // Bare form only if no collision
+            if !index.contains_key(&tool.name) {
+                index.insert(tool.name.clone(), name.clone());
+            }
+        }
+        drop(index);
+        self.clients.insert(name, client);
+    }
+
+    /// Aggregate tools from all servers with qualified names.
+    pub async fn list_all_tools(&self) -> Vec<McpToolDefinition> {
+        let mut all = Vec::new();
+        for (name, client) in &self.clients {
+            let tools = client.list_tools().await;
+            for tool in tools {
+                all.push(McpToolDefinition {
+                    name: format!("{}/{}", name, tool.name),
+                    description: tool.description,
+                    input_schema: tool.input_schema,
+                    server_name: Some(name.clone()),
+                });
+            }
+        }
+        all
+    }
+
+    /// Route a tool call to the correct server.
+    /// Accepts both "server/tool" and bare "tool" (if unambiguous).
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<McpToolCallResult> {
+        let index = self.tool_index.read().await;
+        let server_name = index
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("No MCP server registered for tool '{name}'"))?
+            .clone();
+        drop(index);
+
+        let client = self
+            .clients
+            .get(&server_name)
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?;
+
+        // Strip server prefix for the actual RPC call
+        let raw_name = name
+            .strip_prefix(&format!("{}/", server_name))
+            .unwrap_or(name);
+
+        client.call_tool(raw_name, arguments).await
+    }
+
+    pub fn server_names(&self) -> Vec<String> {
+        self.clients.keys().cloned().collect()
+    }
+
+    pub async fn shutdown_all(&self) {
+        for (name, client) in &self.clients {
+            debug!("Shutting down MCP server '{name}'");
+            client.shutdown().await;
+        }
+    }
+}

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::agents::{AgentInput, AgentRegistry};
 use crate::context::{ContextChunk, ContextKind, ContextManager, ContextScope};
-use crate::mcp::McpClient;
+use crate::mcp::McpRegistry;
 use crate::memory::MemoryManager;
 use crate::router::ModelRouter;
 use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
@@ -36,7 +36,7 @@ pub struct Orchestrator {
     memory: Arc<MemoryManager>,
     context: Arc<ContextManager>,
     webhook: Arc<WebhookDispatcher>,
-    mcp: Option<Arc<McpClient>>,
+    mcp: Arc<McpRegistry>,
     runs: Arc<DashMap<Uuid, RunRecord>>,
     controls: Arc<DashMap<Uuid, RunControl>>,
     workflow_graphs: Arc<DashMap<Uuid, ExecutionGraph>>,
@@ -58,7 +58,7 @@ impl Orchestrator {
         context: Arc<ContextManager>,
         webhook: Arc<WebhookDispatcher>,
         max_graph_depth: u8,
-        mcp: Option<Arc<McpClient>>,
+        mcp: Arc<McpRegistry>,
     ) -> Self {
         Self {
             runtime,

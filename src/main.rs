@@ -98,42 +98,36 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(cfg.webhook_timeout_secs),
     ));
 
-    let mcp = if cfg.github_token.is_some() {
-        let cmd = cfg
-            .mcp_server_command
-            .as_deref()
-            .unwrap_or("npx")
-            .to_string();
-        let args_str = cfg
-            .mcp_server_args
-            .as_deref()
-            .unwrap_or("-y @modelcontextprotocol/server-github");
-        let args: Vec<&str> = args_str.split_whitespace().collect();
-        let mut env = std::collections::HashMap::new();
-        if let Some(ref token) = cfg.github_token {
-            env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token.clone());
-        }
-        match cli_agent::mcp::McpClient::spawn(&cmd, &args, env).await {
+    let mut mcp_registry = cli_agent::mcp::McpRegistry::new();
+    for server_cfg in &cfg.mcp_servers {
+        let args: Vec<&str> = server_cfg.args.split_whitespace().collect();
+        match cli_agent::mcp::McpClient::spawn(
+            &server_cfg.command,
+            &args,
+            server_cfg.env.clone(),
+        )
+        .await
+        {
             Ok(client) => {
                 if let Err(e) = client.initialize().await {
-                    tracing::warn!("MCP initialize failed: {e}");
-                    None
-                } else {
-                    if let Err(e) = client.discover_tools().await {
-                        tracing::warn!("MCP discover_tools failed: {e}");
-                    }
-                    tracing::info!("MCP client started");
-                    Some(std::sync::Arc::new(client))
+                    tracing::warn!("MCP '{}' init failed: {e}, skipping", server_cfg.name);
+                    continue;
                 }
+                if let Err(e) = client.discover_tools().await {
+                    tracing::warn!("MCP '{}' discover_tools failed: {e}", server_cfg.name);
+                }
+                let client = Arc::new(client);
+                mcp_registry
+                    .register(server_cfg.name.clone(), client)
+                    .await;
+                tracing::info!("MCP server '{}' started", server_cfg.name);
             }
             Err(e) => {
-                tracing::warn!("MCP server spawn failed: {e}");
-                None
+                tracing::warn!("MCP '{}' spawn failed: {e}, skipping", server_cfg.name);
             }
         }
-    } else {
-        None
-    };
+    }
+    let mcp = Arc::new(mcp_registry);
 
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
