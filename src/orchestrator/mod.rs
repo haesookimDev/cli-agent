@@ -371,6 +371,8 @@ impl Orchestrator {
             task: run.task.clone(),
             profile: run.profile,
             session_id: Some(run.session_id),
+            workflow_id: None,
+            workflow_params: None,
         };
         self.submit_run(req).await
     }
@@ -388,6 +390,8 @@ impl Orchestrator {
             task: run.task.clone(),
             profile: run.profile,
             session_id: target_session.or(Some(run.session_id)),
+            workflow_id: None,
+            workflow_params: None,
         };
         self.submit_run(req).await
     }
@@ -1880,6 +1884,7 @@ fn parse_agent_role(value: &str) -> Option<AgentRole> {
         "coder" => Some(AgentRole::Coder),
         "summarizer" => Some(AgentRole::Summarizer),
         "fallback" => Some(AgentRole::Fallback),
+        "tool_caller" => Some(AgentRole::ToolCaller),
         _ => None,
     }
 }

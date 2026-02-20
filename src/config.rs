@@ -20,6 +20,9 @@ pub struct AppConfig {
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
+    pub github_token: Option<String>,
+    pub mcp_server_command: Option<String>,
+    pub mcp_server_args: Option<String>,
 }
 
 impl AppConfig {
@@ -68,6 +71,9 @@ impl AppConfig {
         let openai_api_key = env::var("OPENAI_API_KEY").ok();
         let anthropic_api_key = env::var("ANTHROPIC_API_KEY").ok();
         let gemini_api_key = env::var("GEMINI_API_KEY").ok();
+        let github_token = env::var("GITHUB_TOKEN").ok();
+        let mcp_server_command = env::var("MCP_SERVER_COMMAND").ok();
+        let mcp_server_args = env::var("MCP_SERVER_ARGS").ok();
 
         let cfg = Self {
             data_dir,
@@ -85,6 +91,9 @@ impl AppConfig {
             openai_api_key,
             anthropic_api_key,
             gemini_api_key,
+            github_token,
+            mcp_server_command,
+            mcp_server_args,
         };
 
         cfg.ensure_dirs()?;

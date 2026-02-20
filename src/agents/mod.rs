@@ -57,6 +57,10 @@ impl AgentRegistry {
             AgentRole::Fallback,
             Arc::new(BuiltinAgent::new(AgentRole::Fallback)),
         );
+        map.insert(
+            AgentRole::ToolCaller,
+            Arc::new(BuiltinAgent::new(AgentRole::ToolCaller)),
+        );
 
         Self {
             agents: Arc::new(map),
@@ -93,7 +97,9 @@ impl BuiltinAgent {
             AgentRole::Planner => TaskProfile::Planning,
             AgentRole::Extractor => TaskProfile::Extraction,
             AgentRole::Coder => TaskProfile::Coding,
-            AgentRole::Summarizer | AgentRole::Fallback => TaskProfile::General,
+            AgentRole::Summarizer | AgentRole::Fallback | AgentRole::ToolCaller => {
+                TaskProfile::General
+            }
         }
     }
 
@@ -113,6 +119,9 @@ impl BuiltinAgent {
             }
             AgentRole::Fallback => {
                 "You are the fallback agent. Recover gracefully when upstream nodes fail and provide safe alternatives."
+            }
+            AgentRole::ToolCaller => {
+                "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results."
             }
         }
     }

@@ -40,6 +40,7 @@ pub enum AgentRole {
     Coder,
     Summarizer,
     Fallback,
+    ToolCaller,
 }
 
 impl Display for AgentRole {
@@ -50,6 +51,7 @@ impl Display for AgentRole {
             AgentRole::Coder => "coder",
             AgentRole::Summarizer => "summarizer",
             AgentRole::Fallback => "fallback",
+            AgentRole::ToolCaller => "tool_caller",
         };
         write!(f, "{s}")
     }
@@ -122,6 +124,8 @@ pub struct RunRequest {
     #[serde(default)]
     pub profile: TaskProfile,
     pub session_id: Option<Uuid>,
+    pub workflow_id: Option<String>,
+    pub workflow_params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +239,8 @@ pub enum RunActionType {
     ModelSelected,
     RunFinished,
     WebhookDispatched,
+    McpToolCalled,
+    SubtaskPlanned,
 }
 
 impl Display for RunActionType {
@@ -255,6 +261,8 @@ impl Display for RunActionType {
             RunActionType::ModelSelected => "model_selected",
             RunActionType::RunFinished => "run_finished",
             RunActionType::WebhookDispatched => "webhook_dispatched",
+            RunActionType::McpToolCalled => "mcp_tool_called",
+            RunActionType::SubtaskPlanned => "subtask_planned",
         };
         write!(f, "{s}")
     }
@@ -370,4 +378,77 @@ pub struct RunBehaviorView {
     pub lanes: Vec<RunBehaviorLane>,
     pub action_mix: Vec<RunBehaviorActionCount>,
     pub summary: RunBehaviorSummary,
+}
+
+// --- MCP Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolCallResult {
+    pub tool_name: String,
+    pub succeeded: bool,
+    pub content: String,
+    pub error: Option<String>,
+    pub duration_ms: u128,
+}
+
+// --- Task Decomposition Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtaskPlan {
+    pub subtasks: Vec<SubtaskDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtaskDefinition {
+    pub id: String,
+    pub description: String,
+    pub agent_role: AgentRole,
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
+    pub instructions: String,
+}
+
+// --- Workflow Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowTemplate {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub source_run_id: Option<Uuid>,
+    pub graph_template: WorkflowGraphTemplate,
+    pub parameters: Vec<WorkflowParameter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowGraphTemplate {
+    pub nodes: Vec<WorkflowNodeTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowNodeTemplate {
+    pub id: String,
+    pub role: AgentRole,
+    pub instructions: String,
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
+    pub policy: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowParameter {
+    pub name: String,
+    pub description: String,
+    pub default_value: Option<String>,
 }

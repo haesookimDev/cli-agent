@@ -1019,6 +1019,8 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "model_selected" => RunActionType::ModelSelected,
         "run_finished" => RunActionType::RunFinished,
         "webhook_dispatched" => RunActionType::WebhookDispatched,
+        "mcp_tool_called" => RunActionType::McpToolCalled,
+        "subtask_planned" => RunActionType::SubtaskPlanned,
         _ => {
             return Err(anyhow::anyhow!("unknown run action event type: {value}"));
         }
