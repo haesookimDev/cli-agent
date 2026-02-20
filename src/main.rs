@@ -98,6 +98,43 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(cfg.webhook_timeout_secs),
     ));
 
+    let mcp = if cfg.github_token.is_some() {
+        let cmd = cfg
+            .mcp_server_command
+            .as_deref()
+            .unwrap_or("npx")
+            .to_string();
+        let args_str = cfg
+            .mcp_server_args
+            .as_deref()
+            .unwrap_or("-y @modelcontextprotocol/server-github");
+        let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
+        let mut env = std::collections::HashMap::new();
+        if let Some(ref token) = cfg.github_token {
+            env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token.clone());
+        }
+        match cli_agent::mcp::McpClient::spawn(&cmd, &args, env).await {
+            Ok(mut client) => {
+                if let Err(e) = client.initialize().await {
+                    tracing::warn!("MCP initialize failed: {e}");
+                    None
+                } else {
+                    if let Err(e) = client.discover_tools().await {
+                        tracing::warn!("MCP discover_tools failed: {e}");
+                    }
+                    tracing::info!("MCP client started");
+                    Some(std::sync::Arc::new(client))
+                }
+            }
+            Err(e) => {
+                tracing::warn!("MCP server spawn failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
         AgentRegistry::builtin(),
@@ -106,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         context,
         webhook,
         cfg.max_graph_depth,
+        mcp,
     );
 
     match cli.command {

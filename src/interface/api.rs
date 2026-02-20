@@ -85,6 +85,28 @@ struct TestWebhookRequest {
     payload: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct SaveWorkflowRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecuteWorkflowRequest {
+    parameters: Option<serde_json::Value>,
+    session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkflowRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    graph_template: Option<crate::types::WorkflowGraphTemplate>,
+    parameters: Option<Vec<crate::types::WorkflowParameter>>,
+}
+
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/dashboard", get(dashboard_handler))

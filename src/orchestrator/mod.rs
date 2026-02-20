@@ -1351,6 +1351,166 @@ impl Orchestrator {
         self.finish_run(run_id, RunStatus::Failed, vec![], Some(error_message))
             .await
     }
+
+    // --- Workflow methods ---
+
+    pub async fn save_workflow_from_run(
+        &self,
+        run_id: Uuid,
+        name: String,
+        description: String,
+    ) -> anyhow::Result<WorkflowTemplate> {
+        let events = self.memory.list_run_action_events(run_id, 500).await?;
+        let graph_event = events
+            .iter()
+            .find(|e| e.action == RunActionType::GraphInitialized)
+            .ok_or_else(|| anyhow::anyhow!("no graph found for run {run_id}"))?;
+
+        let nodes_json = graph_event
+            .payload
+            .get("nodes")
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+
+        let graph_template = crate::types::WorkflowGraphTemplate {
+            nodes: serde_json::from_value(nodes_json).unwrap_or_default(),
+        };
+
+        let now = chrono::Utc::now();
+        let template = WorkflowTemplate {
+            id: Uuid::new_v4().to_string(),
+            name,
+            description,
+            created_at: now,
+            updated_at: now,
+            source_run_id: Some(run_id.to_string()),
+            graph_template,
+            parameters: Vec::new(),
+        };
+
+        self.memory.save_workflow(&template).await?;
+        Ok(template)
+    }
+
+    pub async fn list_workflows(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<WorkflowTemplate>> {
+        self.memory.list_workflows(limit).await
+    }
+
+    pub async fn get_workflow(&self, id: &str) -> anyhow::Result<Option<WorkflowTemplate>> {
+        self.memory.get_workflow(id).await
+    }
+
+    pub async fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
+        self.memory.delete_workflow(id).await
+    }
+
+    pub async fn execute_workflow(
+        &self,
+        workflow_id: &str,
+        params: Option<serde_json::Value>,
+        session_id: Option<Uuid>,
+    ) -> anyhow::Result<RunSubmission> {
+        let template = self
+            .memory
+            .get_workflow(workflow_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("workflow not found: {workflow_id}"))?;
+
+        let mut graph = ExecutionGraph::new(self.max_graph_depth);
+        for wn in &template.graph_template.nodes {
+            let role = wn
+                .role
+                .as_deref()
+                .and_then(parse_agent_role)
+                .unwrap_or(AgentRole::Coder);
+            let instructions = wn.instructions.clone().unwrap_or_default();
+            let mut node = AgentNode::new(wn.id.clone(), role, instructions);
+            node.dependencies = wn.dependencies.clone();
+            if let Some(policy_val) = &wn.policy {
+                if let Ok(policy) = serde_json::from_value::<ExecutionPolicy>(policy_val.clone()) {
+                    node.policy = policy;
+                }
+            }
+            graph.add_node(node)?;
+        }
+
+        let task = format!(
+            "Workflow: {} ({})",
+            template.name,
+            params
+                .as_ref()
+                .map(|p| p.to_string())
+                .unwrap_or_default()
+        );
+
+        let req = RunRequest {
+            task,
+            profile: crate::types::TaskProfile::General,
+            session_id,
+            workflow_id: Some(workflow_id.to_string()),
+            workflow_params: params,
+        };
+
+        let run_id = Uuid::new_v4();
+        let sid = req.session_id.unwrap_or_else(Uuid::new_v4);
+        self.workflow_graphs.insert(run_id, graph);
+
+        // We need to submit via the same path but with a pre-built graph
+        // Re-implement submit_run inline to use the pre-stored graph
+        self.memory.create_session(sid).await?;
+        let mut record = RunRecord::new_queued(run_id, sid, req.task.clone(), req.profile);
+        record
+            .timeline
+            .push(format!("{} run queued (workflow)", Utc::now().to_rfc3339()));
+        self.runs.insert(run_id, record.clone());
+        self.memory.upsert_run(&record).await?;
+        self.controls.insert(
+            run_id,
+            RunControl {
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+                pause_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let run_id_text = run_id.to_string();
+        self.record_action_event(
+            run_id,
+            sid,
+            RunActionType::RunQueued,
+            Some("run"),
+            Some(run_id_text.as_str()),
+            None,
+            serde_json::json!({
+                "profile": req.profile,
+                "task": req.task,
+                "workflow_id": workflow_id,
+            }),
+        )
+        .await;
+
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = this.execute_run(run_id, req).await {
+                error!("run {run_id} execution crashed: {err}");
+                let _ = this.mark_run_failed(run_id, err.to_string()).await;
+            }
+        });
+
+        Ok(RunSubmission {
+            run_id,
+            session_id: sid,
+            status: RunStatus::Queued,
+        })
+    }
+
+    pub async fn list_mcp_tools(&self) -> Vec<McpToolDefinition> {
+        match &self.mcp {
+            Some(mcp) => mcp.list_tools().await,
+            None => Vec::new(),
+        }
+    }
 }
 
 fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGraph {
@@ -1610,7 +1770,9 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::RunResumed
             | RunActionType::GraphCompleted
             | RunActionType::RunFinished
-            | RunActionType::WebhookDispatched => {}
+            | RunActionType::WebhookDispatched
+            | RunActionType::McpToolCalled
+            | RunActionType::SubtaskPlanned => {}
         }
     }
 
@@ -2044,6 +2206,7 @@ mod tests {
             Arc::new(ContextManager::new(8_000)),
             webhook,
             6,
+            None,
         );
 
         let graph = orchestrator.build_graph("test webhook task").unwrap();
