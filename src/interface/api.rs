@@ -1136,9 +1136,9 @@ async fn execute_workflow_handler(
 
 async fn save_workflow_from_run_handler(
     State(state): State<ApiState>,
+    Path(run_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
-    Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
     if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
         return (
