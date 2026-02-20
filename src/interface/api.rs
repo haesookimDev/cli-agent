@@ -144,6 +144,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/webhooks/test", post(test_webhook_handler))
         .route("/v1/mcp/tools", get(list_mcp_tools_handler))
+        .route("/v1/mcp/servers", get(list_mcp_servers_handler))
         .route(
             "/v1/workflows",
             post(create_workflow_handler).get(list_workflows_handler),
@@ -993,6 +994,13 @@ async fn list_mcp_tools_handler(
 ) -> impl IntoResponse {
     let tools = state.orchestrator.list_mcp_tools().await;
     (StatusCode::OK, Json(serde_json::json!(tools)))
+}
+
+async fn list_mcp_servers_handler(
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let servers = state.orchestrator.list_mcp_servers();
+    (StatusCode::OK, Json(serde_json::json!(servers)))
 }
 
 // --- Workflows ---

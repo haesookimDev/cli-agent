@@ -761,76 +761,64 @@ impl Orchestrator {
 
                 // ToolCaller role: execute MCP tool call instead of agent LLM call
                 if node.role == AgentRole::ToolCaller {
-                    if let Some(mcp) = mcp.as_ref() {
-                        let tool_call: Result<serde_json::Value, _> =
-                            serde_json::from_str(&node.instructions);
-                        let (tool_name, arguments) = match tool_call {
-                            Ok(val) => {
-                                let name = val
-                                    .get("tool_name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                let args = val
-                                    .get("arguments")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                                (name, args)
-                            }
-                            Err(_) => (node.instructions.clone(), serde_json::json!({})),
-                        };
-
-                        match mcp.call_tool(&tool_name, arguments).await {
-                            Ok(result) => {
-                                let _ = memory
-                                    .append_run_action_event(
-                                        run_id,
-                                        session_id,
-                                        RunActionType::McpToolCalled,
-                                        Some("node"),
-                                        Some(node.id.as_str()),
-                                        None,
-                                        serde_json::json!({
-                                            "node_id": node.id,
-                                            "tool_name": tool_name,
-                                            "succeeded": result.succeeded,
-                                            "duration_ms": result.duration_ms,
-                                        }),
-                                    )
-                                    .await;
-
-                                return Ok(NodeExecutionResult {
-                                    node_id: node.id,
-                                    role: node.role,
-                                    model: format!("mcp:{tool_name}"),
-                                    output: result.content,
-                                    duration_ms: started.elapsed().as_millis(),
-                                    succeeded: result.succeeded,
-                                    error: result.error,
-                                });
-                            }
-                            Err(err) => {
-                                return Ok(NodeExecutionResult {
-                                    node_id: node.id,
-                                    role: node.role,
-                                    model: format!("mcp:{tool_name}"),
-                                    output: String::new(),
-                                    duration_ms: started.elapsed().as_millis(),
-                                    succeeded: false,
-                                    error: Some(err.to_string()),
-                                });
-                            }
+                    let tool_call: Result<serde_json::Value, _> =
+                        serde_json::from_str(&node.instructions);
+                    let (tool_name, arguments) = match tool_call {
+                        Ok(val) => {
+                            let name = val
+                                .get("tool_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let args = val
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Object(Default::default()));
+                            (name, args)
                         }
-                    } else {
-                        return Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
-                            model: "mcp:unavailable".to_string(),
-                            output: String::new(),
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: false,
-                            error: Some("MCP client not configured".to_string()),
-                        });
+                        Err(_) => (node.instructions.clone(), serde_json::json!({})),
+                    };
+
+                    match mcp.call_tool(&tool_name, arguments).await {
+                        Ok(result) => {
+                            let _ = memory
+                                .append_run_action_event(
+                                    run_id,
+                                    session_id,
+                                    RunActionType::McpToolCalled,
+                                    Some("node"),
+                                    Some(node.id.as_str()),
+                                    None,
+                                    serde_json::json!({
+                                        "node_id": node.id,
+                                        "tool_name": tool_name,
+                                        "succeeded": result.succeeded,
+                                        "duration_ms": result.duration_ms,
+                                    }),
+                                )
+                                .await;
+
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: format!("mcp:{tool_name}"),
+                                output: result.content,
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: result.succeeded,
+                                error: result.error,
+                            });
+                        }
+                        Err(err) => {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: format!("mcp:{tool_name}"),
+                                output: String::new(),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(err.to_string()),
+                            });
+                        }
                     }
                 }
 
@@ -1524,10 +1512,11 @@ impl Orchestrator {
     }
 
     pub async fn list_mcp_tools(&self) -> Vec<McpToolDefinition> {
-        match &self.mcp {
-            Some(mcp) => mcp.list_tools().await,
-            None => Vec::new(),
-        }
+        self.mcp.list_all_tools().await
+    }
+
+    pub fn list_mcp_servers(&self) -> Vec<String> {
+        self.mcp.server_names()
     }
 }
 
@@ -2224,7 +2213,7 @@ mod tests {
             Arc::new(ContextManager::new(8_000)),
             webhook,
             6,
-            None,
+            Arc::new(McpRegistry::new()),
         );
 
         let graph = orchestrator.build_graph("test webhook task").unwrap();
