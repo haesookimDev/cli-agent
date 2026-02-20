@@ -42,6 +42,10 @@ pub enum AgentRole {
     Summarizer,
     Fallback,
     ToolCaller,
+    Analyzer,
+    Reviewer,
+    Scheduler,
+    ConfigManager,
 }
 
 impl Display for AgentRole {
@@ -53,9 +57,26 @@ impl Display for AgentRole {
             AgentRole::Summarizer => "summarizer",
             AgentRole::Fallback => "fallback",
             AgentRole::ToolCaller => "tool_caller",
+            AgentRole::Analyzer => "analyzer",
+            AgentRole::Reviewer => "reviewer",
+            AgentRole::Scheduler => "scheduler",
+            AgentRole::ConfigManager => "config_manager",
         };
         write!(f, "{s}")
     }
+}
+
+// --- Task Classification ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    SimpleQuery,
+    Analysis,
+    CodeGeneration,
+    Configuration,
+    ToolOperation,
+    Complex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

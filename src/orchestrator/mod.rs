@@ -23,7 +23,7 @@ use crate::types::{
     AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, McpToolDefinition, NodeTraceState,
     RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary,
     RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph,
-    SessionEvent, SessionEventType, SubtaskPlan, TraceEdge, WebhookDeliveryRecord,
+    SessionEvent, SessionEventType, SubtaskPlan, TaskType, TraceEdge, WebhookDeliveryRecord,
     WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
@@ -746,118 +746,246 @@ impl Orchestrator {
         Ok(())
     }
 
+    fn classify_task(task: &str) -> TaskType {
+        let lower = task.to_lowercase();
+
+        // Configuration keywords
+        let config_kw = [
+            "toggle", "enable", "disable", "setting", "config", "model",
+            "provider", "prefer",
+        ];
+        if config_kw.iter().any(|kw| lower.contains(kw)) {
+            return TaskType::Configuration;
+        }
+
+        // Tool / MCP operation keywords
+        let tool_kw = ["mcp", "tool call", "github", "filesystem", "search repo"];
+        if tool_kw.iter().any(|kw| lower.contains(kw)) {
+            return TaskType::ToolOperation;
+        }
+
+        // Code generation keywords
+        let code_kw = [
+            "code", "implement", "function", "class", "refactor", "write",
+            "bug", "fix", "debug", "api", "endpoint",
+        ];
+        if code_kw.iter().any(|kw| lower.contains(kw)) {
+            return TaskType::CodeGeneration;
+        }
+
+        // Analysis keywords
+        let analysis_kw = [
+            "analyze", "analysis", "pattern", "compare", "insight",
+            "metric", "stat", "evaluate", "assess",
+        ];
+        if analysis_kw.iter().any(|kw| lower.contains(kw)) {
+            return TaskType::Analysis;
+        }
+
+        // Simple query: short tasks without action verbs
+        if lower.split_whitespace().count() <= 8
+            && !lower.contains("and")
+            && !lower.contains("then")
+        {
+            return TaskType::SimpleQuery;
+        }
+
+        TaskType::Complex
+    }
+
+    fn default_policy() -> ExecutionPolicy {
+        ExecutionPolicy {
+            max_parallelism: 1,
+            retry: 1,
+            timeout_ms: 20_000,
+            circuit_breaker: 3,
+            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
+            fallback_node: None,
+        }
+    }
+
     fn build_graph(&self, task: &str) -> anyhow::Result<ExecutionGraph> {
+        let task_type = Self::classify_task(task);
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
+        // Every graph starts with a planner
         let mut plan = AgentNode::new("plan", AgentRole::Planner, "Plan work and constraints.");
         plan.policy = ExecutionPolicy {
-            max_parallelism: 1,
-            retry: 1,
             timeout_ms: 30_000,
-            circuit_breaker: 3,
             on_dependency_failure: DependencyFailurePolicy::FailFast,
-            fallback_node: None,
+            ..Self::default_policy()
         };
-
-        let mut extract = AgentNode::new(
-            "extract",
-            AgentRole::Extractor,
-            "Extract structured facts from user task and planner output.",
-        );
-        extract.dependencies = vec!["plan".to_string()];
-        extract.policy = ExecutionPolicy {
-            max_parallelism: 2,
-            retry: 1,
-            timeout_ms: 20_000,
-            circuit_breaker: 3,
-            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
-            fallback_node: None,
-        };
-
-        let mut context_probe = AgentNode::new(
-            "context_probe",
-            AgentRole::Extractor,
-            "Probe memory and context windows for high-value retrieval candidates.",
-        );
-        context_probe.dependencies = vec!["plan".to_string()];
-        context_probe.policy = ExecutionPolicy {
-            max_parallelism: 2,
-            retry: 1,
-            timeout_ms: 15_000,
-            circuit_breaker: 3,
-            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
-            fallback_node: None,
-        };
-
-        let mut code = AgentNode::new(
-            "code",
-            AgentRole::Coder,
-            "Generate implementation-level output from extracted and contextualized plan.",
-        );
-        code.dependencies = vec!["extract".to_string(), "context_probe".to_string()];
-        code.policy = ExecutionPolicy {
-            max_parallelism: 2,
-            retry: 2,
-            timeout_ms: 60_000,
-            circuit_breaker: 2,
-            on_dependency_failure: DependencyFailurePolicy::FailFast,
-            fallback_node: Some("fallback_code".to_string()),
-        };
-
-        let mut fallback_code = AgentNode::new(
-            "fallback_code",
-            AgentRole::Fallback,
-            "Recover from coding node failures using robust conservative strategy.",
-        );
-        fallback_code.dependencies = vec!["code".to_string()];
-        fallback_code.policy = ExecutionPolicy {
-            max_parallelism: 1,
-            retry: 1,
-            timeout_ms: 25_000,
-            circuit_breaker: 3,
-            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
-            fallback_node: None,
-        };
-
-        let mut summarize = AgentNode::new(
-            "summarize",
-            AgentRole::Summarizer,
-            "Summarize outcomes and produce checkpoint summary for context compaction.",
-        );
-        summarize.dependencies = vec!["code".to_string(), "fallback_code".to_string()];
-        summarize.policy = ExecutionPolicy {
-            max_parallelism: 1,
-            retry: 1,
-            timeout_ms: 20_000,
-            circuit_breaker: 3,
-            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
-            fallback_node: None,
-        };
-
         graph.add_node(plan)?;
-        graph.add_node(extract)?;
-        graph.add_node(context_probe)?;
-        graph.add_node(code)?;
-        graph.add_node(fallback_code)?;
-        graph.add_node(summarize)?;
 
-        if task.to_lowercase().contains("webhook") {
-            let mut webhook = AgentNode::new(
-                "webhook_validation",
-                AgentRole::Extractor,
-                "Validate webhook contract and integration constraints.",
-            );
-            webhook.dependencies = vec!["plan".to_string()];
-            webhook.depth = 1;
-            webhook.policy = ExecutionPolicy {
-                max_parallelism: 1,
-                retry: 1,
-                timeout_ms: 12_000,
-                circuit_breaker: 3,
-                on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
-                fallback_node: None,
-            };
-            graph.add_node(webhook)?;
+        match task_type {
+            TaskType::SimpleQuery => {
+                // Lightweight: plan → summarize
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    "Summarize the planner output into a concise answer.",
+                );
+                summarize.dependencies = vec!["plan".to_string()];
+                summarize.policy = Self::default_policy();
+                graph.add_node(summarize)?;
+            }
+            TaskType::Analysis => {
+                // plan → extract → analyze → summarize
+                let mut extract = AgentNode::new(
+                    "extract",
+                    AgentRole::Extractor,
+                    "Extract structured facts from user task and planner output.",
+                );
+                extract.dependencies = vec!["plan".to_string()];
+                extract.policy = Self::default_policy();
+                graph.add_node(extract)?;
+
+                let mut analyze = AgentNode::new(
+                    "analyze",
+                    AgentRole::Analyzer,
+                    "Analyze the extracted data, identify patterns and insights.",
+                );
+                analyze.dependencies = vec!["extract".to_string()];
+                analyze.policy = ExecutionPolicy {
+                    timeout_ms: 30_000,
+                    ..Self::default_policy()
+                };
+                graph.add_node(analyze)?;
+
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    "Consolidate analysis results into a concise report.",
+                );
+                summarize.dependencies = vec!["analyze".to_string()];
+                summarize.policy = Self::default_policy();
+                graph.add_node(summarize)?;
+            }
+            TaskType::Configuration => {
+                // plan → config_manage → summarize
+                let mut config = AgentNode::new(
+                    "config_manage",
+                    AgentRole::ConfigManager,
+                    "Execute the configuration changes requested by the user.",
+                );
+                config.dependencies = vec!["plan".to_string()];
+                config.policy = ExecutionPolicy {
+                    timeout_ms: 15_000,
+                    ..Self::default_policy()
+                };
+                graph.add_node(config)?;
+
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    "Summarize the configuration changes made.",
+                );
+                summarize.dependencies = vec!["config_manage".to_string()];
+                summarize.policy = Self::default_policy();
+                graph.add_node(summarize)?;
+            }
+            TaskType::ToolOperation => {
+                // plan → tool_call → summarize
+                let mut tool = AgentNode::new(
+                    "tool_call",
+                    AgentRole::ToolCaller,
+                    "Execute MCP tool calls as planned.",
+                );
+                tool.dependencies = vec!["plan".to_string()];
+                tool.policy = ExecutionPolicy {
+                    timeout_ms: 60_000,
+                    retry: 2,
+                    ..Self::default_policy()
+                };
+                graph.add_node(tool)?;
+
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    "Summarize tool execution results.",
+                );
+                summarize.dependencies = vec!["tool_call".to_string()];
+                summarize.policy = Self::default_policy();
+                graph.add_node(summarize)?;
+            }
+            TaskType::CodeGeneration | TaskType::Complex => {
+                // Full graph: plan → extract + context_probe → code → fallback → summarize
+                let mut extract = AgentNode::new(
+                    "extract",
+                    AgentRole::Extractor,
+                    "Extract structured facts from user task and planner output.",
+                );
+                extract.dependencies = vec!["plan".to_string()];
+                extract.policy = ExecutionPolicy {
+                    max_parallelism: 2,
+                    ..Self::default_policy()
+                };
+                graph.add_node(extract)?;
+
+                let mut context_probe = AgentNode::new(
+                    "context_probe",
+                    AgentRole::Extractor,
+                    "Probe memory and context windows for high-value retrieval candidates.",
+                );
+                context_probe.dependencies = vec!["plan".to_string()];
+                context_probe.policy = ExecutionPolicy {
+                    max_parallelism: 2,
+                    timeout_ms: 15_000,
+                    ..Self::default_policy()
+                };
+                graph.add_node(context_probe)?;
+
+                let mut code = AgentNode::new(
+                    "code",
+                    AgentRole::Coder,
+                    "Generate implementation-level output from extracted and contextualized plan.",
+                );
+                code.dependencies = vec!["extract".to_string(), "context_probe".to_string()];
+                code.policy = ExecutionPolicy {
+                    max_parallelism: 2,
+                    retry: 2,
+                    timeout_ms: 60_000,
+                    circuit_breaker: 2,
+                    on_dependency_failure: DependencyFailurePolicy::FailFast,
+                    fallback_node: Some("fallback_code".to_string()),
+                };
+                graph.add_node(code)?;
+
+                let mut fallback_code = AgentNode::new(
+                    "fallback_code",
+                    AgentRole::Fallback,
+                    "Recover from coding node failures using robust conservative strategy.",
+                );
+                fallback_code.dependencies = vec!["code".to_string()];
+                fallback_code.policy = Self::default_policy();
+                graph.add_node(fallback_code)?;
+
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    "Summarize outcomes and produce checkpoint summary for context compaction.",
+                );
+                summarize.dependencies =
+                    vec!["code".to_string(), "fallback_code".to_string()];
+                summarize.policy = Self::default_policy();
+                graph.add_node(summarize)?;
+
+                // Conditional webhook validation
+                if task.to_lowercase().contains("webhook") {
+                    let mut webhook = AgentNode::new(
+                        "webhook_validation",
+                        AgentRole::Extractor,
+                        "Validate webhook contract and integration constraints.",
+                    );
+                    webhook.dependencies = vec!["plan".to_string()];
+                    webhook.depth = 1;
+                    webhook.policy = ExecutionPolicy {
+                        timeout_ms: 12_000,
+                        ..Self::default_policy()
+                    };
+                    graph.add_node(webhook)?;
+                }
+            }
         }
 
         Ok(graph)
@@ -2406,10 +2534,26 @@ mod tests {
             Arc::new(McpRegistry::new()),
         );
 
-        let graph = orchestrator.build_graph("test webhook task").unwrap();
+        // Complex/CodeGeneration task should have full graph
+        let graph = orchestrator
+            .build_graph("implement a webhook integration endpoint with code")
+            .unwrap();
         assert!(graph.node("plan").is_some());
         assert!(graph.node("code").is_some());
         assert!(graph.node("webhook_validation").is_some());
+
+        // SimpleQuery should have minimal graph
+        let simple = orchestrator.build_graph("hello world").unwrap();
+        assert!(simple.node("plan").is_some());
+        assert!(simple.node("summarize").is_some());
+        assert!(simple.node("code").is_none());
+
+        // Analysis task should have analyzer
+        let analysis = orchestrator
+            .build_graph("analyze the performance patterns and evaluate metrics")
+            .unwrap();
+        assert!(analysis.node("plan").is_some());
+        assert!(analysis.node("analyze").is_some());
     }
 
     #[test]

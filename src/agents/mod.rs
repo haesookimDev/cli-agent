@@ -61,6 +61,22 @@ impl AgentRegistry {
             AgentRole::ToolCaller,
             Arc::new(BuiltinAgent::new(AgentRole::ToolCaller)),
         );
+        map.insert(
+            AgentRole::Analyzer,
+            Arc::new(BuiltinAgent::new(AgentRole::Analyzer)),
+        );
+        map.insert(
+            AgentRole::Reviewer,
+            Arc::new(BuiltinAgent::new(AgentRole::Reviewer)),
+        );
+        map.insert(
+            AgentRole::Scheduler,
+            Arc::new(BuiltinAgent::new(AgentRole::Scheduler)),
+        );
+        map.insert(
+            AgentRole::ConfigManager,
+            Arc::new(BuiltinAgent::new(AgentRole::ConfigManager)),
+        );
 
         Self {
             agents: Arc::new(map),
@@ -95,11 +111,14 @@ impl BuiltinAgent {
     fn profile(&self) -> TaskProfile {
         match self.role {
             AgentRole::Planner => TaskProfile::Planning,
-            AgentRole::Extractor => TaskProfile::Extraction,
+            AgentRole::Extractor | AgentRole::Analyzer => TaskProfile::Extraction,
             AgentRole::Coder => TaskProfile::Coding,
-            AgentRole::Summarizer | AgentRole::Fallback | AgentRole::ToolCaller => {
-                TaskProfile::General
-            }
+            AgentRole::Reviewer => TaskProfile::Planning,
+            AgentRole::Summarizer
+            | AgentRole::Fallback
+            | AgentRole::ToolCaller
+            | AgentRole::Scheduler
+            | AgentRole::ConfigManager => TaskProfile::General,
         }
     }
 
@@ -122,6 +141,18 @@ impl BuiltinAgent {
             }
             AgentRole::ToolCaller => {
                 "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results."
+            }
+            AgentRole::Analyzer => {
+                "You are the analyzer agent. Examine data and results to identify patterns, anomalies, and insights."
+            }
+            AgentRole::Reviewer => {
+                "You are the reviewer agent. Verify results against the original request, assess quality, and flag gaps. Output COMPLETE if satisfied, or INCOMPLETE: <reason> if not."
+            }
+            AgentRole::Scheduler => {
+                "You are the scheduler agent. Manage cron schedules and workflow automation configurations."
+            }
+            AgentRole::ConfigManager => {
+                "You are the config manager agent. Handle system settings changes including model toggles and preferences."
             }
         }
     }
