@@ -46,3 +46,16 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   }
   return resp.json();
 }
+
+export async function apiDelete<T>(path: string): Promise<T> {
+  const headers = await authHeaders("");
+  const resp = await fetch(`${API_URL}${path}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(text || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}

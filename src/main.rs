@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
             env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token.clone());
         }
         match cli_agent::mcp::McpClient::spawn(&cmd, &args, env).await {
-            Ok(mut client) => {
+            Ok(client) => {
                 if let Err(e) = client.initialize().await {
                     tracing::warn!("MCP initialize failed: {e}");
                     None
