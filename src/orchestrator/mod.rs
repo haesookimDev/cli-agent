@@ -79,6 +79,10 @@ impl Orchestrator {
         &self.router
     }
 
+    pub fn memory(&self) -> &Arc<MemoryManager> {
+        &self.memory
+    }
+
     pub async fn submit_run(&self, req: RunRequest) -> anyhow::Result<RunSubmission> {
         let run_id = Uuid::new_v4();
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);

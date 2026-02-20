@@ -143,6 +143,23 @@ pub fn router(state: ApiState) -> Router {
             post(retry_webhook_delivery_handler),
         )
         .route("/v1/webhooks/test", post(test_webhook_handler))
+        .route("/v1/mcp/tools", get(list_mcp_tools_handler))
+        .route(
+            "/v1/workflows",
+            post(create_workflow_handler).get(list_workflows_handler),
+        )
+        .route(
+            "/v1/workflows/:workflow_id",
+            get(get_workflow_handler).delete(delete_workflow_handler),
+        )
+        .route(
+            "/v1/workflows/:workflow_id/execute",
+            post(execute_workflow_handler),
+        )
+        .route(
+            "/v1/runs/:run_id/save-workflow",
+            post(save_workflow_from_run_handler),
+        )
         .with_state(state)
 }
 
@@ -962,6 +979,190 @@ async fn test_webhook_handler(
             StatusCode::OK,
             Json(serde_json::json!({"status": "queued"})),
         ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+// --- MCP ---
+
+async fn list_mcp_tools_handler(
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let tools = state.orchestrator.list_mcp_tools().await;
+    (StatusCode::OK, Json(serde_json::json!(tools)))
+}
+
+// --- Workflows ---
+
+async fn list_workflows_handler(
+    State(state): State<ApiState>,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    match state.orchestrator.list_workflows(limit).await {
+        Ok(workflows) => (StatusCode::OK, Json(serde_json::json!(workflows))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn get_workflow_handler(
+    State(state): State<ApiState>,
+    Path(workflow_id): Path<String>,
+) -> impl IntoResponse {
+    match state.orchestrator.get_workflow(&workflow_id).await {
+        Ok(Some(wf)) => (StatusCode::OK, Json(serde_json::json!(wf))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "workflow not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn create_workflow_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<CreateWorkflowRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let template = crate::types::WorkflowTemplate {
+        id: Uuid::new_v4().to_string(),
+        name: req.name,
+        description: req.description,
+        created_at: now,
+        updated_at: now,
+        source_run_id: None,
+        graph_template: req
+            .graph_template
+            .unwrap_or(crate::types::WorkflowGraphTemplate { nodes: Vec::new() }),
+        parameters: req.parameters.unwrap_or_default(),
+    };
+
+    match state.orchestrator.memory().save_workflow(&template).await {
+        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!(template))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn delete_workflow_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+    Path(workflow_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    match state.orchestrator.delete_workflow(&workflow_id).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn execute_workflow_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+    Path(workflow_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<ExecuteWorkflowRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state
+        .orchestrator
+        .execute_workflow(&workflow_id, req.parameters, req.session_id)
+        .await
+    {
+        Ok(submission) => (StatusCode::OK, Json(serde_json::json!(submission))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn save_workflow_from_run_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+    Path(run_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<SaveWorkflowRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state
+        .orchestrator
+        .save_workflow_from_run(run_id, req.name, req.description)
+        .await
+    {
+        Ok(template) => (StatusCode::CREATED, Json(serde_json::json!(template))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
