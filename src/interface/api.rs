@@ -320,6 +320,8 @@ async fn create_run_handler(
         task: req.task,
         profile: req.profile.unwrap_or(TaskProfile::General),
         session_id: req.session_id,
+        workflow_id: None,
+        workflow_params: None,
     };
 
     match state.orchestrator.submit_run(run_req).await {

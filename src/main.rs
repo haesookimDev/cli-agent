@@ -119,6 +119,8 @@ async fn main() -> anyhow::Result<()> {
                 task,
                 profile,
                 session_id: session,
+                workflow_id: None,
+                workflow_params: None,
             };
 
             if no_wait {

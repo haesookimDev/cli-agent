@@ -403,6 +403,8 @@ async fn handle_key(
                             task,
                             profile: state.settings.default_profile,
                             session_id: state.active_or_selected_session_id(),
+                            workflow_id: None,
+                            workflow_params: None,
                         };
                         match orchestrator.submit_run(req).await {
                             Ok(sub) => {
