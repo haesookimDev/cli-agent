@@ -79,6 +79,55 @@ impl Orchestrator {
         &self.router
     }
 
+    pub fn get_settings(&self) -> crate::types::AppSettings {
+        crate::types::AppSettings {
+            default_profile: crate::types::TaskProfile::General,
+            preferred_model: self.router.preferred_model(),
+            disabled_models: self.router.disabled_models(),
+            disabled_providers: self
+                .router
+                .disabled_providers()
+                .iter()
+                .map(|p| p.to_string())
+                .collect(),
+        }
+    }
+
+    pub fn update_settings(&self, patch: crate::types::SettingsPatch) {
+        if let Some(preferred) = patch.preferred_model {
+            self.router.set_preferred_model(preferred);
+        }
+        if let Some(disabled_models) = patch.disabled_models {
+            // Reset all, then disable specified
+            for spec in self.router.catalog() {
+                self.router.set_model_disabled(&spec.model_id, false);
+            }
+            for model_id in &disabled_models {
+                self.router.set_model_disabled(model_id, true);
+            }
+        }
+        if let Some(disabled_providers) = patch.disabled_providers {
+            use crate::router::ProviderKind;
+            let all_providers = [
+                ProviderKind::OpenAi,
+                ProviderKind::Anthropic,
+                ProviderKind::Gemini,
+                ProviderKind::Vllm,
+                ProviderKind::Mock,
+            ];
+            for p in &all_providers {
+                self.router.set_provider_disabled(*p, false);
+            }
+            for name in &disabled_providers {
+                if let Ok(pk) = serde_json::from_value::<ProviderKind>(
+                    serde_json::Value::String(name.clone()),
+                ) {
+                    self.router.set_provider_disabled(pk, true);
+                }
+            }
+        }
+    }
+
     pub fn memory(&self) -> &Arc<MemoryManager> {
         &self.memory
     }

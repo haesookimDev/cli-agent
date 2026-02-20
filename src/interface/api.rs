@@ -7,7 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
@@ -150,6 +150,16 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/webhooks/test", post(test_webhook_handler))
         .route("/v1/mcp/tools", get(list_mcp_tools_handler))
         .route("/v1/mcp/servers", get(list_mcp_servers_handler))
+        .route(
+            "/v1/settings",
+            get(get_settings_handler).patch(update_settings_handler),
+        )
+        .route("/v1/models", get(list_models_handler))
+        .route("/v1/models/:model_id/toggle", post(toggle_model_handler))
+        .route(
+            "/v1/providers/:provider_name/toggle",
+            post(toggle_provider_handler),
+        )
         .route(
             "/v1/workflows",
             post(create_workflow_handler).get(list_workflows_handler),
@@ -1061,6 +1071,137 @@ async fn list_mcp_servers_handler(
 ) -> impl IntoResponse {
     let servers = state.orchestrator.list_mcp_servers();
     (StatusCode::OK, Json(serde_json::json!(servers)))
+}
+
+// --- Settings & Models ---
+
+async fn get_settings_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+    let settings = state.orchestrator.get_settings();
+    (StatusCode::OK, Json(serde_json::to_value(settings).unwrap()))
+}
+
+async fn update_settings_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let patch = match serde_json::from_slice::<crate::types::SettingsPatch>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    state.orchestrator.update_settings(patch);
+    let settings = state.orchestrator.get_settings();
+    (StatusCode::OK, Json(serde_json::to_value(settings).unwrap()))
+}
+
+async fn list_models_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let router = state.orchestrator.router();
+    let preferred = router.preferred_model();
+    let models: Vec<serde_json::Value> = router
+        .catalog()
+        .iter()
+        .map(|spec| {
+            serde_json::json!({
+                "spec": spec,
+                "enabled": !router.is_model_disabled(&spec.model_id),
+                "is_preferred": preferred.as_deref() == Some(spec.model_id.as_str()),
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!(models)))
+}
+
+async fn toggle_model_handler(
+    State(state): State<ApiState>,
+    Path(model_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let router = state.orchestrator.router();
+    let currently_disabled = router.is_model_disabled(&model_id);
+    router.set_model_disabled(&model_id, !currently_disabled);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "model_id": model_id,
+            "enabled": currently_disabled,
+        })),
+    )
+}
+
+async fn toggle_provider_handler(
+    State(state): State<ApiState>,
+    Path(provider_name): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let pk = match serde_json::from_value::<crate::router::ProviderKind>(
+        serde_json::Value::String(provider_name.clone()),
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "unknown provider"})),
+            );
+        }
+    };
+
+    let router = state.orchestrator.router();
+    let currently_disabled = router.disabled_providers().contains(&pk);
+    router.set_provider_disabled(pk, !currently_disabled);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "provider": provider_name,
+            "enabled": currently_disabled,
+        })),
+    )
 }
 
 // --- Workflows ---

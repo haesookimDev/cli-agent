@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,7 @@ pub struct InferenceResult {
 pub struct ModelRouter {
     catalog: Arc<Vec<ModelSpec>>,
     client: ProviderClient,
+    preferred_model: Arc<Mutex<Option<String>>>,
 }
 
 impl ModelRouter {
@@ -122,6 +123,7 @@ impl ModelRouter {
                 anthropic_api_key,
                 gemini_api_key,
             ),
+            preferred_model: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -140,6 +142,7 @@ impl ModelRouter {
                 anthropic_api_key,
                 gemini_api_key,
             ),
+            preferred_model: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -159,11 +162,36 @@ impl ModelRouter {
         self.client.is_model_disabled(model_id)
     }
 
+    pub fn disabled_models(&self) -> Vec<String> {
+        self.client
+            .disabled_models
+            .iter()
+            .map(|v| v.key().clone())
+            .collect()
+    }
+
+    pub fn disabled_providers(&self) -> Vec<ProviderKind> {
+        self.client
+            .disabled
+            .iter()
+            .map(|v| *v.key())
+            .collect()
+    }
+
+    pub fn set_preferred_model(&self, model_id: Option<String>) {
+        *self.preferred_model.lock().unwrap() = model_id;
+    }
+
+    pub fn preferred_model(&self) -> Option<String> {
+        self.preferred_model.lock().unwrap().clone()
+    }
+
     pub fn select_model(
         &self,
         profile: TaskProfile,
         constraints: &RoutingConstraints,
     ) -> anyhow::Result<RoutingDecision> {
+        let preferred = self.preferred_model();
         let mut scored = Vec::<(ModelSpec, f64)>::new();
         for model in self.catalog.iter() {
             if model.context_window < constraints.min_context {
@@ -172,7 +200,11 @@ impl ModelRouter {
             if self.client.is_model_disabled(&model.model_id) {
                 continue;
             }
-            let score = score_model(model, constraints);
+            let mut score = score_model(model, constraints);
+            // Preferred model gets a bonus
+            if preferred.as_deref() == Some(model.model_id.as_str()) {
+                score += 0.15;
+            }
             scored.push((model.clone(), score));
         }
 

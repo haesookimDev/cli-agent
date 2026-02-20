@@ -403,6 +403,24 @@ pub struct ChatMessage {
     pub timestamp: DateTime<Utc>,
 }
 
+// --- Settings Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub default_profile: TaskProfile,
+    pub preferred_model: Option<String>,
+    pub disabled_models: Vec<String>,
+    pub disabled_providers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsPatch {
+    pub default_profile: Option<TaskProfile>,
+    pub preferred_model: Option<Option<String>>,
+    pub disabled_models: Option<Vec<String>>,
+    pub disabled_providers: Option<Vec<String>>,
+}
+
 // --- MCP Types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
