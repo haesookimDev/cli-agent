@@ -250,12 +250,53 @@ impl ModelRouter {
         })
     }
 
+    fn cache_ttl_secs(profile: TaskProfile) -> u64 {
+        match profile {
+            TaskProfile::Planning => 300,    // 5 min
+            TaskProfile::Extraction => 900,  // 15 min
+            TaskProfile::Coding => 600,      // 10 min
+            TaskProfile::General => 600,     // 10 min
+        }
+    }
+
+    fn prompt_hash(profile: TaskProfile, prompt: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        std::mem::discriminant(&profile).hash(&mut hasher);
+        prompt.hash(&mut hasher);
+        hasher.finish()
+    }
+
     pub async fn infer(
         &self,
         profile: TaskProfile,
         prompt: &str,
         constraints: &RoutingConstraints,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
+        // Check cache
+        let hash = Self::prompt_hash(profile, prompt);
+        if let Some(entry) = self.cache.get(&hash) {
+            if !entry.is_expired() {
+                let decision = self.select_model(profile, constraints)?;
+                return Ok((
+                    decision,
+                    InferenceResult {
+                        provider: entry.provider,
+                        model_id: entry.model_id.clone(),
+                        output: entry.output.clone(),
+                        used_fallback: false,
+                    },
+                ));
+            } else {
+                drop(entry);
+                self.cache.remove(&hash);
+            }
+        }
+
+        // Evict expired entries periodically (when cache exceeds 500)
+        if self.cache.len() > 500 {
+            self.cache.retain(|_, v| !v.is_expired());
+        }
+
         let decision = self.select_model(profile, constraints)?;
 
         let mut chain = Vec::new();
@@ -268,6 +309,18 @@ impl ModelRouter {
         for model in chain {
             match self.client.generate(&model, prompt).await {
                 Ok(output) => {
+                    // Store in cache
+                    self.cache.insert(
+                        hash,
+                        CacheEntry {
+                            output: output.clone(),
+                            model_id: model.model_id.clone(),
+                            provider: model.provider,
+                            created_at: Instant::now(),
+                            ttl_secs: Self::cache_ttl_secs(profile),
+                        },
+                    );
+
                     return Ok((
                         decision,
                         InferenceResult {

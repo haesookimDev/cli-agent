@@ -226,6 +226,22 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS knowledge_base (
+                id TEXT PRIMARY KEY,
+                topic TEXT NOT NULL,
+                content TEXT NOT NULL,
+                importance REAL NOT NULL,
+                access_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -1060,6 +1076,75 @@ impl SqliteStore {
     pub async fn vacuum(&self) -> anyhow::Result<()> {
         sqlx::query("VACUUM").execute(&self.pool).await?;
         Ok(())
+    }
+
+    // --- Knowledge Base ---
+
+    pub async fn insert_knowledge(
+        &self,
+        topic: &str,
+        content: &str,
+        importance: f64,
+    ) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO knowledge_base (id, topic, content, importance, access_count, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)
+            "#,
+        )
+        .bind(&id)
+        .bind(topic)
+        .bind(content)
+        .bind(importance)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn search_knowledge(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String, f64)>> {
+        let pattern = format!("%{}%", query.to_lowercase());
+        let rows = sqlx::query(
+            r#"
+            SELECT id, topic, content, importance
+            FROM knowledge_base
+            WHERE LOWER(content) LIKE ?1 OR LOWER(topic) LIKE ?1
+            ORDER BY importance DESC, access_count DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(&pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push((
+                row.get("id"),
+                row.get("topic"),
+                row.get("content"),
+                row.get("importance"),
+            ));
+
+            // Increment access count
+            let id: String = row.get("id");
+            let _ = sqlx::query(
+                "UPDATE knowledge_base SET access_count = access_count + 1, updated_at = ?2 WHERE id = ?1",
+            )
+            .bind(&id)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await;
+        }
+        Ok(out)
     }
 
     // --- Cron Schedule CRUD ---

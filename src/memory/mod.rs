@@ -354,6 +354,25 @@ impl MemoryManager {
         self.store.delete_workflow(id).await
     }
 
+    // --- Knowledge Base ---
+
+    pub async fn insert_knowledge(
+        &self,
+        topic: &str,
+        content: &str,
+        importance: f64,
+    ) -> anyhow::Result<String> {
+        self.store.insert_knowledge(topic, content, importance).await
+    }
+
+    pub async fn search_knowledge(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String, f64)>> {
+        self.store.search_knowledge(query, limit).await
+    }
+
     // --- Cron Schedule pass-through ---
 
     pub async fn create_schedule(&self, schedule: &crate::types::CronSchedule) -> anyhow::Result<()> {
@@ -409,10 +428,40 @@ fn similarity_score(text: &str, query: &str) -> f64 {
         return 0.0;
     }
 
-    let intersection = text_tokens.intersection(&query_tokens).count() as f64;
-    let union = text_tokens.union(&query_tokens).count() as f64;
+    let keyword_intersection = text_tokens.intersection(&query_tokens).count() as f64;
+    let keyword_union = text_tokens.union(&query_tokens).count() as f64;
+    let keyword_score = (keyword_intersection / keyword_union).clamp(0.0, 1.0);
 
+    let trigram_score = trigram_similarity(text, query);
+
+    // Weighted: 60% keyword overlap, 40% trigram
+    (0.6 * keyword_score + 0.4 * trigram_score).clamp(0.0, 1.0)
+}
+
+fn trigram_similarity(a: &str, b: &str) -> f64 {
+    let a_trigrams = trigrams(a);
+    let b_trigrams = trigrams(b);
+    if a_trigrams.is_empty() || b_trigrams.is_empty() {
+        return 0.0;
+    }
+    let intersection = a_trigrams.intersection(&b_trigrams).count() as f64;
+    let union = a_trigrams.union(&b_trigrams).count() as f64;
     (intersection / union).clamp(0.0, 1.0)
+}
+
+fn trigrams(s: &str) -> std::collections::HashSet<String> {
+    let lower = s.to_lowercase();
+    let chars: Vec<char> = lower
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ')
+        .collect();
+    if chars.len() < 3 {
+        return std::collections::HashSet::new();
+    }
+    chars
+        .windows(3)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
 }
 
 fn tokenize(s: &str) -> std::collections::HashSet<String> {
