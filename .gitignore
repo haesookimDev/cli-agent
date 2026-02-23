@@ -2,6 +2,7 @@
 /data
 data
 .env
+mcp_servers.json
 CLAUDE.md
 **/node_modules
 **/dist

@@ -1,0 +1,16 @@
+[
+  {
+    "name": "github",
+    "command": "npx",
+    "args": "-y @modelcontextprotocol/server-github",
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": "your-github-pat-here"
+    }
+  },
+  {
+    "name": "filesystem",
+    "command": "npx",
+    "args": "-y @modelcontextprotocol/server-filesystem /tmp /path/to/your/project",
+    "env": {}
+  }
+]

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
@@ -24,6 +23,7 @@ pub struct AppConfig {
     pub anthropic_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
     pub github_token: Option<String>,
+    pub mcp_enabled: bool,
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -75,23 +75,23 @@ impl AppConfig {
         let gemini_api_key = env::var("GEMINI_API_KEY").ok();
         let github_token = env::var("GITHUB_TOKEN").ok();
 
-        let mcp_servers = if let Ok(json) = env::var("MCP_SERVERS") {
-            serde_json::from_str(&json).unwrap_or_else(|_| Vec::new())
-        } else if github_token.is_some() {
-            let command = env::var("MCP_SERVER_COMMAND")
-                .unwrap_or_else(|_| "npx".to_string());
-            let args = env::var("MCP_SERVER_ARGS")
-                .unwrap_or_else(|_| "-y @modelcontextprotocol/server-github".to_string());
-            let mut env_map = HashMap::new();
-            if let Some(ref token) = github_token {
-                env_map.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token.clone());
+        let mcp_enabled = env::var("MCP_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let mcp_servers = if mcp_enabled {
+            let config_path = env::var("MCP_CONFIG_PATH")
+                .unwrap_or_else(|_| "mcp_servers.json".to_string());
+            match std::fs::read_to_string(&config_path) {
+                Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
+                    eprintln!("warn: failed to parse {}: {}", config_path, e);
+                    Vec::new()
+                }),
+                Err(e) => {
+                    eprintln!("warn: failed to read {}: {}", config_path, e);
+                    Vec::new()
+                }
             }
-            vec![McpServerConfig {
-                name: "github".to_string(),
-                command,
-                args,
-                env: env_map,
-            }]
         } else {
             Vec::new()
         };
@@ -113,6 +113,7 @@ impl AppConfig {
             anthropic_api_key,
             gemini_api_key,
             github_token,
+            mcp_enabled,
             mcp_servers,
         };
 
