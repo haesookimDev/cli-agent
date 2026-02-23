@@ -1482,6 +1482,7 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "run_finished" => RunActionType::RunFinished,
         "webhook_dispatched" => RunActionType::WebhookDispatched,
         "mcp_tool_called" => RunActionType::McpToolCalled,
+        "node_token_chunk" => RunActionType::NodeTokenChunk,
         "subtask_planned" => RunActionType::SubtaskPlanned,
         "verification_started" => RunActionType::VerificationStarted,
         "verification_complete" => RunActionType::VerificationComplete,
