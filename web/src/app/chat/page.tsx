@@ -1,19 +1,20 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState, useCallback } from "react";
+import { Suspense, useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRunSSE } from "@/hooks/use-sse";
 import { ChatBubble } from "@/components/chat-bubble";
 import { AgentThinking } from "@/components/agent-thinking";
+import { ToolCallCard, extractToolCalls } from "@/components/tool-call-card";
 import { getLastSessionId, setLastSessionId } from "@/lib/session-store";
 import type {
   ChatMessage,
   SessionSummary,
   RunSubmission,
-  RunRecord,
+  RunActionEvent,
+  RunTrace,
   TaskProfile,
-  RunStatus,
 } from "@/lib/types";
 
 function ChatContent() {
@@ -30,10 +31,19 @@ function ChatContent() {
   const [profile, setProfile] = useState<TaskProfile>("general");
   const [submitting, setSubmitting] = useState(false);
 
+  // Events per run (for timeline display — both SSE and API-loaded)
+  const [runEventsMap, setRunEventsMap] = useState<Record<string, RunActionEvent[]>>({});
+  const runEventsMapRef = useRef(runEventsMap);
+  runEventsMapRef.current = runEventsMap;
+
+  // Current active run
   const [currentRun, setCurrentRun] = useState<RunSubmission | null>(null);
   const { events, terminalStatus, sseError } = useRunSSE(
     currentRun?.run_id ?? null,
   );
+
+  // Skip loadMessages when handleSubmit just created a new session
+  const skipLoadRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -56,33 +66,55 @@ function ChatContent() {
       .catch(() => {});
   }, []);
 
-  // Load messages when session changes
+  // Load messages
   const loadMessages = useCallback(async (sid: string) => {
     try {
       const msgs = await apiGet<ChatMessage[]>(
         `/v1/sessions/${sid}/messages?limit=200`,
       );
       setMessages(msgs);
+
+      // Load events for runs we don't have yet
+      const runIds = [...new Set(msgs.map((m) => m.run_id).filter(Boolean))] as string[];
+      for (const rid of runIds) {
+        if (runEventsMapRef.current[rid]) continue;
+        apiGet<RunTrace>(`/v1/runs/${rid}/trace?limit=5000`)
+          .then((trace) => {
+            if (trace?.events?.length) {
+              setRunEventsMap((prev) => ({ ...prev, [rid]: trace.events }));
+            }
+          })
+          .catch(() => {});
+      }
     } catch {
       setMessages([]);
     }
   }, []);
 
+  // Load messages when session changes (skip when just created by handleSubmit)
   useEffect(() => {
     if (activeSessionId) {
+      if (skipLoadRef.current) {
+        skipLoadRef.current = false;
+        return;
+      }
       loadMessages(activeSessionId);
     } else {
       setMessages([]);
     }
   }, [activeSessionId, loadMessages]);
 
-  // Reload messages when run finishes
+  // When run finishes: save events, reload messages
   useEffect(() => {
-    if (terminalStatus && activeSessionId) {
-      loadMessages(activeSessionId);
+    if (terminalStatus && currentRun) {
+      const runId = currentRun.run_id;
+      setRunEventsMap((prev) => ({ ...prev, [runId]: events }));
       setCurrentRun(null);
+      if (activeSessionId) {
+        loadMessages(activeSessionId);
+      }
     }
-  }, [terminalStatus, activeSessionId, loadMessages]);
+  }, [terminalStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll
   useEffect(() => {
@@ -92,10 +124,17 @@ function ChatContent() {
     });
   }, [messages, events]);
 
-  const runStatus: RunStatus =
-    (terminalStatus as RunStatus) ?? currentRun?.status ?? "queued";
-  const isRunning =
-    currentRun !== null && !terminalStatus;
+  const isRunning = currentRun !== null && !terminalStatus;
+
+  // Tool calls for runs WITHOUT events (fallback display)
+  const toolCallsByRunId = useMemo(() => {
+    const map: Record<string, ReturnType<typeof extractToolCalls>> = {};
+    for (const [rid, evts] of Object.entries(runEventsMap)) {
+      const calls = extractToolCalls(evts);
+      if (calls.length > 0) map[rid] = calls;
+    }
+    return map;
+  }, [runEventsMap]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -109,18 +148,17 @@ function ChatContent() {
       const sub = await apiPost<RunSubmission>("/v1/runs", body);
       setCurrentRun(sub);
 
-      // Set active session to the one just created
       if (!activeSessionId) {
+        skipLoadRef.current = true; // Don't reload — we have the local message
         setActiveSessionId(sub.session_id);
       }
 
-      // Add user message locally for instant feedback
       setMessages((prev) => [
         ...prev,
         {
-          id: `local:${Date.now()}`,
+          id: `pending:${sub.run_id}`,
           session_id: sub.session_id,
-          run_id: sub.run_id,
+          run_id: null,
           role: "user",
           content: task.trim(),
           agent_role: null,
@@ -130,7 +168,6 @@ function ChatContent() {
       ]);
 
       setTask("");
-      // Refresh session list
       apiGet<SessionSummary[]>("/v1/sessions?limit=50")
         .then(setSessions)
         .catch(() => {});
@@ -141,12 +178,95 @@ function ChatContent() {
     }
   }
 
-  // Check which sessions have active runs
   const activeSessionIds = new Set(
     sessions
       .filter((s) => s.last_run_at && !s.last_task)
       .map((s) => s.session_id),
   );
+
+  // Build render items: group agent messages by run_id
+  // If run has events → timeline card; else → ChatBubble
+  const renderItems = useMemo(() => {
+    const items: ReactNode[] = [];
+    const renderedRuns = new Set<string>();
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      // User messages → always ChatBubble
+      if (msg.role === "user") {
+        items.push(<ChatBubble key={msg.id} message={msg} />);
+        continue;
+      }
+
+      // Agent message: check if run has events
+      const rid = msg.run_id;
+
+      // Already rendered this run as timeline → skip
+      if (rid && renderedRuns.has(rid)) continue;
+
+      if (rid && runEventsMap[rid] && runEventsMap[rid].length > 0) {
+        // Has events → show timeline (only once per run)
+        renderedRuns.add(rid);
+        // Don't show timeline for current SSE run (handled separately below)
+        if (rid !== currentRun?.run_id) {
+          items.push(
+            <AgentThinking
+              key={`tl:${rid}`}
+              events={runEventsMap[rid]}
+              isRunning={false}
+            />,
+          );
+        }
+        continue;
+      }
+
+      // No events → show as ChatBubble with optional tool calls
+      const nextMsg = messages[i + 1];
+      const isLastAgentOfRun =
+        rid &&
+        (!nextMsg || nextMsg.run_id !== rid || nextMsg.role === "user");
+      const runToolCalls =
+        isLastAgentOfRun && rid ? toolCallsByRunId[rid] : null;
+
+      items.push(
+        <div key={msg.id}>
+          <ChatBubble message={msg} />
+          {runToolCalls && runToolCalls.length > 0 && (
+            <div className="ml-9 mt-2 space-y-2">
+              {runToolCalls.map((tc, ti) => (
+                <ToolCallCard key={ti} call={tc} />
+              ))}
+            </div>
+          )}
+        </div>,
+      );
+    }
+
+    // Current run timeline (active SSE)
+    if (isRunning && currentRun && events.length > 0) {
+      items.push(
+        <AgentThinking
+          key={`tl:${currentRun.run_id}`}
+          events={events}
+          isRunning={true}
+        />,
+      );
+    }
+
+    // Just-completed run (events saved, but messages might not include agent outputs yet)
+    if (
+      !isRunning &&
+      terminalStatus &&
+      currentRun === null &&
+      events.length > 0
+    ) {
+      // The terminalStatus effect might not have fired yet
+      // This handles the brief window between terminalStatus and loadMessages completing
+    }
+
+    return items;
+  }, [messages, runEventsMap, currentRun, events, isRunning, terminalStatus, toolCallsByRunId]);
 
   return (
     <div className="flex h-[calc(100vh-10rem)] gap-4">
@@ -205,7 +325,6 @@ function ChatContent() {
 
       {/* Chat area */}
       <div className="flex min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white">
-        {/* Messages */}
         <div
           ref={scrollRef}
           className="flex-1 space-y-3 overflow-y-auto px-4 py-4"
@@ -220,13 +339,7 @@ function ChatContent() {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <ChatBubble key={msg.id} message={msg} />
-          ))}
-
-          {isRunning && (
-            <AgentThinking events={events} isRunning={isRunning} />
-          )}
+          {renderItems}
 
           {sseError && (
             <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
