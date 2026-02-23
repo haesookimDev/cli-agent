@@ -14,6 +14,7 @@ const tabs = [
   { href: "/trace", label: "Trace" },
   { href: "/workflows", label: "Workflows" },
   { href: "/schedules", label: "Schedules" },
+  { href: "/terminal", label: "Terminal" },
   { href: "/tools", label: "Tools" },
   { href: "/settings", label: "Settings" },
 ];
