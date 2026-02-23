@@ -115,7 +115,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/sessions",
             post(create_session_handler).get(list_sessions_handler),
         )
-        .route("/v1/sessions/:session_id", get(get_session_handler))
+        .route("/v1/sessions/:session_id", get(get_session_handler).delete(delete_session_handler))
         .route(
             "/v1/sessions/:session_id/runs",
             get(list_session_runs_handler),
@@ -315,6 +315,41 @@ async fn get_session_handler(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "session not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn delete_session_handler(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let session_id = match Uuid::parse_str(session_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.delete_session(session_id).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,

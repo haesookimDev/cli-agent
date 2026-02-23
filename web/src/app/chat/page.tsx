@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
-import { apiGet, apiPost } from "@/lib/api-client";
+import { apiGet, apiPost, apiDelete } from "@/lib/api-client";
 import { useRunSSE } from "@/hooks/use-sse";
 import { ChatBubble } from "@/components/chat-bubble";
 import { AgentThinking } from "@/components/agent-thinking";
@@ -65,6 +65,22 @@ function ChatContent() {
       .then(setSessions)
       .catch(() => {});
   }, []);
+
+  // Delete session
+  const handleDeleteSession = useCallback(async (sid: string) => {
+    if (!confirm("Delete this session?")) return;
+    try {
+      await apiDelete(`/v1/sessions/${sid}`);
+      setSessions((prev) => prev.filter((s) => s.session_id !== sid));
+      if (activeSessionId === sid) {
+        setActiveSessionId(null);
+        setMessages([]);
+        setCurrentRun(null);
+      }
+    } catch (err) {
+      console.error("delete session:", err);
+    }
+  }, [activeSessionId]);
 
   // Load messages
   const loadMessages = useCallback(async (sid: string) => {
@@ -293,32 +309,46 @@ function ChatContent() {
             + New Session
           </button>
           {sessions.map((s) => (
-            <button
+            <div
               key={s.session_id}
-              onClick={() => {
-                setActiveSessionId(s.session_id);
-                setCurrentRun(null);
-              }}
-              className={`mb-0.5 w-full rounded-lg px-3 py-2 text-left text-xs transition-colors ${
+              className={`group relative mb-0.5 rounded-lg transition-colors ${
                 activeSessionId === s.session_id
                   ? "bg-teal-50 text-teal-700"
                   : "text-slate-600 hover:bg-slate-50"
               }`}
             >
-              <div className="flex items-center gap-1.5">
-                {activeSessionIds.has(s.session_id) && (
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
-                )}
-                <span className="font-mono">
-                  {s.session_id.slice(0, 8)}
-                </span>
-              </div>
-              {s.last_task && (
-                <div className="mt-0.5 truncate text-[10px] text-slate-400">
-                  {s.last_task}
+              <button
+                onClick={() => {
+                  setActiveSessionId(s.session_id);
+                  setCurrentRun(null);
+                }}
+                className="w-full rounded-lg px-3 py-2 text-left text-xs"
+              >
+                <div className="flex items-center gap-1.5">
+                  {activeSessionIds.has(s.session_id) && (
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
+                  )}
+                  <span className="font-mono">
+                    {s.session_id.slice(0, 8)}
+                  </span>
                 </div>
-              )}
-            </button>
+                {s.last_task && (
+                  <div className="mt-0.5 truncate pr-5 text-[10px] text-slate-400">
+                    {s.last_task}
+                  </div>
+                )}
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDeleteSession(s.session_id);
+                }}
+                className="absolute right-1.5 top-1.5 hidden rounded p-0.5 text-slate-400 hover:bg-red-50 hover:text-red-500 group-hover:block"
+                title="Delete session"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
           ))}
         </div>
       </div>
