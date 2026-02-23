@@ -1,19 +1,24 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use async_stream::stream;
 use axum::body::Bytes;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use futures::{SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::orchestrator::Orchestrator;
+use crate::terminal::TerminalManager;
 use crate::types::{RunRequest, TaskProfile};
 use crate::webhook::AuthManager;
 
@@ -24,6 +29,7 @@ const WEB_CLIENT_HTML: &str = include_str!("web_client.html");
 pub struct ApiState {
     pub orchestrator: Orchestrator,
     pub auth: std::sync::Arc<AuthManager>,
+    pub terminal: TerminalManager,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,6 +192,18 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/runs/:run_id/save-workflow",
             post(save_workflow_from_run_handler),
+        )
+        .route(
+            "/v1/terminal/sessions",
+            post(create_terminal_handler).get(list_terminals_handler),
+        )
+        .route(
+            "/v1/terminal/sessions/:id",
+            delete(kill_terminal_handler),
+        )
+        .route(
+            "/v1/terminal/sessions/:id/ws",
+            get(terminal_ws_handler),
         )
         .with_state(state)
 }
@@ -1619,4 +1637,263 @@ async fn delete_schedule_handler(
             Json(serde_json::json!({"error": err.to_string()})),
         ),
     }
+}
+
+// ─── Terminal handlers ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateTerminalRequest {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default = "default_cols")]
+    cols: u16,
+    #[serde(default = "default_rows")]
+    rows: u16,
+    run_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+}
+
+fn default_cols() -> u16 {
+    80
+}
+fn default_rows() -> u16 {
+    24
+}
+
+async fn create_terminal_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req: CreateTerminalRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.terminal.spawn(
+        &req.command,
+        &req.args,
+        req.cols,
+        req.rows,
+        req.run_id,
+        req.session_id,
+    ) {
+        Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_terminals_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let list = state.terminal.list();
+    (StatusCode::OK, Json(serde_json::to_value(list).unwrap()))
+}
+
+async fn kill_terminal_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    match state.terminal.kill(&id) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "killed"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WsAuthQuery {
+    api_key: String,
+    signature: String,
+    timestamp: String,
+    nonce: String,
+}
+
+async fn terminal_ws_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(auth_query): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_query_params(
+        &auth_query.api_key,
+        &auth_query.signature,
+        &auth_query.timestamp,
+        &auth_query.nonce,
+        &[],
+    ) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response();
+    }
+
+    let session = match state.terminal.get(&id) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "terminal session not found"})),
+            )
+                .into_response();
+        }
+    };
+
+    let terminal_mgr = state.terminal.clone();
+    ws.on_upgrade(move |socket| handle_terminal_ws(socket, session, terminal_mgr))
+        .into_response()
+}
+
+async fn handle_terminal_ws(
+    socket: WebSocket,
+    session: Arc<crate::terminal::TerminalSession>,
+    manager: crate::terminal::TerminalManager,
+) {
+    use std::io::{Read, Write};
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Take the PTY reader (only one WS connection per session)
+    let pty_reader = {
+        let mut guard = session.reader.lock().await;
+        match guard.take() {
+            Some(r) => r,
+            None => {
+                let _ = ws_sender
+                    .send(Message::Text(
+                        serde_json::json!({"type": "error", "message": "already connected"})
+                            .to_string(),
+                    ))
+                    .await;
+                return;
+            }
+        }
+    };
+
+    let writer = session.writer.clone();
+    let session_id_for_cleanup = session.id.clone();
+    let reader_slot = session.reader.clone();
+
+    // Bridge blocking PTY read to async via mpsc channel
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+    let read_handle = tokio::task::spawn_blocking(move || {
+        let mut reader = pty_reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // Return reader so it can be restored for reconnection
+        reader
+    });
+
+    // Async task: mpsc → WS binary frames
+    let send_handle = tokio::spawn(async move {
+        while let Some(data) = rx.recv().await {
+            if ws_sender.send(Message::Binary(data)).await.is_err() {
+                break;
+            }
+        }
+        let _ = ws_sender
+            .send(Message::Text(
+                serde_json::json!({"type": "exit", "code": 0}).to_string(),
+            ))
+            .await;
+    });
+
+    // Receive loop: WS → PTY stdin
+    let master_for_resize = session.master.clone();
+    let recv_handle = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            match msg {
+                Message::Binary(data) => {
+                    let mut w = writer.lock().await;
+                    let _ = w.write_all(&data);
+                    let _ = w.flush();
+                }
+                Message::Text(text) => {
+                    if let Ok(ctrl) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if ctrl.get("type").and_then(|v| v.as_str()) == Some("resize") {
+                            let cols =
+                                ctrl.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                            let rows =
+                                ctrl.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+                            let m = master_for_resize.lock().await;
+                            let _ = m.resize(portable_pty::PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    // Wait for either direction to finish
+    tokio::select! {
+        result = read_handle => {
+            // Restore reader for potential reconnection
+            if let Ok(reader) = result {
+                let mut guard = reader_slot.lock().await;
+                *guard = Some(reader);
+            }
+        }
+        _ = recv_handle => {}
+    }
+    send_handle.abort();
+
+    // Remove session if child exited
+    manager.remove(&session_id_for_cleanup);
 }

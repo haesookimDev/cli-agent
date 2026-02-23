@@ -20,6 +20,7 @@ use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
 use cli_agent::types::{RunRequest, TaskProfile};
 use cli_agent::scheduler::CronScheduler;
+use cli_agent::terminal::TerminalManager;
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
 
 #[derive(Debug, Parser)]
@@ -215,7 +216,8 @@ async fn main() -> anyhow::Result<()> {
             println!("serving on http://{addr}");
             println!("  web client: http://{addr}/web-client");
             println!("  dashboard:  http://{addr}/dashboard");
-            api::serve(addr, ApiState { orchestrator, auth }, Some(gateway_router)).await?;
+            let terminal = TerminalManager::new();
+            api::serve(addr, ApiState { orchestrator, auth, terminal }, Some(gateway_router)).await?;
         }
         Commands::Replay { session } => {
             let events = orchestrator.replay_session(session).await?;

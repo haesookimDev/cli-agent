@@ -79,6 +79,42 @@ impl AuthManager {
         Ok(())
     }
 
+    /// Verify auth from query parameters (for WebSocket upgrade).
+    pub fn verify_query_params(
+        &self,
+        key: &str,
+        signature: &str,
+        timestamp_raw: &str,
+        nonce: &str,
+        body: &[u8],
+    ) -> anyhow::Result<()> {
+        if key != self.api_key {
+            return Err(anyhow::anyhow!("invalid api key"));
+        }
+
+        let timestamp = timestamp_raw
+            .parse::<i64>()
+            .map_err(|_| anyhow::anyhow!("invalid timestamp"))?;
+
+        let now = Utc::now().timestamp();
+        if (now - timestamp).abs() > self.max_drift_secs {
+            return Err(anyhow::anyhow!("timestamp drift exceeded"));
+        }
+
+        self.cleanup_old_nonces(now);
+        if self.nonce_cache.contains_key(nonce) {
+            return Err(anyhow::anyhow!("nonce reuse detected"));
+        }
+
+        let expected = sign_payload(self.api_secret.as_str(), timestamp_raw, nonce, body)?;
+        if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
+            return Err(anyhow::anyhow!("signature mismatch"));
+        }
+
+        self.nonce_cache.insert(nonce.to_string(), now);
+        Ok(())
+    }
+
     pub fn sign(&self, timestamp: &str, nonce: &str, body: &[u8]) -> anyhow::Result<String> {
         sign_payload(self.api_secret.as_str(), timestamp, nonce, body)
     }

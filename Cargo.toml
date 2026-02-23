@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 cron = "0.13"
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -15,6 +15,7 @@ crossterm = "0.28"
 dashmap = "6.1"
 ed25519-dalek = { version = "2.1", features = ["pkcs8"] }
 futures = "0.3"
+portable-pty = "0.8"
 hex = "0.4"
 hmac = "0.12"
 http = "1.2"
