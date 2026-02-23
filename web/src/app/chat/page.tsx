@@ -90,7 +90,22 @@ function ChatContent() {
       const msgs = await apiGet<ChatMessage[]>(
         `/v1/sessions/${sid}/messages?limit=200`,
       );
-      setMessages(msgs);
+      setMessages((prev) => {
+        // Merge: keep local pending user messages if server hasn't returned them yet
+        const serverIds = new Set(msgs.map((m) => m.id));
+        const pendingUserMsgs = prev.filter(
+          (m) => m.id.startsWith("pending:") && m.role === "user" && !serverIds.has(m.id),
+        );
+        if (pendingUserMsgs.length > 0) {
+          // Insert pending messages at the right chronological position
+          const merged = [...pendingUserMsgs, ...msgs];
+          merged.sort(
+            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+          );
+          return merged;
+        }
+        return msgs;
+      });
 
       // Load events for runs we don't have yet
       const runIds = [...new Set(msgs.map((m) => m.run_id).filter(Boolean))] as string[];
@@ -104,8 +119,9 @@ function ChatContent() {
           })
           .catch(() => {});
       }
-    } catch {
-      setMessages([]);
+    } catch (err) {
+      console.error("loadMessages:", err);
+      // Don't clear messages on error — keep existing messages visible
     }
   }, []);
 

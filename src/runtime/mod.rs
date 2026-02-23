@@ -197,6 +197,19 @@ impl AgentRuntime {
                             });
                         }
 
+                        // When a node succeeds, its fallback node is no longer needed — skip it.
+                        if let Some(fallback_id) = &node.policy.fallback_node {
+                            if graph.is_fallback_only(fallback_id) && !graph.is_forced_ready(fallback_id) {
+                                graph.set_status(fallback_id, NodeStatus::Skipped);
+                                if let Some(sink) = &on_event {
+                                    sink(RuntimeEvent::NodeSkipped {
+                                        node_id: fallback_id.clone(),
+                                        reason: "parent_succeeded".to_string(),
+                                    });
+                                }
+                            }
+                        }
+
                         let dynamic_nodes = on_completed(node.clone(), ok.clone()).await?;
                         for dynamic in dynamic_nodes {
                             let dynamic_id = dynamic.id.clone();
@@ -337,6 +350,11 @@ enum DepResolution {
 fn is_runnable(graph: &ExecutionGraph, node: &AgentNode) -> DepResolution {
     if graph.is_forced_ready(node.id.as_str()) {
         return DepResolution::Ready;
+    }
+
+    // Fallback-only nodes must not run unless explicitly force-readied.
+    if graph.is_fallback_only(node.id.as_str()) {
+        return DepResolution::Blocked;
     }
 
     let deps = graph.dependencies(node);

@@ -83,6 +83,9 @@ pub struct ExecutionGraph {
     nodes: HashMap<String, AgentNode>,
     statuses: HashMap<String, NodeStatus>,
     forced_ready: HashSet<String>,
+    /// Node IDs that are referenced as `fallback_node` by another node.
+    /// These nodes should only run when explicitly activated via `force_ready`.
+    fallback_only: HashSet<String>,
     max_depth: u8,
 }
 
@@ -92,6 +95,7 @@ impl ExecutionGraph {
             nodes: HashMap::new(),
             statuses: HashMap::new(),
             forced_ready: HashSet::new(),
+            fallback_only: HashSet::new(),
             max_depth,
         }
     }
@@ -135,6 +139,17 @@ impl ExecutionGraph {
             }
         }
 
+        // Track if this node is a fallback target for any existing node.
+        if let Some(fb) = &node.policy.fallback_node {
+            self.fallback_only.insert(fb.clone());
+        }
+        // Check if any existing node references this new node as its fallback.
+        for existing in self.nodes.values() {
+            if existing.policy.fallback_node.as_deref() == Some(&node.id) {
+                self.fallback_only.insert(node.id.clone());
+            }
+        }
+
         self.nodes.insert(node.id.clone(), node.clone());
         self.statuses.insert(node.id.clone(), NodeStatus::Pending);
 
@@ -159,6 +174,12 @@ impl ExecutionGraph {
 
     pub fn clear_forced_ready(&mut self, node_id: &str) {
         self.forced_ready.remove(node_id);
+    }
+
+    /// Returns true if this node is only meant to run as a fallback (i.e. when
+    /// the parent node that references it has failed and called `force_ready`).
+    pub fn is_fallback_only(&self, node_id: &str) -> bool {
+        self.fallback_only.contains(node_id)
     }
 
     pub fn nodes(&self) -> Vec<AgentNode> {

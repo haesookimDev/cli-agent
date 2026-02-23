@@ -64,7 +64,11 @@ export function useRunSSE(runId: string | null) {
 
             if (eventType === "action_event") {
               const ev = JSON.parse(data) as RunActionEvent;
-              setEvents((prev) => [...prev, ev]);
+              setEvents((prev) => {
+                const next = [...prev, ev];
+                next.sort((a, b) => a.seq - b.seq);
+                return next;
+              });
             } else if (eventType === "run_terminal") {
               const ev = JSON.parse(data);
               setTerminalStatus(ev.status);
