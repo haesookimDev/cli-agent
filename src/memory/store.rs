@@ -242,6 +242,18 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -1375,6 +1387,31 @@ impl SqliteStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    pub async fn load_settings(&self) -> anyhow::Result<Option<crate::types::AppSettings>> {
+        let row = sqlx::query("SELECT data FROM app_settings WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => {
+                let json: String = r.get("data");
+                Ok(Some(serde_json::from_str(&json)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn save_settings(&self, settings: &crate::types::AppSettings) -> anyhow::Result<()> {
+        let json = serde_json::to_string(settings)?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO app_settings (id, data, updated_at) VALUES (1, ?1, ?2)",
+        )
+        .bind(&json)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }

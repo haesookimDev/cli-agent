@@ -1121,7 +1121,7 @@ async fn update_settings_handler(
         }
     };
 
-    state.orchestrator.update_settings(patch);
+    state.orchestrator.update_settings(patch).await;
     let settings = state.orchestrator.get_settings();
     (StatusCode::OK, Json(serde_json::to_value(settings).unwrap()))
 }

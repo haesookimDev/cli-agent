@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.max_graph_depth,
         mcp,
     );
+    orchestrator.load_persisted_settings().await;
 
     match cli.command {
         Commands::Run {

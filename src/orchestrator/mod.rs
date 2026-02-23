@@ -93,7 +93,7 @@ impl Orchestrator {
         }
     }
 
-    pub fn update_settings(&self, patch: crate::types::SettingsPatch) {
+    pub async fn update_settings(&self, patch: crate::types::SettingsPatch) {
         if let Some(preferred) = patch.preferred_model {
             self.router.set_preferred_model(preferred);
         }
@@ -124,6 +124,36 @@ impl Orchestrator {
                 ) {
                     self.router.set_provider_disabled(pk, true);
                 }
+            }
+        }
+
+        let settings = self.get_settings();
+        if let Err(e) = self.memory.store().save_settings(&settings).await {
+            error!("failed to persist settings: {e}");
+        }
+    }
+
+    pub async fn load_persisted_settings(&self) {
+        match self.memory.store().load_settings().await {
+            Ok(Some(settings)) => {
+                if let Some(preferred) = settings.preferred_model {
+                    self.router.set_preferred_model(Some(preferred));
+                }
+                for model_id in &settings.disabled_models {
+                    self.router.set_model_disabled(model_id, true);
+                }
+                for name in &settings.disabled_providers {
+                    if let Ok(pk) = serde_json::from_value::<crate::router::ProviderKind>(
+                        serde_json::Value::String(name.clone()),
+                    ) {
+                        self.router.set_provider_disabled(pk, true);
+                    }
+                }
+                info!("restored persisted settings");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("failed to load persisted settings: {e}");
             }
         }
     }
