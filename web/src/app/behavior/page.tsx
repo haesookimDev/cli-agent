@@ -4,6 +4,7 @@ import { Suspense, useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiGet } from "@/lib/api-client";
 import { useInterval } from "@/hooks/use-interval";
+import { getLastRunId, setLastRunId } from "@/lib/session-store";
 import { SummaryMetrics } from "@/components/behavior/summary-metrics";
 import { SwimLane } from "@/components/behavior/swim-lane";
 import { ActionMix } from "@/components/behavior/action-mix";
@@ -11,7 +12,7 @@ import type { RunBehaviorView } from "@/lib/types";
 
 function BehaviorContent() {
   const searchParams = useSearchParams();
-  const initialRunId = searchParams.get("run") ?? "";
+  const initialRunId = searchParams.get("run") || getLastRunId("behavior");
 
   const [runId, setRunId] = useState(initialRunId);
   const [inputValue, setInputValue] = useState(initialRunId);
@@ -46,6 +47,10 @@ function BehaviorContent() {
 
   useEffect(() => {
     if (runId) {
+      setLastRunId("behavior", runId);
+      const url = new URL(window.location.href);
+      url.searchParams.set("run", runId);
+      window.history.replaceState(null, "", url.toString());
       setLoading(true);
       fetchBehavior().finally(() => setLoading(false));
     }

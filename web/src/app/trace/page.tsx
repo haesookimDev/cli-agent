@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiGet } from "@/lib/api-client";
 import { useInterval } from "@/hooks/use-interval";
+import { getLastRunId, setLastRunId } from "@/lib/session-store";
 import { StatusBadge } from "@/components/status-badge";
 import { DagGraph } from "@/components/trace/dag-graph";
 import { EventTimeline } from "@/components/trace/event-timeline";
@@ -12,7 +13,7 @@ import type { RunTrace } from "@/lib/types";
 
 function TraceContent() {
   const searchParams = useSearchParams();
-  const initialRunId = searchParams.get("run") ?? "";
+  const initialRunId = searchParams.get("run") || getLastRunId("trace");
 
   const [runId, setRunId] = useState(initialRunId);
   const [inputValue, setInputValue] = useState(initialRunId);
@@ -45,6 +46,10 @@ function TraceContent() {
 
   useEffect(() => {
     if (runId) {
+      setLastRunId("trace", runId);
+      const url = new URL(window.location.href);
+      url.searchParams.set("run", runId);
+      window.history.replaceState(null, "", url.toString());
       setLoading(true);
       fetchData().finally(() => setLoading(false));
     }

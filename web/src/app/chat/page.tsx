@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { Suspense, useEffect, useRef, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRunSSE } from "@/hooks/use-sse";
 import { ChatBubble } from "@/components/chat-bubble";
 import { AgentThinking } from "@/components/agent-thinking";
+import { getLastSessionId, setLastSessionId } from "@/lib/session-store";
 import type {
   ChatMessage,
   SessionSummary,
@@ -14,9 +16,15 @@ import type {
   RunStatus,
 } from "@/lib/types";
 
-export default function ChatPage() {
+function ChatContent() {
+  const searchParams = useSearchParams();
+  const initialSessionId =
+    searchParams.get("session") || getLastSessionId() || null;
+
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(
+    initialSessionId,
+  );
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [task, setTask] = useState("");
   const [profile, setProfile] = useState<TaskProfile>("general");
@@ -28,6 +36,18 @@ export default function ChatPage() {
   );
 
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Sync activeSessionId to URL + sessionStorage
+  useEffect(() => {
+    setLastSessionId(activeSessionId);
+    const url = new URL(window.location.href);
+    if (activeSessionId) {
+      url.searchParams.set("session", activeSessionId);
+    } else {
+      url.searchParams.delete("session");
+    }
+    window.history.replaceState(null, "", url.toString());
+  }, [activeSessionId]);
 
   // Load sessions
   useEffect(() => {
@@ -269,5 +289,17 @@ export default function ChatPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="p-6 text-center text-sm text-slate-400">Loading...</div>
+      }
+    >
+      <ChatContent />
+    </Suspense>
   );
 }

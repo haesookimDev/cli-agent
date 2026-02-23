@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiGet } from "@/lib/api-client";
 import { useInterval } from "@/hooks/use-interval";
+import { getLastRunId, setLastRunId } from "@/lib/session-store";
 import { StatusBadge } from "@/components/status-badge";
 import type { RunRecord } from "@/lib/types";
 
@@ -14,11 +15,16 @@ const roleColors: Record<string, string> = {
   coder: "bg-amber-100 text-amber-700",
   summarizer: "bg-emerald-100 text-emerald-700",
   fallback: "bg-slate-100 text-slate-600",
+  tool_caller: "bg-orange-100 text-orange-700",
+  analyzer: "bg-cyan-100 text-cyan-700",
+  reviewer: "bg-pink-100 text-pink-700",
+  scheduler: "bg-indigo-100 text-indigo-700",
+  config_manager: "bg-lime-100 text-lime-700",
 };
 
 function ResultsContent() {
   const searchParams = useSearchParams();
-  const initialRunId = searchParams.get("run") ?? "";
+  const initialRunId = searchParams.get("run") || getLastRunId("results");
 
   const [runId, setRunId] = useState(initialRunId);
   const [inputValue, setInputValue] = useState(initialRunId);
@@ -51,6 +57,10 @@ function ResultsContent() {
 
   useEffect(() => {
     if (runId) {
+      setLastRunId("results", runId);
+      const url = new URL(window.location.href);
+      url.searchParams.set("run", runId);
+      window.history.replaceState(null, "", url.toString());
       setLoading(true);
       fetchData().finally(() => setLoading(false));
     }
