@@ -1487,6 +1487,7 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "verification_started" => RunActionType::VerificationStarted,
         "verification_complete" => RunActionType::VerificationComplete,
         "replan_triggered" => RunActionType::ReplanTriggered,
+        "terminal_suggested" => RunActionType::TerminalSuggested,
         _ => {
             return Err(anyhow::anyhow!("unknown run action event type: {value}"));
         }
