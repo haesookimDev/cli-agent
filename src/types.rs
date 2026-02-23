@@ -507,6 +507,8 @@ pub struct McpToolCallResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub command: String,
     pub args: String,
     #[serde(default)]

@@ -974,10 +974,20 @@ impl Orchestrator {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
+            let server_descs = self.mcp.server_descriptions();
+            let guide = if !server_descs.is_empty() {
+                let lines: Vec<String> = server_descs
+                    .iter()
+                    .map(|(name, desc)| format!("  - {}: {}", name, desc))
+                    .collect();
+                format!("\nServer guide:\n{}", lines.join("\n"))
+            } else {
+                String::new()
+            };
             format!(
                 "Plan work and constraints. Available MCP tools: [{}]. \
-                 If the task requires external data or operations, plan to use these tools via the tool_call node.",
-                tool_summary
+                 If the task requires external data or operations, plan to use these tools via the tool_call node.{}",
+                tool_summary, guide
             )
         } else {
             "Plan work and constraints.".to_string()
@@ -1212,12 +1222,23 @@ impl Orchestrator {
                         .collect::<Vec<_>>()
                         .join("\n");
 
+                    let server_descs = mcp.server_descriptions();
+                    let server_guide = if !server_descs.is_empty() {
+                        let lines: Vec<String> = server_descs
+                            .iter()
+                            .map(|(name, desc)| format!("- {}: {}", name, desc))
+                            .collect();
+                        format!("\n\nSERVER SELECTION GUIDE:\n{}", lines.join("\n"))
+                    } else {
+                        String::new()
+                    };
+
                     // Phase B: LLM decides which tool(s) to call
                     let selection_prompt = format!(
                         "You are the tool caller agent.\n\n\
                          USER TASK:\n{}\n\n\
                          PLANNER OUTPUT:\n{}\n\n\
-                         AVAILABLE MCP TOOLS:\n{}\n\n\
+                         AVAILABLE MCP TOOLS:\n{}{}\n\n\
                          Based on the planner output, select which tool(s) to call.\n\
                          Respond ONLY with a JSON array. Each element: \
                          {{\"tool_name\": \"server/tool_name\", \"arguments\": {{...}}}}\n\
@@ -1225,6 +1246,7 @@ impl Orchestrator {
                         req.task,
                         dep_outputs.join("\n---\n"),
                         tool_list_str,
+                        server_guide,
                     );
 
                     let optimized = context.optimize(vec![]);

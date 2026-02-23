@@ -252,6 +252,8 @@ pub struct McpRegistry {
     clients: HashMap<String, Arc<McpClient>>,
     /// Maps tool name → server name. Both "server/tool" and bare "tool" forms.
     tool_index: RwLock<HashMap<String, String>>,
+    /// Server-level descriptions for LLM tool selection guidance.
+    server_descriptions: HashMap<String, String>,
 }
 
 impl McpRegistry {
@@ -259,11 +261,15 @@ impl McpRegistry {
         Self {
             clients: HashMap::new(),
             tool_index: RwLock::new(HashMap::new()),
+            server_descriptions: HashMap::new(),
         }
     }
 
     /// Register a client and index its tools.
-    pub async fn register(&mut self, name: String, client: Arc<McpClient>) {
+    pub async fn register(&mut self, name: String, description: String, client: Arc<McpClient>) {
+        if !description.is_empty() {
+            self.server_descriptions.insert(name.clone(), description);
+        }
         let tools = client.list_tools().await;
         let mut index = self.tool_index.write().await;
         for tool in &tools {
@@ -325,6 +331,11 @@ impl McpRegistry {
 
     pub fn server_names(&self) -> Vec<String> {
         self.clients.keys().cloned().collect()
+    }
+
+    /// Return server-level descriptions for LLM guidance.
+    pub fn server_descriptions(&self) -> &HashMap<String, String> {
+        &self.server_descriptions
     }
 
     pub async fn shutdown_all(&self) {

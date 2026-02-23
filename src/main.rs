@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let client = Arc::new(client);
                 mcp_registry
-                    .register(server_cfg.name.clone(), client)
+                    .register(server_cfg.name.clone(), server_cfg.description.clone(), client)
                     .await;
                 tracing::info!("MCP server '{}' started", server_cfg.name);
             }

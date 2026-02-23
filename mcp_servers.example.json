@@ -1,6 +1,7 @@
 [
   {
     "name": "github",
+    "description": "GitHub API integration. Use for repository operations: issues, PRs, code search, file reads, commits. Requires GITHUB_PERSONAL_ACCESS_TOKEN.",
     "command": "npx",
     "args": "-y @modelcontextprotocol/server-github",
     "env": {
@@ -9,8 +10,34 @@
   },
   {
     "name": "filesystem",
+    "description": "Local filesystem access. Use for reading/writing/searching files on the local machine. Scoped to allowed directories only.",
     "command": "npx",
     "args": "-y @modelcontextprotocol/server-filesystem /tmp /path/to/your/project",
     "env": {}
+  },
+  {
+    "name": "duckduckgo",
+    "description": "Free web search with NO rate limit and NO API key required. Use as the DEFAULT first choice for general web searches. Privacy-focused. Best for: quick lookups, general questions, keyword searches. Limitations: no image/video/news-specific search, results may be less detailed than Brave.",
+    "command": "npx",
+    "args": "-y @nicekid1/duckduckgo-mcp-server",
+    "env": {}
+  },
+  {
+    "name": "brave-search",
+    "description": "High-quality web search via Brave Search API. Limit: 2,000 requests/month (free tier). Use when DuckDuckGo results are insufficient or when you need image/video/news search. Best for: detailed web search, news, image search, local business lookup. Prefer DuckDuckGo for simple queries to conserve quota.",
+    "command": "npx",
+    "args": "-y @modelcontextprotocol/server-brave-search",
+    "env": {
+      "BRAVE_API_KEY": "your-brave-api-key-here"
+    }
+  },
+  {
+    "name": "tavily",
+    "description": "Advanced search + web content extraction via Tavily API. Limit: 1,000 requests/month (free tier). Use ONLY when you need to extract full webpage content, crawl sites, or perform deep research across multiple sources. Best for: reading full article content, site mapping, multi-source research. Most expensive quota — use sparingly, only when search alone is not enough.",
+    "command": "npx",
+    "args": "-y tavily-mcp@latest",
+    "env": {
+      "TAVILY_API_KEY": "your-tavily-api-key-here"
+    }
   }
 ]
