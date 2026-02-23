@@ -47,7 +47,7 @@ impl Default for ExecutionPolicy {
         Self {
             max_parallelism: 1,
             retry: 1,
-            timeout_ms: 45_000,
+            timeout_ms: 120_000,
             circuit_breaker: 3,
             on_dependency_failure: DependencyFailurePolicy::FailFast,
             fallback_node: None,

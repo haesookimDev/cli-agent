@@ -733,7 +733,7 @@ impl Orchestrator {
         .await;
 
         let event_sink = self.build_event_sink(run_id, session_id);
-        let run_node = self.build_run_node_fn(run_id, session_id, req.clone());
+        let run_node = self.build_run_node_fn(run_id, session_id, req.clone(), event_sink.clone());
         let on_complete = self.build_on_completed_fn(run_id, session_id, req.task.clone());
 
         let outputs = self
@@ -925,7 +925,7 @@ impl Orchestrator {
         ExecutionPolicy {
             max_parallelism: 1,
             retry: 1,
-            timeout_ms: 20_000,
+            timeout_ms: 120_000,
             circuit_breaker: 3,
             on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
             fallback_node: None,
@@ -939,7 +939,7 @@ impl Orchestrator {
         // Every graph starts with a planner
         let mut plan = AgentNode::new("plan", AgentRole::Planner, "Plan work and constraints.");
         plan.policy = ExecutionPolicy {
-            timeout_ms: 30_000,
+            timeout_ms: 120_000,
             on_dependency_failure: DependencyFailurePolicy::FailFast,
             ..Self::default_policy()
         };
@@ -975,7 +975,7 @@ impl Orchestrator {
                 );
                 analyze.dependencies = vec!["extract".to_string()];
                 analyze.policy = ExecutionPolicy {
-                    timeout_ms: 30_000,
+                    timeout_ms: 120_000,
                     ..Self::default_policy()
                 };
                 graph.add_node(analyze)?;
@@ -998,7 +998,7 @@ impl Orchestrator {
                 );
                 config.dependencies = vec!["plan".to_string()];
                 config.policy = ExecutionPolicy {
-                    timeout_ms: 15_000,
+                    timeout_ms: 120_000,
                     ..Self::default_policy()
                 };
                 graph.add_node(config)?;
@@ -1021,7 +1021,7 @@ impl Orchestrator {
                 );
                 tool.dependencies = vec!["plan".to_string()];
                 tool.policy = ExecutionPolicy {
-                    timeout_ms: 60_000,
+                    timeout_ms: 180_000,
                     retry: 2,
                     ..Self::default_policy()
                 };
@@ -1058,7 +1058,7 @@ impl Orchestrator {
                 context_probe.dependencies = vec!["plan".to_string()];
                 context_probe.policy = ExecutionPolicy {
                     max_parallelism: 2,
-                    timeout_ms: 15_000,
+                    timeout_ms: 60_000,
                     ..Self::default_policy()
                 };
                 graph.add_node(context_probe)?;
@@ -1072,7 +1072,7 @@ impl Orchestrator {
                 code.policy = ExecutionPolicy {
                     max_parallelism: 2,
                     retry: 2,
-                    timeout_ms: 60_000,
+                    timeout_ms: 180_000,
                     circuit_breaker: 2,
                     on_dependency_failure: DependencyFailurePolicy::FailFast,
                     fallback_node: Some("fallback_code".to_string()),
@@ -1108,7 +1108,7 @@ impl Orchestrator {
                     webhook.dependencies = vec!["plan".to_string()];
                     webhook.depth = 1;
                     webhook.policy = ExecutionPolicy {
-                        timeout_ms: 12_000,
+                        timeout_ms: 60_000,
                         ..Self::default_policy()
                     };
                     graph.add_node(webhook)?;
@@ -1119,7 +1119,13 @@ impl Orchestrator {
         Ok(graph)
     }
 
-    fn build_run_node_fn(&self, run_id: Uuid, session_id: Uuid, req: RunRequest) -> RunNodeFn {
+    fn build_run_node_fn(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        req: RunRequest,
+        event_sink: EventSink,
+    ) -> RunNodeFn {
         let agents = self.agents.clone();
         let router = self.router.clone();
         let memory = self.memory.clone();
@@ -1133,6 +1139,7 @@ impl Orchestrator {
             let context = context.clone();
             let req = req.clone();
             let mcp = mcp.clone();
+            let event_sink = event_sink.clone();
 
             async move {
                 let started = Instant::now();
@@ -1367,7 +1374,20 @@ impl Orchestrator {
                     brief,
                 };
 
-                let run = agents.run_role(node.role, input, router.clone()).await;
+                let token_node_id = node.id.clone();
+                let token_role = node.role;
+                let token_sink = event_sink.clone();
+                let on_token: crate::router::TokenCallback = Arc::new(move |token: &str| {
+                    token_sink(RuntimeEvent::NodeTokenChunk {
+                        node_id: token_node_id.clone(),
+                        role: token_role,
+                        token: token.to_string(),
+                    });
+                });
+
+                let run = agents
+                    .run_role_stream(node.role, input, router.clone(), on_token)
+                    .await;
                 match run {
                     Ok(output) => {
                         let node_id = node.id.clone();
@@ -1481,7 +1501,7 @@ impl Orchestrator {
                                 sub_node.policy = ExecutionPolicy {
                                     max_parallelism: 2,
                                     retry: 1,
-                                    timeout_ms: 30_000,
+                                    timeout_ms: 120_000,
                                     circuit_breaker: 3,
                                     on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
                                     fallback_node: None,
@@ -1504,7 +1524,7 @@ impl Orchestrator {
                         dynamic.policy = ExecutionPolicy {
                             max_parallelism: 1,
                             retry: 1,
-                            timeout_ms: 12_000,
+                            timeout_ms: 60_000,
                             circuit_breaker: 2,
                             on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
                             fallback_node: None,
@@ -1525,6 +1545,37 @@ impl Orchestrator {
         let webhook = self.webhook.clone();
 
         Arc::new(move |event: RuntimeEvent| {
+            // Token chunks are high-frequency: store as action events only (skip timeline/session/webhook)
+            if let RuntimeEvent::NodeTokenChunk {
+                ref node_id,
+                ref role,
+                ref token,
+            } = event
+            {
+                let memory = memory.clone();
+                let node_id = node_id.clone();
+                let role = *role;
+                let token = token.clone();
+                tokio::spawn(async move {
+                    let _ = memory
+                        .append_run_action_event(
+                            run_id,
+                            session_id,
+                            RunActionType::NodeTokenChunk,
+                            Some("runtime"),
+                            Some(node_id.as_str()),
+                            None,
+                            serde_json::json!({
+                                "node_id": node_id,
+                                "role": role,
+                                "token": token,
+                            }),
+                        )
+                        .await;
+                });
+                return;
+            }
+
             if let Some(mut entry) = runs.get_mut(&run_id) {
                 entry
                     .timeline
@@ -1573,6 +1624,7 @@ impl Orchestrator {
                         "role": role,
                         "dependencies": dependencies,
                     }),
+                    RuntimeEvent::NodeTokenChunk { .. } => unreachable!(),
                     RuntimeEvent::GraphCompleted => {
                         serde_json::json!({ "phase": "graph_completed" })
                     }
@@ -1584,6 +1636,7 @@ impl Orchestrator {
                     RuntimeEvent::NodeFailed { .. } => SessionEventType::RunFailed,
                     RuntimeEvent::NodeSkipped { .. }
                     | RuntimeEvent::DynamicNodeAdded { .. }
+                    | RuntimeEvent::NodeTokenChunk { .. }
                     | RuntimeEvent::GraphCompleted => SessionEventType::RunProgress,
                 };
 
@@ -1603,6 +1656,7 @@ impl Orchestrator {
                     RuntimeEvent::DynamicNodeAdded { node_id, .. } => {
                         (RunActionType::DynamicNodeAdded, Some(node_id.as_str()))
                     }
+                    RuntimeEvent::NodeTokenChunk { .. } => unreachable!(),
                     RuntimeEvent::GraphCompleted => (RunActionType::GraphCompleted, Some("graph")),
                 };
 
@@ -2329,6 +2383,7 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::RunFinished
             | RunActionType::WebhookDispatched
             | RunActionType::McpToolCalled
+            | RunActionType::NodeTokenChunk
             | RunActionType::SubtaskPlanned
             | RunActionType::VerificationStarted
             | RunActionType::VerificationComplete

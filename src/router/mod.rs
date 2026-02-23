@@ -6,9 +6,12 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use dashmap::DashSet;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::types::TaskProfile;
+
+pub type TokenCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -309,7 +312,7 @@ impl ModelRouter {
 
         for model in chain {
             // Abort fallback if too little time remains for another attempt
-            if fallback_start.elapsed().as_secs() > 25 {
+            if fallback_start.elapsed().as_secs() > 100 {
                 errors.push("fallback chain deadline exceeded (25s)".to_string());
                 break;
             }
@@ -317,6 +320,68 @@ impl ModelRouter {
             match self.client.generate(&model, prompt).await {
                 Ok(output) => {
                     // Store in cache
+                    self.cache.insert(
+                        hash,
+                        CacheEntry {
+                            output: output.clone(),
+                            model_id: model.model_id.clone(),
+                            provider: model.provider,
+                            created_at: Instant::now(),
+                            ttl_secs: Self::cache_ttl_secs(profile),
+                        },
+                    );
+
+                    return Ok((
+                        decision,
+                        InferenceResult {
+                            provider: model.provider,
+                            model_id: model.model_id,
+                            output,
+                            used_fallback: !first,
+                        },
+                    ));
+                }
+                Err(err) => {
+                    errors.push(format!("{}:{} => {}", model.provider, model.model_id, err));
+                }
+            }
+            first = false;
+        }
+
+        Err(anyhow::anyhow!(
+            "all model candidates failed: {}",
+            errors.join(" | ")
+        ))
+    }
+
+    /// Streaming inference: calls on_token for each token chunk.
+    pub async fn infer_stream(
+        &self,
+        profile: TaskProfile,
+        prompt: &str,
+        constraints: &RoutingConstraints,
+        on_token: TokenCallback,
+    ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
+        let decision = self.select_model(profile, constraints)?;
+
+        let mut chain = Vec::new();
+        chain.push(decision.primary.clone());
+        chain.extend(decision.fallbacks.clone());
+
+        let mut first = true;
+        let mut errors = Vec::new();
+        let fallback_start = Instant::now();
+
+        for model in chain {
+            if fallback_start.elapsed().as_secs() > 100 {
+                errors.push("fallback chain deadline exceeded (100s)".to_string());
+                break;
+            }
+
+            match self.client.generate_stream(&model, prompt, &on_token).await {
+                Ok(output) => {
+                    // Store in cache
+                    let hash = Self::prompt_hash(profile, prompt);
                     self.cache.insert(
                         hash,
                         CacheEntry {
@@ -372,7 +437,7 @@ impl ProviderClient {
     ) -> Self {
         Self {
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             vllm_base_url,
@@ -563,6 +628,243 @@ impl ProviderClient {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("unexpected vLLM response format"))
+    }
+
+    /// Streaming generate: sends token chunks via callback, returns full output.
+    pub async fn generate_stream(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+        on_token: &TokenCallback,
+    ) -> anyhow::Result<String> {
+        if self.disabled.contains(&model.provider) {
+            return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
+        }
+        if self.disabled_models.contains(&model.model_id) {
+            return Err(anyhow::anyhow!("model {} is disabled", model.model_id));
+        }
+
+        match model.provider {
+            ProviderKind::OpenAi | ProviderKind::Vllm => {
+                self.stream_openai_compat(model, prompt, on_token).await
+            }
+            ProviderKind::Anthropic => {
+                self.stream_anthropic(model, prompt, on_token).await
+            }
+            ProviderKind::Gemini => {
+                self.stream_gemini(model, prompt, on_token).await
+            }
+            ProviderKind::Mock => {
+                let output = mock_inference(model, prompt);
+                on_token(&output);
+                Ok(output)
+            }
+        }
+    }
+
+    /// OpenAI-compatible streaming (works for OpenAI + vLLM)
+    async fn stream_openai_compat(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+        on_token: &TokenCallback,
+    ) -> anyhow::Result<String> {
+        let base_url = if model.provider == ProviderKind::Vllm {
+            format!(
+                "{}/v1/chat/completions",
+                self.vllm_base_url.trim_end_matches('/')
+            )
+        } else {
+            "https://api.openai.com/v1/chat/completions".to_string()
+        };
+
+        let mut req = self
+            .http
+            .post(&base_url)
+            .json(&serde_json::json!({
+                "model": model.model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": true,
+            }));
+
+        if model.provider == ProviderKind::OpenAi {
+            let api_key = self
+                .openai_api_key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("API error {}: {}", status, body));
+        }
+
+        let mut full_output = String::new();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].to_string();
+                buf = buf[pos + 1..].to_string();
+
+                let line = line.trim();
+                if line.is_empty() || !line.starts_with("data: ") {
+                    continue;
+                }
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    break;
+                }
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(delta) = val["choices"][0]["delta"]["content"].as_str() {
+                        if !delta.is_empty() {
+                            on_token(delta);
+                            full_output.push_str(delta);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(full_output)
+    }
+
+    /// Anthropic streaming
+    async fn stream_anthropic(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+        on_token: &TokenCallback,
+    ) -> anyhow::Result<String> {
+        let api_key = self
+            .anthropic_api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
+
+        let resp = self
+            .http
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": model.model_id,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": true,
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Anthropic API error {}: {}", status, body));
+        }
+
+        let mut full_output = String::new();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].to_string();
+                buf = buf[pos + 1..].to_string();
+
+                let line = line.trim();
+                if line.is_empty() || !line.starts_with("data: ") {
+                    continue;
+                }
+                let data = &line[6..];
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    if val["type"] == "content_block_delta" {
+                        if let Some(text) = val["delta"]["text"].as_str() {
+                            if !text.is_empty() {
+                                on_token(text);
+                                full_output.push_str(text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(full_output)
+    }
+
+    /// Gemini streaming
+    async fn stream_gemini(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+        on_token: &TokenCallback,
+    ) -> anyhow::Result<String> {
+        let api_key = self
+            .gemini_api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("GEMINI_API_KEY not set"))?;
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+            model.model_id, api_key
+        );
+
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}],
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Gemini API error {}: {}", status, body));
+        }
+
+        let mut full_output = String::new();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].to_string();
+                buf = buf[pos + 1..].to_string();
+
+                let line = line.trim();
+                if line.is_empty() || !line.starts_with("data: ") {
+                    continue;
+                }
+                let data = &line[6..];
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(text) =
+                        val["candidates"][0]["content"]["parts"][0]["text"].as_str()
+                    {
+                        if !text.is_empty() {
+                            on_token(text);
+                            full_output.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(full_output)
     }
 }
 

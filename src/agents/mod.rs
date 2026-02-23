@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::OptimizedContext;
-use crate::router::{ModelRouter, RoutingConstraints};
+use crate::router::{ModelRouter, RoutingConstraints, TokenCallback};
 use crate::types::{AgentRole, StructuredBrief, TaskProfile};
 
 #[derive(Debug, Clone)]
@@ -96,6 +96,40 @@ impl AgentRegistry {
             .clone();
         agent.run(input, router).await
     }
+
+    pub async fn run_role_stream(
+        &self,
+        role: AgentRole,
+        input: AgentInput,
+        router: Arc<ModelRouter>,
+        on_token: TokenCallback,
+    ) -> anyhow::Result<AgentOutput> {
+        let _agent = self
+            .agents
+            .get(&role)
+            .ok_or_else(|| anyhow::anyhow!("agent role {} not found", role))?;
+
+        // Use streaming for BuiltinAgent
+        let prompt = format!(
+            "{}\n\nTASK:\n{}\n\nINSTRUCTIONS:\n{}\n\nDEPENDENCY OUTPUTS:\n{}\n\nCONTEXT:\n{}",
+            agent_role_prompt(role),
+            input.task,
+            input.instructions,
+            input.dependency_outputs.join("\n---\n"),
+            input.context.flatten(),
+        );
+
+        let profile = agent_role_profile(role);
+        let constraints = RoutingConstraints::for_profile(profile);
+        let (_decision, inference) = router
+            .infer_stream(profile, prompt.as_str(), &constraints, on_token)
+            .await?;
+
+        Ok(AgentOutput {
+            model: format!("{}:{}", inference.provider, inference.model_id),
+            content: inference.output,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -155,6 +189,35 @@ impl BuiltinAgent {
                 "You are the config manager agent. Handle system settings changes including model toggles and preferences."
             }
         }
+    }
+}
+
+fn agent_role_profile(role: AgentRole) -> TaskProfile {
+    match role {
+        AgentRole::Planner => TaskProfile::Planning,
+        AgentRole::Extractor | AgentRole::Analyzer => TaskProfile::Extraction,
+        AgentRole::Coder => TaskProfile::Coding,
+        AgentRole::Reviewer => TaskProfile::Planning,
+        AgentRole::Summarizer
+        | AgentRole::Fallback
+        | AgentRole::ToolCaller
+        | AgentRole::Scheduler
+        | AgentRole::ConfigManager => TaskProfile::General,
+    }
+}
+
+fn agent_role_prompt(role: AgentRole) -> &'static str {
+    match role {
+        AgentRole::Planner => "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps.",
+        AgentRole::Extractor => "You are the extraction agent. Pull key facts and structured data with precision and low latency.",
+        AgentRole::Coder => "You are the coding agent. Produce implementable code-level output with tradeoffs and failure handling.",
+        AgentRole::Summarizer => "You are the summarizer agent. Consolidate all previous outputs into concise checkpoint summaries.",
+        AgentRole::Fallback => "You are the fallback agent. Recover gracefully when upstream nodes fail and provide safe alternatives.",
+        AgentRole::ToolCaller => "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results.",
+        AgentRole::Analyzer => "You are the analyzer agent. Examine data and results to identify patterns, anomalies, and insights.",
+        AgentRole::Reviewer => "You are the reviewer agent. Verify results against the original request, assess quality, and flag gaps. Output COMPLETE if satisfied, or INCOMPLETE: <reason> if not.",
+        AgentRole::Scheduler => "You are the scheduler agent. Manage cron schedules and workflow automation configurations.",
+        AgentRole::ConfigManager => "You are the config manager agent. Handle system settings changes including model toggles and preferences.",
     }
 }
 

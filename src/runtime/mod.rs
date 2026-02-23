@@ -49,6 +49,11 @@ pub enum RuntimeEvent {
         role: AgentRole,
         dependencies: Vec<String>,
     },
+    NodeTokenChunk {
+        node_id: String,
+        role: AgentRole,
+        token: String,
+    },
     GraphCompleted,
 }
 
