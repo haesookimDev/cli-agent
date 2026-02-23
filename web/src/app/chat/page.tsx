@@ -204,7 +204,7 @@ function ChatContent() {
       </div>
 
       {/* Chat area */}
-      <div className="flex flex-1 flex-col rounded-xl border border-slate-200 bg-white">
+      <div className="flex min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white">
         {/* Messages */}
         <div
           ref={scrollRef}

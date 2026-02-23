@@ -62,7 +62,7 @@ export function ChatBubble({ message }: { message: ChatMessage }) {
         </div>
       )}
       <div
-        className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm ${
+        className={`min-w-0 max-w-[75%] rounded-xl px-4 py-2.5 text-sm ${
           isUser
             ? "bg-teal-600 text-white"
             : "border border-slate-200 bg-slate-50 text-slate-800"
