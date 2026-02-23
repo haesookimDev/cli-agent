@@ -90,6 +90,9 @@ impl Orchestrator {
                 .iter()
                 .map(|p| p.to_string())
                 .collect(),
+            terminal_command: "claude".to_string(),
+            terminal_args: vec![],
+            terminal_auto_spawn: false,
         }
     }
 

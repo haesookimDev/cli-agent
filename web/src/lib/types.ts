@@ -8,7 +8,8 @@ export type RunActionType =
   | "node_failed" | "node_skipped" | "dynamic_node_added" | "graph_completed"
   | "model_selected" | "run_finished" | "webhook_dispatched"
   | "mcp_tool_called" | "node_token_chunk" | "subtask_planned"
-  | "verification_started" | "verification_complete" | "replan_triggered";
+  | "verification_started" | "verification_complete" | "replan_triggered"
+  | "terminal_suggested";
 
 export interface RunRequest {
   task: string;
@@ -163,6 +164,9 @@ export interface AppSettings {
   preferred_model: string | null;
   disabled_models: string[];
   disabled_providers: string[];
+  terminal_command: string;
+  terminal_args: string[];
+  terminal_auto_spawn: boolean;
 }
 
 export interface ModelWithStatus {

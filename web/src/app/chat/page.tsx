@@ -7,6 +7,7 @@ import { useRunSSE } from "@/hooks/use-sse";
 import { ChatBubble } from "@/components/chat-bubble";
 import { AgentThinking } from "@/components/agent-thinking";
 import { ToolCallCard, extractToolCalls } from "@/components/tool-call-card";
+import { TerminalPanel } from "@/components/terminal-panel";
 import { getLastSessionId, setLastSessionId } from "@/lib/session-store";
 import type {
   ChatMessage,
@@ -30,6 +31,7 @@ function ChatContent() {
   const [task, setTask] = useState("");
   const [profile, setProfile] = useState<TaskProfile>("general");
   const [submitting, setSubmitting] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
 
   // Events per run (for timeline display — both SSE and API-loaded)
   const [runEventsMap, setRunEventsMap] = useState<Record<string, RunActionEvent[]>>({});
@@ -392,6 +394,13 @@ function ChatContent() {
           )}
         </div>
 
+        {/* Terminal panel (collapsible) */}
+        {showTerminal && (
+          <div className="border-t border-slate-200">
+            <TerminalPanel compact={true} />
+          </div>
+        )}
+
         {/* Input */}
         <form
           onSubmit={handleSubmit}
@@ -422,6 +431,18 @@ function ChatContent() {
             <option value="extraction">Extraction</option>
             <option value="coding">Coding</option>
           </select>
+          <button
+            type="button"
+            onClick={() => setShowTerminal(!showTerminal)}
+            className={`rounded-lg border px-3 py-2 text-xs font-mono transition-colors ${
+              showTerminal
+                ? "border-teal-300 bg-teal-50 text-teal-700"
+                : "border-slate-200 text-slate-600 hover:bg-slate-50"
+            }`}
+            title="Toggle terminal"
+          >
+            {">_"}
+          </button>
           <button
             type="submit"
             disabled={submitting || !task.trim() || isRunning}

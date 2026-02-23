@@ -267,6 +267,7 @@ pub enum RunActionType {
     VerificationStarted,
     VerificationComplete,
     ReplanTriggered,
+    TerminalSuggested,
 }
 
 impl Display for RunActionType {
@@ -293,6 +294,7 @@ impl Display for RunActionType {
             RunActionType::VerificationStarted => "verification_started",
             RunActionType::VerificationComplete => "verification_complete",
             RunActionType::ReplanTriggered => "replan_triggered",
+            RunActionType::TerminalSuggested => "terminal_suggested",
         };
         write!(f, "{s}")
     }
@@ -440,6 +442,16 @@ pub struct AppSettings {
     pub preferred_model: Option<String>,
     pub disabled_models: Vec<String>,
     pub disabled_providers: Vec<String>,
+    #[serde(default = "default_terminal_command")]
+    pub terminal_command: String,
+    #[serde(default)]
+    pub terminal_args: Vec<String>,
+    #[serde(default)]
+    pub terminal_auto_spawn: bool,
+}
+
+fn default_terminal_command() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +460,9 @@ pub struct SettingsPatch {
     pub preferred_model: Option<Option<String>>,
     pub disabled_models: Option<Vec<String>>,
     pub disabled_providers: Option<Vec<String>>,
+    pub terminal_command: Option<String>,
+    pub terminal_args: Option<Vec<String>>,
+    pub terminal_auto_spawn: Option<bool>,
 }
 
 // --- Cron Schedule Types ---

@@ -2,11 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api-client";
-import type { ModelWithStatus } from "@/lib/types";
+import type { AppSettings, ModelWithStatus } from "@/lib/types";
 
 export default function SettingsPage() {
   const [models, setModels] = useState<ModelWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  const [terminalCommand, setTerminalCommand] = useState("claude");
+  const [terminalArgs, setTerminalArgs] = useState("");
+  const [terminalAutoSpawn, setTerminalAutoSpawn] = useState(false);
+  const [terminalSaving, setTerminalSaving] = useState(false);
 
   function loadModels() {
     apiGet<ModelWithStatus[]>("/v1/models")
@@ -15,8 +19,19 @@ export default function SettingsPage() {
       .finally(() => setLoading(false));
   }
 
+  function loadTerminalSettings() {
+    apiGet<AppSettings>("/v1/settings")
+      .then((s) => {
+        setTerminalCommand(s.terminal_command ?? "claude");
+        setTerminalArgs((s.terminal_args ?? []).join(" "));
+        setTerminalAutoSpawn(s.terminal_auto_spawn ?? false);
+      })
+      .catch((err) => console.error("load settings:", err));
+  }
+
   useEffect(() => {
     loadModels();
+    loadTerminalSettings();
   }, []);
 
   async function toggleModel(modelId: string) {
@@ -45,6 +60,21 @@ export default function SettingsPage() {
       loadModels();
     } catch (err) {
       console.error("set preferred:", err);
+    }
+  }
+
+  async function saveTerminalSettings() {
+    setTerminalSaving(true);
+    try {
+      await apiPatch("/v1/settings", {
+        terminal_command: terminalCommand,
+        terminal_args: terminalArgs.trim() ? terminalArgs.trim().split(/\s+/) : [],
+        terminal_auto_spawn: terminalAutoSpawn,
+      });
+    } catch (err) {
+      console.error("save terminal settings:", err);
+    } finally {
+      setTerminalSaving(false);
     }
   }
 
