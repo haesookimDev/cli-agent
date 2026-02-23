@@ -625,22 +625,12 @@ fn default_catalog() -> Vec<ModelSpec> {
         // --- Anthropic ---
         ModelSpec {
             provider: ProviderKind::Anthropic,
-            model_id: "claude-sonnet-4-5-20250929".to_string(),
+            model_id: "claude-sonnet-4-6".to_string(),
             quality: 0.94,
             latency: 2800.0,
             cost: 0.06,
             context_window: 200_000,
             tool_call_accuracy: 0.92,
-            local_only: false,
-        },
-        ModelSpec {
-            provider: ProviderKind::Anthropic,
-            model_id: "claude-opus-4-5-20251101".to_string(),
-            quality: 0.80,
-            latency: 1200.0,
-            cost: 0.005,
-            context_window: 200_000,
-            tool_call_accuracy: 0.82,
             local_only: false,
         },
         ModelSpec {
@@ -656,7 +646,7 @@ fn default_catalog() -> Vec<ModelSpec> {
         // --- Gemini ---
         ModelSpec {
             provider: ProviderKind::Gemini,
-            model_id: "gemini-2.5-pro".to_string(),
+            model_id: "gemini-3.1-pro-preview".to_string(),
             quality: 0.93,
             latency: 2400.0,
             cost: 0.05,
@@ -666,7 +656,7 @@ fn default_catalog() -> Vec<ModelSpec> {
         },
         ModelSpec {
             provider: ProviderKind::Gemini,
-            model_id: "gemini-2.5-flash".to_string(),
+            model_id: "gemini-3-flash-preview".to_string(),
             quality: 0.82,
             latency: 800.0,
             cost: 0.008,

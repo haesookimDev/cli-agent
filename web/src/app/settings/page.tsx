@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { apiGet, apiPost } from "@/lib/api-client";
+import { apiGet, apiPatch, apiPost } from "@/lib/api-client";
 import type { ModelWithStatus } from "@/lib/types";
 
 export default function SettingsPage() {
@@ -39,7 +39,7 @@ export default function SettingsPage() {
 
   async function setPreferred(modelId: string | null) {
     try {
-      await apiPost("/v1/settings", {
+      await apiPatch("/v1/settings", {
         preferred_model: modelId,
       } as Record<string, unknown>);
       loadModels();
