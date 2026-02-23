@@ -305,8 +305,15 @@ impl ModelRouter {
 
         let mut first = true;
         let mut errors = Vec::new();
+        let fallback_start = Instant::now();
 
         for model in chain {
+            // Abort fallback if too little time remains for another attempt
+            if fallback_start.elapsed().as_secs() > 25 {
+                errors.push("fallback chain deadline exceeded (25s)".to_string());
+                break;
+            }
+
             match self.client.generate(&model, prompt).await {
                 Ok(output) => {
                     // Store in cache
@@ -364,7 +371,10 @@ impl ProviderClient {
         gemini_api_key: Option<String>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             vllm_base_url,
             openai_api_key,
             anthropic_api_key,

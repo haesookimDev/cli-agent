@@ -199,6 +199,7 @@ export interface McpToolDefinition {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  server_name?: string;
 }
 
 // --- Workflow Types ---

@@ -149,6 +149,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/webhooks/test", post(test_webhook_handler))
         .route("/v1/mcp/tools", get(list_mcp_tools_handler))
+        .route("/v1/mcp/tools/call", post(call_mcp_tool_handler))
         .route("/v1/mcp/servers", get(list_mcp_servers_handler))
         .route(
             "/v1/settings",
@@ -1081,6 +1082,61 @@ async fn list_mcp_servers_handler(
 ) -> impl IntoResponse {
     let servers = state.orchestrator.list_mcp_servers();
     (StatusCode::OK, Json(serde_json::json!(servers)))
+}
+
+#[derive(Debug, Deserialize)]
+struct CallToolRequest {
+    tool_name: String,
+    #[serde(default = "default_empty_object")]
+    arguments: serde_json::Value,
+}
+
+fn default_empty_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+async fn call_mcp_tool_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<CallToolRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state
+        .orchestrator
+        .call_mcp_tool(&req.tool_name, req.arguments)
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "tool_name": result.tool_name,
+                "succeeded": result.succeeded,
+                "content": result.content,
+                "error": result.error,
+                "duration_ms": result.duration_ms,
+            })),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
 }
 
 // --- Settings & Models ---
