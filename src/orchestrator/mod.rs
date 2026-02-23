@@ -130,7 +130,27 @@ impl Orchestrator {
             }
         }
 
-        let settings = self.get_settings();
+        // Build settings: start from current state, then merge terminal fields from DB + patch
+        let mut settings = self.get_settings();
+
+        // Load persisted terminal settings as baseline
+        if let Ok(Some(persisted)) = self.memory.store().load_settings().await {
+            settings.terminal_command = persisted.terminal_command;
+            settings.terminal_args = persisted.terminal_args;
+            settings.terminal_auto_spawn = persisted.terminal_auto_spawn;
+        }
+
+        // Apply terminal patch fields
+        if let Some(cmd) = patch.terminal_command {
+            settings.terminal_command = cmd;
+        }
+        if let Some(args) = patch.terminal_args {
+            settings.terminal_args = args;
+        }
+        if let Some(auto) = patch.terminal_auto_spawn {
+            settings.terminal_auto_spawn = auto;
+        }
+
         if let Err(e) = self.memory.store().save_settings(&settings).await {
             error!("failed to persist settings: {e}");
         }
@@ -1608,6 +1628,23 @@ impl Orchestrator {
                     }
                 }
 
+                // Emit TerminalSuggested when Coder node completes successfully
+                if node.role == AgentRole::Coder && result.succeeded {
+                    let _ = memory
+                        .append_run_action_event(
+                            run_id,
+                            session_id,
+                            RunActionType::TerminalSuggested,
+                            Some("node"),
+                            Some("code"),
+                            None,
+                            serde_json::json!({
+                                "suggestion": "Coder agent completed. Open terminal to apply changes.",
+                            }),
+                        )
+                        .await;
+                }
+
                 Ok(dynamic_nodes)
             }
             .boxed()
@@ -2462,7 +2499,8 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::SubtaskPlanned
             | RunActionType::VerificationStarted
             | RunActionType::VerificationComplete
-            | RunActionType::ReplanTriggered => {}
+            | RunActionType::ReplanTriggered
+            | RunActionType::TerminalSuggested => {}
         }
     }
 

@@ -195,6 +195,57 @@ export default function SettingsPage() {
           </table>
         </div>
       </div>
+
+      {/* Terminal Settings */}
+      <div className="rounded-xl border border-slate-200 bg-white p-5">
+        <h2 className="mb-4 text-sm font-semibold text-slate-700">
+          Terminal
+        </h2>
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Command
+            </label>
+            <input
+              type="text"
+              value={terminalCommand}
+              onChange={(e) => setTerminalCommand(e.target.value)}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none"
+              placeholder="claude"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Arguments
+            </label>
+            <input
+              type="text"
+              value={terminalArgs}
+              onChange={(e) => setTerminalArgs(e.target.value)}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none"
+              placeholder="--dangerously-skip-permissions"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={terminalAutoSpawn}
+              onChange={(e) => setTerminalAutoSpawn(e.target.checked)}
+              className="h-3.5 w-3.5 accent-teal-600"
+            />
+            <label className="text-xs text-slate-600">
+              Auto-spawn terminal when Coder agent runs
+            </label>
+          </div>
+          <button
+            onClick={saveTerminalSettings}
+            disabled={terminalSaving}
+            className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50"
+          >
+            {terminalSaving ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

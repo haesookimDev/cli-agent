@@ -1204,7 +1204,13 @@ async fn get_settings_handler(
             Json(serde_json::json!({"error": err.to_string()})),
         );
     }
-    let settings = state.orchestrator.get_settings();
+    let mut settings = state.orchestrator.get_settings();
+    // Merge persisted terminal settings
+    if let Ok(Some(persisted)) = state.orchestrator.memory().store().load_settings().await {
+        settings.terminal_command = persisted.terminal_command;
+        settings.terminal_args = persisted.terminal_args;
+        settings.terminal_auto_spawn = persisted.terminal_auto_spawn;
+    }
     (StatusCode::OK, Json(serde_json::to_value(settings).unwrap()))
 }
 
