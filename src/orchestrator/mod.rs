@@ -1252,6 +1252,7 @@ impl Orchestrator {
                             .get("arguments")
                             .cloned()
                             .unwrap_or(serde_json::json!({}));
+                        let arguments_snapshot = arguments.clone();
 
                         match mcp.call_tool(&tool_name, arguments).await {
                             Ok(result) => {
@@ -1266,7 +1267,10 @@ impl Orchestrator {
                                         serde_json::json!({
                                             "node_id": node.id,
                                             "tool_name": tool_name,
+                                            "arguments": arguments_snapshot,
                                             "succeeded": result.succeeded,
+                                            "content": result.content,
+                                            "error": result.error,
                                             "duration_ms": result.duration_ms,
                                         }),
                                     )
