@@ -689,11 +689,14 @@ impl Orchestrator {
             )
             .await?;
 
+        let mcp_server_names = self.mcp.server_names();
+        let mcp_tool_names: Vec<String> = self.mcp.list_all_tools().await
+            .into_iter().map(|t| t.name).collect();
         let graph = self
             .workflow_graphs
             .remove(&run_id)
             .map(|(_, g)| g)
-            .unwrap_or_else(|| self.build_graph(req.task.as_str()).unwrap());
+            .unwrap_or_else(|| self.build_graph(req.task.as_str(), &mcp_server_names, &mcp_tool_names).unwrap());
         let graph_nodes = graph.nodes();
         self.record_action_event(
             run_id,
@@ -874,7 +877,7 @@ impl Orchestrator {
         is_complete
     }
 
-    fn classify_task(task: &str) -> TaskType {
+    fn classify_task(task: &str, mcp_server_names: &[String], mcp_tool_names: &[String]) -> TaskType {
         let lower = task.to_lowercase();
 
         // Configuration keywords
@@ -887,9 +890,37 @@ impl Orchestrator {
         }
 
         // Tool / MCP operation keywords
-        let tool_kw = ["mcp", "tool call", "github", "filesystem", "search repo"];
+        let tool_kw = ["mcp", "tool call", "tool 호출", "도구"];
         if tool_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::ToolOperation;
+        }
+
+        // If MCP servers are registered, check if task mentions server or tool names
+        if !mcp_server_names.is_empty() {
+            let matches_server = mcp_server_names.iter().any(|name| lower.contains(&name.to_lowercase()));
+            if matches_server {
+                return TaskType::ToolOperation;
+            }
+
+            // Check bare tool names (e.g. "search_repositories" from "github/search_repositories")
+            let matches_tool = mcp_tool_names.iter().any(|name| {
+                let bare = name.rsplit('/').next().unwrap_or(name);
+                lower.contains(&bare.to_lowercase())
+            });
+            if matches_tool {
+                return TaskType::ToolOperation;
+            }
+
+            // If tools are available and task involves file/project/repo operations
+            let tool_action_kw = [
+                "파일", "file", "read", "읽어", "열어", "프로젝트", "project",
+                "repo", "repository", "디렉토리", "directory", "folder", "폴더",
+                "commit", "커밋", "branch", "브랜치", "issue", "이슈", "pr",
+                "search", "검색",
+            ];
+            if tool_action_kw.iter().any(|kw| lower.contains(kw)) {
+                return TaskType::ToolOperation;
+            }
         }
 
         // Code generation keywords
@@ -932,12 +963,27 @@ impl Orchestrator {
         }
     }
 
-    fn build_graph(&self, task: &str) -> anyhow::Result<ExecutionGraph> {
-        let task_type = Self::classify_task(task);
+    fn build_graph(&self, task: &str, mcp_server_names: &[String], mcp_tool_names: &[String]) -> anyhow::Result<ExecutionGraph> {
+        let task_type = Self::classify_task(task, mcp_server_names, mcp_tool_names);
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
-        // Every graph starts with a planner
-        let mut plan = AgentNode::new("plan", AgentRole::Planner, "Plan work and constraints.");
+        // Planner instructions — include available tools when MCP servers are registered
+        let planner_instructions = if !mcp_tool_names.is_empty() {
+            let tool_summary = mcp_tool_names.iter()
+                .take(30)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Plan work and constraints. Available MCP tools: [{}]. \
+                 If the task requires external data or operations, plan to use these tools via the tool_call node.",
+                tool_summary
+            )
+        } else {
+            "Plan work and constraints.".to_string()
+        };
+
+        let mut plan = AgentNode::new("plan", AgentRole::Planner, planner_instructions);
         plan.policy = ExecutionPolicy {
             timeout_ms: 120_000,
             on_dependency_failure: DependencyFailurePolicy::FailFast,
@@ -2828,23 +2874,26 @@ mod tests {
             Arc::new(McpRegistry::new()),
         );
 
+        let no_servers: Vec<String> = vec![];
+        let no_tools: Vec<String> = vec![];
+
         // Complex/CodeGeneration task should have full graph
         let graph = orchestrator
-            .build_graph("implement a webhook integration endpoint with code")
+            .build_graph("implement a webhook integration endpoint with code", &no_servers, &no_tools)
             .unwrap();
         assert!(graph.node("plan").is_some());
         assert!(graph.node("code").is_some());
         assert!(graph.node("webhook_validation").is_some());
 
         // SimpleQuery should have minimal graph
-        let simple = orchestrator.build_graph("hello world").unwrap();
+        let simple = orchestrator.build_graph("hello world", &no_servers, &no_tools).unwrap();
         assert!(simple.node("plan").is_some());
         assert!(simple.node("summarize").is_some());
         assert!(simple.node("code").is_none());
 
         // Analysis task should have analyzer
         let analysis = orchestrator
-            .build_graph("analyze the performance patterns and evaluate metrics")
+            .build_graph("analyze the performance patterns and evaluate metrics", &no_servers, &no_tools)
             .unwrap();
         assert!(analysis.node("plan").is_some());
         assert!(analysis.node("analyze").is_some());
