@@ -13,9 +13,21 @@
 - `submit_run`에서 생성/확정한 `session_id`는 `execute_run`까지 동일하게 전달되어야 한다.
 - 새 세션 실행에서 `session_id`를 다시 생성하면 사용자 메시지가 다른 세션으로 저장되어 새로고침 시 대화가 사라지는 문제가 발생한다.
 
+### Follow-up Context Anchoring
+- 짧은 후속 발화(예: `로컬에 있어`)도 독립 질의로 처리하지 말고, 직전 사용자 메시지와 최근 run 결과 요약을 실행 컨텍스트(`History`)에 주입해야 한다.
+- 세션 메모리 검색 시 후속 발화로 판단되면 검색 쿼리를 `현재 입력 + 직전 사용자 입력`으로 확장해 recall 저하를 방지한다.
+
+### Local-First Tool Routing
+- 로컬 파일/폴더/워크스페이스 의도에서는 `filesystem/*` 도구를 우선 선택하고, `github/*` 등 원격 저장소 도구는 사용자가 명시적으로 원격 작업을 요청한 경우에만 사용한다.
+- planner/tool-caller 프롬프트에 로컬 우선 정책을 명시해 도구 선택 편향을 줄인다.
+
 ### Streaming Event Ordering
 - `node_token_chunk` 이벤트는 저장 순서가 응답 텍스트 순서와 동일해야 한다.
 - 토큰마다 `tokio::spawn`으로 DB insert를 분기하면 순서가 뒤섞일 수 있으므로 직렬 큐(worker)로 저장한다.
+
+### Session Log Integrity
+- 세션 JSONL append는 세션 단위 직렬화(락/큐)로 처리해 이벤트 라인 경계가 깨지지 않도록 보장해야 한다.
+- replay 시 단일 라인에 JSON 값이 연속으로 붙은 데이터(legacy corruption)가 있어도 역직렬화가 가능해야 한다.
 
 ### UTF-8 Safe SSE Parsing
 - 모델 스트림 파싱은 바이트 버퍼 기반으로 처리해 UTF-8 경계를 보존해야 한다.
