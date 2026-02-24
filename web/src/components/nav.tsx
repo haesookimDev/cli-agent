@@ -8,6 +8,7 @@ const tabs = [
   { href: "/", label: "Runner" },
   { href: "/chat", label: "Chat" },
   { href: "/sessions", label: "Sessions" },
+  { href: "/memory", label: "Memory" },
   { href: "/runs", label: "Runs" },
   { href: "/behavior", label: "Behavior" },
   { href: "/results", label: "Results" },

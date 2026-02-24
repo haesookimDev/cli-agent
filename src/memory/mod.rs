@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use uuid::Uuid;
 
 use crate::types::{
-    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionEvent, SessionEventType,
-    SessionSummary, WebhookDeliveryRecord, WebhookEndpoint,
+    KnowledgeItem, MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionEvent,
+    SessionEventType, SessionMemoryItem, SessionSummary, WebhookDeliveryRecord, WebhookEndpoint,
 };
 
 pub use self::session_log::SessionLogger;
@@ -144,6 +144,29 @@ impl MemoryManager {
         limit: usize,
     ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
         self.store.list_session_messages(session_id, limit).await
+    }
+
+    pub async fn list_session_memory_items(
+        &self,
+        session_id: Uuid,
+        query_text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionMemoryItem>> {
+        self.store
+            .list_session_memory_items(session_id, query_text, limit)
+            .await
+    }
+
+    pub async fn update_session_memory_item(
+        &self,
+        memory_id: &str,
+        content: Option<&str>,
+        importance: Option<f64>,
+        scope: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .update_memory_item(memory_id, content, importance, scope)
+            .await
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
@@ -373,6 +396,26 @@ impl MemoryManager {
         limit: usize,
     ) -> anyhow::Result<Vec<(String, String, String, f64)>> {
         self.store.search_knowledge(query, limit).await
+    }
+
+    pub async fn list_knowledge_items(
+        &self,
+        query_text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeItem>> {
+        self.store.list_knowledge_items(query_text, limit).await
+    }
+
+    pub async fn update_knowledge_item(
+        &self,
+        knowledge_id: &str,
+        topic: Option<&str>,
+        content: Option<&str>,
+        importance: Option<f64>,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .update_knowledge_item(knowledge_id, topic, content, importance)
+            .await
     }
 
     // --- Cron Schedule pass-through ---

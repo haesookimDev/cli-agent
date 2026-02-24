@@ -225,6 +225,29 @@ pub struct MemoryHit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMemoryItem {
+    pub id: String,
+    pub session_id: Uuid,
+    pub scope: String,
+    pub content: String,
+    pub importance: f64,
+    pub source_refs: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeItem {
+    pub id: String,
+    pub topic: String,
+    pub content: String,
+    pub importance: f64,
+    pub access_count: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEndpoint {
     pub id: String,
     pub url: String,

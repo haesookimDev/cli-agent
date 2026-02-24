@@ -21,11 +21,11 @@ use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
 };
 use crate::types::{
-    AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, McpToolDefinition, NodeTraceState,
-    RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary,
-    RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph,
-    SessionEvent, SessionEventType, SubtaskPlan, TaskType, TraceEdge, WebhookDeliveryRecord,
-    WebhookEndpoint, WorkflowTemplate,
+    AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, KnowledgeItem, McpToolDefinition,
+    NodeTraceState, RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane,
+    RunBehaviorSummary, RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace,
+    RunTraceGraph, SessionEvent, SessionEventType, SessionMemoryItem, SubtaskPlan, TaskType,
+    TraceEdge, WebhookDeliveryRecord, WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -184,6 +184,73 @@ impl Orchestrator {
 
     pub fn memory(&self) -> &Arc<MemoryManager> {
         &self.memory
+    }
+
+    pub async fn list_session_memory_items(
+        &self,
+        session_id: Uuid,
+        query_text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionMemoryItem>> {
+        self.memory
+            .list_session_memory_items(session_id, query_text, limit)
+            .await
+    }
+
+    pub async fn add_session_memory_item(
+        &self,
+        session_id: Uuid,
+        scope: &str,
+        content: &str,
+        importance: f64,
+        source_ref: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.memory
+            .remember_long(session_id, scope, content, importance, source_ref)
+            .await
+    }
+
+    pub async fn update_session_memory_item(
+        &self,
+        memory_id: &str,
+        content: Option<&str>,
+        importance: Option<f64>,
+        scope: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        self.memory
+            .update_session_memory_item(memory_id, content, importance, scope)
+            .await
+    }
+
+    pub async fn list_global_memory_items(
+        &self,
+        query_text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeItem>> {
+        self.memory.list_knowledge_items(query_text, limit).await
+    }
+
+    pub async fn add_global_memory_item(
+        &self,
+        topic: &str,
+        content: &str,
+        importance: f64,
+    ) -> anyhow::Result<String> {
+        self.memory
+            .insert_knowledge(topic, content, importance)
+            .await
+    }
+
+    pub async fn update_global_memory_item(
+        &self,
+        knowledge_id: &str,
+        topic: Option<&str>,
+        content: Option<&str>,
+        importance: Option<f64>,
+    ) -> anyhow::Result<bool> {
+        self.memory
+            .update_knowledge_item(knowledge_id, topic, content, importance)
+            .await
     }
 
     pub async fn submit_run(&self, req: RunRequest) -> anyhow::Result<RunSubmission> {
@@ -1459,6 +1526,10 @@ impl Orchestrator {
                     .retrieve(session_id, req.task.as_str(), 8)
                     .await
                     .unwrap_or_default();
+                let global_hits = memory
+                    .search_knowledge(req.task.as_str(), 4)
+                    .await
+                    .unwrap_or_default();
 
                 let mut chunks = vec![
                     ContextChunk {
@@ -1494,6 +1565,16 @@ impl Orchestrator {
                         kind: ContextKind::Retrieval,
                         content: hit.content,
                         priority: hit.score.clamp(0.2, 1.0),
+                    });
+                }
+
+                for (knowledge_id, topic, content, importance) in global_hits {
+                    chunks.push(ContextChunk {
+                        id: format!("kb:{knowledge_id}"),
+                        scope: ContextScope::GlobalShared,
+                        kind: ContextKind::Retrieval,
+                        content: format!("knowledge[{topic}]: {content}"),
+                        priority: importance.clamp(0.2, 1.0),
                     });
                 }
 

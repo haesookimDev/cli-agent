@@ -14,3 +14,13 @@
 ### UTF-8 Safe SSE Parsing
 - 모델 스트림 파싱은 바이트 버퍼 기반으로 처리해 UTF-8 경계를 보존해야 한다.
 - 청크 단위 `from_utf8_lossy` 누적은 한글/다국어에서 `�` 문자를 유발할 수 있다.
+
+### Memory Model
+- 세션 메모리는 `memory_items` 테이블을 사용하며 `session_id`로 격리된다.
+- 전역(공통) 메모리는 `knowledge_base` 테이블을 사용하며 모든 세션에서 공유된다.
+- 실행 컨텍스트 구성 시 세션 메모리(`retrieve`)와 전역 메모리(`search_knowledge`)를 함께 주입해야 한다.
+- 메모리 관리 API 경로:
+  - 세션 메모리 조회/추가: `/v1/memory/sessions/:session_id/items`
+  - 세션 메모리 수정: `/v1/memory/items/:memory_id`
+  - 전역 메모리 조회/추가: `/v1/memory/global/items`
+  - 전역 메모리 수정: `/v1/memory/global/items/:knowledge_id`

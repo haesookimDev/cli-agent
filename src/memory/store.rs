@@ -6,8 +6,8 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::types::{
-    CronSchedule, MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionSummary,
-    WebhookDeliveryRecord, WebhookEndpoint,
+    CronSchedule, KnowledgeItem, MemoryHit, RunActionEvent, RunActionType, RunRecord,
+    SessionMemoryItem, SessionSummary, WebhookDeliveryRecord, WebhookEndpoint,
 };
 
 #[derive(Debug, Clone)]
@@ -832,6 +832,105 @@ impl SqliteStore {
         Ok(out)
     }
 
+    pub async fn list_session_memory_items(
+        &self,
+        session_id: Uuid,
+        query_text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionMemoryItem>> {
+        let query_norm = query_text.unwrap_or("").trim().to_lowercase();
+        let pattern = format!("%{}%", query_norm);
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                m.id,
+                m.session_id,
+                m.scope,
+                m.content,
+                m.importance,
+                m.created_at,
+                m.updated_at,
+                COALESCE(GROUP_CONCAT(l.source_ref, char(31)), '') AS source_refs
+            FROM memory_items m
+            LEFT JOIN memory_links l ON l.memory_item_id = m.id
+            WHERE m.session_id = ?1
+              AND (?2 = '' OR LOWER(m.content) LIKE ?3 OR LOWER(m.scope) LIKE ?3)
+            GROUP BY m.id, m.session_id, m.scope, m.content, m.importance, m.created_at, m.updated_at
+            ORDER BY m.updated_at DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(session_id.to_string())
+        .bind(query_norm)
+        .bind(pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_raw: String = row.get("session_id");
+            let created_at_raw: String = row.get("created_at");
+            let updated_at_raw: String = row.get("updated_at");
+            let source_refs_raw: String = row.get("source_refs");
+            let source_refs = if source_refs_raw.is_empty() {
+                Vec::new()
+            } else {
+                source_refs_raw
+                    .split('\u{1f}')
+                    .map(ToString::to_string)
+                    .collect()
+            };
+
+            out.push(SessionMemoryItem {
+                id: row.get("id"),
+                session_id: Uuid::parse_str(session_raw.as_str())?,
+                scope: row.get("scope"),
+                content: row.get("content"),
+                importance: row.get("importance"),
+                source_refs,
+                created_at: parse_rfc3339(created_at_raw.as_str())?,
+                updated_at: parse_rfc3339(updated_at_raw.as_str())?,
+            });
+        }
+
+        Ok(out)
+    }
+
+    pub async fn update_memory_item(
+        &self,
+        memory_id: &str,
+        content: Option<&str>,
+        importance: Option<f64>,
+        scope: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        if content.is_none() && importance.is_none() && scope.is_none() {
+            return Ok(false);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE memory_items
+            SET
+                content = COALESCE(?2, content),
+                importance = COALESCE(?3, importance),
+                scope = COALESCE(?4, scope),
+                updated_at = ?5
+            WHERE id = ?1
+            "#,
+        )
+        .bind(memory_id)
+        .bind(content)
+        .bind(importance)
+        .bind(scope)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn register_webhook(
         &self,
         url: &str,
@@ -1157,6 +1256,81 @@ impl SqliteStore {
             .await;
         }
         Ok(out)
+    }
+
+    pub async fn list_knowledge_items(
+        &self,
+        query_text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KnowledgeItem>> {
+        let query_norm = query_text.unwrap_or("").trim().to_lowercase();
+        let pattern = format!("%{}%", query_norm);
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id, topic, content, importance, access_count, created_at, updated_at
+            FROM knowledge_base
+            WHERE (?1 = '' OR LOWER(topic) LIKE ?2 OR LOWER(content) LIKE ?2)
+            ORDER BY importance DESC, updated_at DESC
+            LIMIT ?3
+            "#,
+        )
+        .bind(query_norm)
+        .bind(pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let created_at_raw: String = row.get("created_at");
+            let updated_at_raw: String = row.get("updated_at");
+            let access_count_raw: i64 = row.get("access_count");
+            out.push(KnowledgeItem {
+                id: row.get("id"),
+                topic: row.get("topic"),
+                content: row.get("content"),
+                importance: row.get("importance"),
+                access_count: access_count_raw.max(0) as u64,
+                created_at: parse_rfc3339(created_at_raw.as_str())?,
+                updated_at: parse_rfc3339(updated_at_raw.as_str())?,
+            });
+        }
+
+        Ok(out)
+    }
+
+    pub async fn update_knowledge_item(
+        &self,
+        knowledge_id: &str,
+        topic: Option<&str>,
+        content: Option<&str>,
+        importance: Option<f64>,
+    ) -> anyhow::Result<bool> {
+        if topic.is_none() && content.is_none() && importance.is_none() {
+            return Ok(false);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE knowledge_base
+            SET
+                topic = COALESCE(?2, topic),
+                content = COALESCE(?3, content),
+                importance = COALESCE(?4, importance),
+                updated_at = ?5
+            WHERE id = ?1
+            "#,
+        )
+        .bind(knowledge_id)
+        .bind(topic)
+        .bind(content)
+        .bind(importance)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     // --- Cron Schedule CRUD ---
@@ -1496,4 +1670,109 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         }
     };
     Ok(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_url() -> String {
+        let path =
+            std::env::temp_dir().join(format!("cli-agent-memory-test-{}.db", Uuid::new_v4()));
+        format!("sqlite://{}", path.display())
+    }
+
+    #[tokio::test]
+    async fn session_memory_crud_roundtrip() {
+        let store = SqliteStore::connect(temp_db_url().as_str())
+            .await
+            .expect("store");
+        let session_id = Uuid::new_v4();
+        store.create_session(session_id).await.expect("create session");
+
+        let memory_id = store
+            .insert_memory_item(session_id, "agent_output", "tool result alpha", 0.7)
+            .await
+            .expect("insert memory");
+        store
+            .link_memory(memory_id.as_str(), "node:tool_caller")
+            .await
+            .expect("link");
+
+        let list = store
+            .list_session_memory_items(session_id, Some("alpha"), 20)
+            .await
+            .expect("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, memory_id);
+        assert_eq!(list[0].scope, "agent_output");
+        assert!(list[0].source_refs.iter().any(|v| v == "node:tool_caller"));
+
+        let updated = store
+            .update_memory_item(
+                memory_id.as_str(),
+                Some("updated memory body"),
+                Some(0.9),
+                Some("manual_note"),
+            )
+            .await
+            .expect("update");
+        assert!(updated);
+
+        let list_updated = store
+            .list_session_memory_items(session_id, Some("updated"), 20)
+            .await
+            .expect("list updated");
+        assert_eq!(list_updated.len(), 1);
+        assert_eq!(list_updated[0].scope, "manual_note");
+        assert_eq!(list_updated[0].importance, 0.9);
+        assert_eq!(list_updated[0].content, "updated memory body");
+    }
+
+    #[tokio::test]
+    async fn knowledge_memory_crud_roundtrip() {
+        let store = SqliteStore::connect(temp_db_url().as_str())
+            .await
+            .expect("store");
+
+        let knowledge_id = store
+            .insert_knowledge("global_topic", "shared memory baseline", 0.8)
+            .await
+            .expect("insert knowledge");
+
+        let list = store
+            .list_knowledge_items(Some("baseline"), 20)
+            .await
+            .expect("list knowledge");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, knowledge_id);
+        assert_eq!(list[0].topic, "global_topic");
+
+        let updated = store
+            .update_knowledge_item(
+                knowledge_id.as_str(),
+                Some("global_topic_updated"),
+                Some("shared memory updated"),
+                Some(0.95),
+            )
+            .await
+            .expect("update knowledge");
+        assert!(updated);
+
+        let list_updated = store
+            .list_knowledge_items(Some("updated"), 20)
+            .await
+            .expect("list updated knowledge");
+        assert_eq!(list_updated.len(), 1);
+        assert_eq!(list_updated[0].topic, "global_topic_updated");
+        assert_eq!(list_updated[0].content, "shared memory updated");
+        assert_eq!(list_updated[0].importance, 0.95);
+
+        let searched = store
+            .search_knowledge("shared memory", 20)
+            .await
+            .expect("search knowledge");
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].0, knowledge_id);
+    }
 }

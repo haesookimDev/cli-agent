@@ -157,6 +157,27 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+export interface SessionMemoryItem {
+  id: string;
+  session_id: string;
+  scope: string;
+  content: string;
+  importance: number;
+  source_refs: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GlobalMemoryItem {
+  id: string;
+  topic: string;
+  content: string;
+  importance: number;
+  access_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Settings Types ---
 
 export interface AppSettings {

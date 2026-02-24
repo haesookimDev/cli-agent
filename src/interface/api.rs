@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use futures::{SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,41 @@ struct StreamQuery {
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryListQuery {
+    limit: Option<usize>,
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSessionMemoryRequest {
+    content: String,
+    scope: Option<String>,
+    importance: Option<f64>,
+    source_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSessionMemoryRequest {
+    content: Option<String>,
+    scope: Option<String>,
+    importance: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateGlobalMemoryRequest {
+    topic: String,
+    content: String,
+    importance: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateGlobalMemoryRequest {
+    topic: Option<String>,
+    content: Option<String>,
+    importance: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +167,22 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/sessions/:session_id/messages",
             get(list_session_messages_handler),
+        )
+        .route(
+            "/v1/memory/sessions/:session_id/items",
+            get(list_session_memory_items_handler).post(create_session_memory_item_handler),
+        )
+        .route(
+            "/v1/memory/items/:memory_id",
+            patch(update_session_memory_item_handler),
+        )
+        .route(
+            "/v1/memory/global/items",
+            get(list_global_memory_items_handler).post(create_global_memory_item_handler),
+        )
+        .route(
+            "/v1/memory/global/items/:knowledge_id",
+            patch(update_global_memory_item_handler),
         )
         .route("/v1/runs/active", get(list_active_runs_handler))
         .route("/v1/runs", post(create_run_handler).get(list_runs_handler))
@@ -442,6 +493,321 @@ async fn list_session_messages_handler(
         Ok(messages) => (
             StatusCode::OK,
             Json(serde_json::to_value(messages).unwrap()),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_session_memory_items_handler(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<MemoryListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let session_id = match Uuid::parse_str(session_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let query_text = query
+        .query
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    match state
+        .orchestrator
+        .list_session_memory_items(session_id, query_text, limit)
+        .await
+    {
+        Ok(items) => (StatusCode::OK, Json(serde_json::to_value(items).unwrap())),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn create_session_memory_item_handler(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let session_id = match Uuid::parse_str(session_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let req = match serde_json::from_slice::<CreateSessionMemoryRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let content = req.content.trim();
+    if content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "content is required"})),
+        );
+    }
+    let scope = req
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual_note");
+    let importance = req.importance.unwrap_or(0.6).clamp(0.0, 1.0);
+    let source_ref = req
+        .source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match state
+        .orchestrator
+        .add_session_memory_item(session_id, scope, content, importance, source_ref)
+        .await
+    {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn update_session_memory_item_handler(
+    State(state): State<ApiState>,
+    Path(memory_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<UpdateSessionMemoryRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let content = req
+        .content
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let scope = req
+        .scope
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let importance = req.importance.map(|v| v.clamp(0.0, 1.0));
+
+    if content.is_none() && scope.is_none() && importance.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no fields to update"})),
+        );
+    }
+
+    match state
+        .orchestrator
+        .update_session_memory_item(
+            memory_id.as_str(),
+            content.as_deref(),
+            importance,
+            scope.as_deref(),
+        )
+        .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "updated"})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "memory item not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_global_memory_items_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<MemoryListQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let query_text = query
+        .query
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    match state
+        .orchestrator
+        .list_global_memory_items(query_text, limit)
+        .await
+    {
+        Ok(items) => (StatusCode::OK, Json(serde_json::to_value(items).unwrap())),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn create_global_memory_item_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<CreateGlobalMemoryRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let topic = req.topic.trim();
+    let content = req.content.trim();
+    if topic.is_empty() || content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "topic and content are required"})),
+        );
+    }
+    let importance = req.importance.unwrap_or(0.7).clamp(0.0, 1.0);
+
+    match state
+        .orchestrator
+        .add_global_memory_item(topic, content, importance)
+        .await
+    {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn update_global_memory_item_handler(
+    State(state): State<ApiState>,
+    Path(knowledge_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let req = match serde_json::from_slice::<UpdateGlobalMemoryRequest>(body.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    let topic = req
+        .topic
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let content = req
+        .content
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let importance = req.importance.map(|v| v.clamp(0.0, 1.0));
+
+    if topic.is_none() && content.is_none() && importance.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no fields to update"})),
+        );
+    }
+
+    match state
+        .orchestrator
+        .update_global_memory_item(
+            knowledge_id.as_str(),
+            topic.as_deref(),
+            content.as_deref(),
+            importance,
+        )
+        .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "updated"})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "global memory item not found"})),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -1,8 +1,9 @@
 "use client";
 
 import { Suspense, useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { apiGet, apiPost, apiDelete } from "@/lib/api-client";
+import { apiGet, apiPost, apiDelete, apiPatch } from "@/lib/api-client";
 import { useRunSSE } from "@/hooks/use-sse";
 import { ChatBubble } from "@/components/chat-bubble";
 import { AgentThinking } from "@/components/agent-thinking";
@@ -11,7 +12,9 @@ import { TerminalPanel } from "@/components/terminal-panel";
 import { getLastSessionId, setLastSessionId } from "@/lib/session-store";
 import type {
   ChatMessage,
+  GlobalMemoryItem,
   SessionSummary,
+  SessionMemoryItem,
   RunSubmission,
   RunActionEvent,
   RunTrace,
@@ -33,6 +36,8 @@ function ChatContent() {
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const [showTerminal, setShowTerminal] = useState(false);
+  const [sessionMemory, setSessionMemory] = useState<SessionMemoryItem[]>([]);
+  const [globalMemory, setGlobalMemory] = useState<GlobalMemoryItem[]>([]);
 
   // Events per run (for timeline display — both SSE and API-loaded)
   const [runEventsMap, setRunEventsMap] = useState<Record<string, RunActionEvent[]>>({});
@@ -84,6 +89,41 @@ function ChatContent() {
       console.error("delete session:", err);
     }
   }, [activeSessionId]);
+
+  const loadGlobalMemory = useCallback(async () => {
+    try {
+      const items = await apiGet<GlobalMemoryItem[]>(
+        "/v1/memory/global/items?limit=8",
+      );
+      setGlobalMemory(items);
+    } catch (err) {
+      console.error("loadGlobalMemory:", err);
+    }
+  }, []);
+
+  const loadSessionMemory = useCallback(async (sid: string) => {
+    try {
+      const items = await apiGet<SessionMemoryItem[]>(
+        `/v1/memory/sessions/${sid}/items?limit=8`,
+      );
+      setSessionMemory(items);
+    } catch (err) {
+      console.error("loadSessionMemory:", err);
+      setSessionMemory([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadGlobalMemory();
+  }, [loadGlobalMemory]);
+
+  useEffect(() => {
+    if (activeSessionId) {
+      loadSessionMemory(activeSessionId);
+    } else {
+      setSessionMemory([]);
+    }
+  }, [activeSessionId, loadSessionMemory]);
 
   // Load messages
   const loadMessages = useCallback(async (sid: string) => {
@@ -155,7 +195,9 @@ function ChatContent() {
       setCurrentRun(null);
       if (activeSessionId) {
         loadMessages(activeSessionId);
+        loadSessionMemory(activeSessionId);
       }
+      loadGlobalMemory();
     }
   }, [terminalStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -220,6 +262,95 @@ function ChatContent() {
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
+    }
+  }
+
+  async function addSessionMemoryNote() {
+    if (!activeSessionId) return;
+    const content = prompt("세션 메모리 내용을 입력하세요");
+    if (!content || !content.trim()) return;
+    const scope = prompt("scope", "manual_note");
+    const importanceInput = prompt("importance (0~1)", "0.6");
+    const importance = Number(importanceInput ?? "0.6");
+    if (!Number.isFinite(importance)) return;
+
+    try {
+      await apiPost(`/v1/memory/sessions/${activeSessionId}/items`, {
+        content: content.trim(),
+        scope: (scope ?? "manual_note").trim() || "manual_note",
+        importance: Math.max(0, Math.min(1, importance)),
+      });
+      loadSessionMemory(activeSessionId);
+    } catch (err) {
+      console.error("addSessionMemoryNote:", err);
+    }
+  }
+
+  async function editSessionMemoryItem(item: SessionMemoryItem) {
+    const content = prompt("세션 메모리 수정", item.content);
+    if (content === null || !content.trim()) return;
+    const scope = prompt("scope", item.scope);
+    if (scope === null || !scope.trim()) return;
+    const importanceInput = prompt("importance (0~1)", String(item.importance));
+    if (importanceInput === null) return;
+    const importance = Number(importanceInput);
+    if (!Number.isFinite(importance)) return;
+
+    try {
+      await apiPatch(`/v1/memory/items/${item.id}`, {
+        content: content.trim(),
+        scope: scope.trim(),
+        importance: Math.max(0, Math.min(1, importance)),
+      });
+      if (activeSessionId) {
+        loadSessionMemory(activeSessionId);
+      }
+    } catch (err) {
+      console.error("editSessionMemoryItem:", err);
+    }
+  }
+
+  async function addGlobalMemoryNote() {
+    const topic = prompt("전역 메모리 topic", "manual");
+    if (topic === null || !topic.trim()) return;
+    const content = prompt("전역 메모리 content");
+    if (content === null || !content.trim()) return;
+    const importanceInput = prompt("importance (0~1)", "0.7");
+    if (importanceInput === null) return;
+    const importance = Number(importanceInput);
+    if (!Number.isFinite(importance)) return;
+
+    try {
+      await apiPost("/v1/memory/global/items", {
+        topic: topic.trim(),
+        content: content.trim(),
+        importance: Math.max(0, Math.min(1, importance)),
+      });
+      loadGlobalMemory();
+    } catch (err) {
+      console.error("addGlobalMemoryNote:", err);
+    }
+  }
+
+  async function editGlobalMemoryItem(item: GlobalMemoryItem) {
+    const topic = prompt("전역 메모리 topic 수정", item.topic);
+    if (topic === null || !topic.trim()) return;
+    const content = prompt("전역 메모리 content 수정", item.content);
+    if (content === null || !content.trim()) return;
+    const importanceInput = prompt("importance (0~1)", String(item.importance));
+    if (importanceInput === null) return;
+    const importance = Number(importanceInput);
+    if (!Number.isFinite(importance)) return;
+
+    try {
+      await apiPatch(`/v1/memory/global/items/${item.id}`, {
+        topic: topic.trim(),
+        content: content.trim(),
+        importance: Math.max(0, Math.min(1, importance)),
+      });
+      loadGlobalMemory();
+    } catch (err) {
+      console.error("editGlobalMemoryItem:", err);
     }
   }
 
@@ -379,6 +510,92 @@ function ChatContent() {
               </button>
             </div>
           ))}
+        </div>
+
+        {activeSessionId && (
+          <div className="border-t border-slate-100 p-2">
+            <div className="mb-1 flex items-center justify-between">
+              <h4 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Session Memory
+              </h4>
+              <button
+                onClick={addSessionMemoryNote}
+                className="rounded border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-600 hover:bg-slate-50"
+              >
+                Add
+              </button>
+            </div>
+            <div className="space-y-1">
+              {sessionMemory.length === 0 ? (
+                <div className="text-[10px] text-slate-400">No session memory</div>
+              ) : (
+                sessionMemory.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => editSessionMemoryItem(item)}
+                    className="w-full rounded border border-slate-200 bg-slate-50 p-2 text-left hover:bg-slate-100"
+                  >
+                    <div className="mb-0.5 flex items-center gap-1">
+                      <span className="rounded bg-slate-200 px-1 py-0.5 text-[9px] text-slate-600">
+                        {item.scope}
+                      </span>
+                      <span className="text-[9px] text-slate-400">
+                        {item.importance.toFixed(2)}
+                      </span>
+                    </div>
+                    <p className="line-clamp-2 whitespace-pre-wrap text-[10px] text-slate-700">
+                      {item.content}
+                    </p>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="border-t border-slate-100 p-2">
+          <div className="mb-1 flex items-center justify-between">
+            <h4 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              Global Memory
+            </h4>
+            <button
+              onClick={addGlobalMemoryNote}
+              className="rounded border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-600 hover:bg-slate-50"
+            >
+              Add
+            </button>
+          </div>
+          <div className="space-y-1">
+            {globalMemory.length === 0 ? (
+              <div className="text-[10px] text-slate-400">No global memory</div>
+            ) : (
+              globalMemory.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => editGlobalMemoryItem(item)}
+                  className="w-full rounded border border-slate-200 bg-slate-50 p-2 text-left hover:bg-slate-100"
+                >
+                  <div className="mb-0.5 flex items-center gap-1">
+                    <span className="rounded bg-teal-50 px-1 py-0.5 text-[9px] text-teal-700">
+                      {item.topic}
+                    </span>
+                    <span className="text-[9px] text-slate-400">
+                      {item.importance.toFixed(2)}
+                    </span>
+                  </div>
+                  <p className="line-clamp-2 whitespace-pre-wrap text-[10px] text-slate-700">
+                    {item.content}
+                  </p>
+                </button>
+              ))
+            )}
+          </div>
+          <Link
+            href="/memory"
+            className="mt-2 block text-[10px] text-teal-600 hover:underline"
+          >
+            Open full memory page
+          </Link>
         </div>
       </div>
 
