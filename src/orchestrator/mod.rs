@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -220,6 +220,10 @@ impl Orchestrator {
         self.memory
             .update_session_memory_item(memory_id, content, importance, scope)
             .await
+    }
+
+    pub async fn delete_session_memory_item(&self, memory_id: &str) -> anyhow::Result<bool> {
+        self.memory.delete_session_memory_item(memory_id).await
     }
 
     pub async fn list_global_memory_items(
@@ -3206,12 +3210,10 @@ mod tests {
 
         let graph = build_trace_graph(&run, events.as_slice());
         assert_eq!(graph.nodes.len(), 2);
-        assert!(
-            graph
-                .edges
-                .iter()
-                .any(|e| e.from == "plan" && e.to == "code")
-        );
+        assert!(graph
+            .edges
+            .iter()
+            .any(|e| e.from == "plan" && e.to == "code"));
 
         let code = graph
             .nodes

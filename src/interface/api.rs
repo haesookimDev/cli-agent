@@ -12,7 +12,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use futures::{SinkExt, stream::StreamExt};
+use futures::{stream::StreamExt, SinkExt};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -174,7 +174,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/v1/memory/items/:memory_id",
-            patch(update_session_memory_item_handler),
+            patch(update_session_memory_item_handler).delete(delete_session_memory_item_handler),
         )
         .route(
             "/v1/memory/global/items",
@@ -662,6 +662,38 @@ async fn update_session_memory_item_handler(
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "updated"})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "memory item not found"})),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn delete_session_memory_item_handler(
+    State(state): State<ApiState>,
+    Path(memory_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    match state
+        .orchestrator
+        .delete_session_memory_item(memory_id.as_str())
+        .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
         ),
         Ok(false) => (
             StatusCode::NOT_FOUND,

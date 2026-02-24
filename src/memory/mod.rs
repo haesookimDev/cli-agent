@@ -169,6 +169,10 @@ impl MemoryManager {
             .await
     }
 
+    pub async fn delete_session_memory_item(&self, memory_id: &str) -> anyhow::Result<bool> {
+        self.store.delete_memory_item(memory_id).await
+    }
+
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
         self.store.delete_session(session_id).await?;
         self.short_term.remove(&session_id);

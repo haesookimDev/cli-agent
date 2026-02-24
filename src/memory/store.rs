@@ -931,6 +931,33 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
+    pub async fn delete_memory_item(&self, memory_id: &str) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM memory_links
+            WHERE memory_item_id = ?1
+            "#,
+        )
+        .bind(memory_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query(
+            r#"
+            DELETE FROM memory_items
+            WHERE id = ?1
+            "#,
+        )
+        .bind(memory_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn register_webhook(
         &self,
         url: &str,
@@ -1688,7 +1715,10 @@ mod tests {
             .await
             .expect("store");
         let session_id = Uuid::new_v4();
-        store.create_session(session_id).await.expect("create session");
+        store
+            .create_session(session_id)
+            .await
+            .expect("create session");
 
         let memory_id = store
             .insert_memory_item(session_id, "agent_output", "tool result alpha", 0.7)
@@ -1727,6 +1757,24 @@ mod tests {
         assert_eq!(list_updated[0].scope, "manual_note");
         assert_eq!(list_updated[0].importance, 0.9);
         assert_eq!(list_updated[0].content, "updated memory body");
+
+        let deleted = store
+            .delete_memory_item(memory_id.as_str())
+            .await
+            .expect("delete memory");
+        assert!(deleted);
+
+        let list_after_delete = store
+            .list_session_memory_items(session_id, None, 20)
+            .await
+            .expect("list after delete");
+        assert!(list_after_delete.is_empty());
+
+        let deleted_missing = store
+            .delete_memory_item(memory_id.as_str())
+            .await
+            .expect("delete missing memory");
+        assert!(!deleted_missing);
     }
 
     #[tokio::test]

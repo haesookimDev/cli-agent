@@ -38,6 +38,18 @@ function ChatContent() {
   const [showTerminal, setShowTerminal] = useState(false);
   const [sessionMemory, setSessionMemory] = useState<SessionMemoryItem[]>([]);
   const [globalMemory, setGlobalMemory] = useState<GlobalMemoryItem[]>([]);
+  const [editingSessionMemoryItem, setEditingSessionMemoryItem] =
+    useState<SessionMemoryItem | null>(null);
+  const [sessionMemoryModalContent, setSessionMemoryModalContent] = useState("");
+  const [sessionMemoryModalScope, setSessionMemoryModalScope] = useState("");
+  const [sessionMemoryModalImportance, setSessionMemoryModalImportance] =
+    useState("0.6");
+  const [sessionMemoryModalSaving, setSessionMemoryModalSaving] = useState(false);
+  const [sessionMemoryModalDeleting, setSessionMemoryModalDeleting] =
+    useState(false);
+  const [sessionMemoryModalError, setSessionMemoryModalError] = useState<
+    string | null
+  >(null);
 
   // Events per run (for timeline display — both SSE and API-loaded)
   const [runEventsMap, setRunEventsMap] = useState<Record<string, RunActionEvent[]>>({});
@@ -286,27 +298,74 @@ function ChatContent() {
     }
   }
 
-  async function editSessionMemoryItem(item: SessionMemoryItem) {
-    const content = prompt("세션 메모리 수정", item.content);
-    if (content === null || !content.trim()) return;
-    const scope = prompt("scope", item.scope);
-    if (scope === null || !scope.trim()) return;
-    const importanceInput = prompt("importance (0~1)", String(item.importance));
-    if (importanceInput === null) return;
-    const importance = Number(importanceInput);
-    if (!Number.isFinite(importance)) return;
+  function editSessionMemoryItem(item: SessionMemoryItem) {
+    setEditingSessionMemoryItem(item);
+    setSessionMemoryModalContent(item.content);
+    setSessionMemoryModalScope(item.scope);
+    setSessionMemoryModalImportance(item.importance.toFixed(2));
+    setSessionMemoryModalError(null);
+  }
 
+  function closeSessionMemoryModal() {
+    if (sessionMemoryModalSaving || sessionMemoryModalDeleting) return;
+    setEditingSessionMemoryItem(null);
+    setSessionMemoryModalError(null);
+  }
+
+  async function saveSessionMemoryItemFromModal() {
+    if (!editingSessionMemoryItem) return;
+    const content = sessionMemoryModalContent.trim();
+    const scope = sessionMemoryModalScope.trim();
+    const importance = Number(sessionMemoryModalImportance);
+    if (!content) {
+      setSessionMemoryModalError("content is required");
+      return;
+    }
+    if (!scope) {
+      setSessionMemoryModalError("scope is required");
+      return;
+    }
+    if (!Number.isFinite(importance)) {
+      setSessionMemoryModalError("importance must be a number");
+      return;
+    }
+
+    setSessionMemoryModalSaving(true);
+    setSessionMemoryModalError(null);
     try {
-      await apiPatch(`/v1/memory/items/${item.id}`, {
-        content: content.trim(),
-        scope: scope.trim(),
+      await apiPatch(`/v1/memory/items/${editingSessionMemoryItem.id}`, {
+        content,
+        scope,
         importance: Math.max(0, Math.min(1, importance)),
       });
       if (activeSessionId) {
-        loadSessionMemory(activeSessionId);
+        await loadSessionMemory(activeSessionId);
       }
+      setEditingSessionMemoryItem(null);
     } catch (err) {
-      console.error("editSessionMemoryItem:", err);
+      console.error("saveSessionMemoryItemFromModal:", err);
+      setSessionMemoryModalError("failed to update memory item");
+    } finally {
+      setSessionMemoryModalSaving(false);
+    }
+  }
+
+  async function deleteSessionMemoryItemFromModal() {
+    if (!editingSessionMemoryItem) return;
+    if (!confirm("Delete this session memory item?")) return;
+    setSessionMemoryModalDeleting(true);
+    setSessionMemoryModalError(null);
+    try {
+      await apiDelete(`/v1/memory/items/${editingSessionMemoryItem.id}`);
+      if (activeSessionId) {
+        await loadSessionMemory(activeSessionId);
+      }
+      setEditingSessionMemoryItem(null);
+    } catch (err) {
+      console.error("deleteSessionMemoryItemFromModal:", err);
+      setSessionMemoryModalError("failed to delete memory item");
+    } finally {
+      setSessionMemoryModalDeleting(false);
     }
   }
 
@@ -353,6 +412,22 @@ function ChatContent() {
       console.error("editGlobalMemoryItem:", err);
     }
   }
+
+  useEffect(() => {
+    if (!editingSessionMemoryItem) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (sessionMemoryModalSaving || sessionMemoryModalDeleting) return;
+        setEditingSessionMemoryItem(null);
+        setSessionMemoryModalError(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [editingSessionMemoryItem, sessionMemoryModalSaving, sessionMemoryModalDeleting]);
 
   const activeSessionIds = new Set(
     sessions
@@ -445,9 +520,10 @@ function ChatContent() {
   }, [messages, runEventsMap, currentRun, events, isRunning, terminalStatus, toolCallsByRunId]);
 
   return (
-    <div className="flex h-full min-h-0 gap-4">
+    <>
+      <div className="flex h-full min-h-0 gap-4">
       {/* Session sidebar */}
-      <div className="flex w-56 min-h-0 shrink-0 flex-col rounded-xl border border-slate-200 bg-white">
+        <div className="flex w-56 min-h-0 shrink-0 flex-col rounded-xl border border-slate-200 bg-white">
         <div className="border-b border-slate-100 px-3 py-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
             Sessions
@@ -597,10 +673,10 @@ function ChatContent() {
             Open full memory page
           </Link>
         </div>
-      </div>
+        </div>
 
       {/* Chat area */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white">
         <div
           ref={scrollRef}
           className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4"
@@ -699,8 +775,118 @@ function ChatContent() {
             {submitting ? "..." : "Send"}
           </button>
         </form>
+        </div>
       </div>
-    </div>
+
+      {editingSessionMemoryItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
+          onClick={closeSessionMemoryModal}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-800">
+                  Edit Session Memory
+                </h3>
+                <p className="text-xs text-slate-400">
+                  {editingSessionMemoryItem.id.slice(0, 12)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeSessionMemoryModal}
+                className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                disabled={sessionMemoryModalSaving || sessionMemoryModalDeleting}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <div>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                  Scope
+                </label>
+                <input
+                  value={sessionMemoryModalScope}
+                  onChange={(e) => setSessionMemoryModalScope(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                  Importance (0~1)
+                </label>
+                <input
+                  value={sessionMemoryModalImportance}
+                  onChange={(e) => setSessionMemoryModalImportance(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                  Content
+                </label>
+                <textarea
+                  value={sessionMemoryModalContent}
+                  onChange={(e) => setSessionMemoryModalContent(e.target.value)}
+                  rows={6}
+                  className="w-full resize-y rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+                />
+              </div>
+
+              <div className="text-[11px] text-slate-400">
+                Updated:{" "}
+                {new Date(editingSessionMemoryItem.updated_at).toLocaleString()}
+              </div>
+
+              {sessionMemoryModalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
+                  {sessionMemoryModalError}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={deleteSessionMemoryItemFromModal}
+                className="rounded-lg border border-red-300 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                disabled={sessionMemoryModalSaving || sessionMemoryModalDeleting}
+              >
+                {sessionMemoryModalDeleting ? "Deleting..." : "Delete"}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeSessionMemoryModal}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                  disabled={sessionMemoryModalSaving || sessionMemoryModalDeleting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveSessionMemoryItemFromModal}
+                  className="rounded-lg bg-teal-600 px-3 py-2 text-xs font-medium text-white hover:bg-teal-700 disabled:opacity-50"
+                  disabled={sessionMemoryModalSaving || sessionMemoryModalDeleting}
+                >
+                  {sessionMemoryModalSaving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
