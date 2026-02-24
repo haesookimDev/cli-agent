@@ -14,8 +14,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-stone-100 text-slate-900 antialiased">
-        <div className="mx-auto max-w-6xl px-4 py-4">
+      <body className="h-screen overflow-hidden bg-stone-100 text-slate-900 antialiased">
+        <div className="mx-auto flex h-full max-w-6xl flex-col px-4 py-4">
           <header className="mb-4 flex items-center justify-between rounded-2xl border border-black/10 bg-white/80 px-5 py-3 backdrop-blur">
             <h1 className="text-xl font-bold tracking-tight">
               Agent Orchestrator
@@ -23,7 +23,7 @@ export default function RootLayout({
             <span className="text-xs text-slate-400">v0.1.0</span>
           </header>
           <Nav />
-          <main>{children}</main>
+          <main className="min-h-0 flex-1">{children}</main>
         </div>
       </body>
     </html>
