@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -986,6 +986,175 @@ impl Orchestrator {
         is_complete
     }
 
+    fn has_explicit_remote_repo_reference(task: &str) -> bool {
+        let lower = task.to_lowercase();
+        let remote_markers = [
+            "github",
+            "gitlab",
+            "bitbucket",
+            "http://",
+            "https://",
+            "owner/repo",
+            "repository url",
+            "remote repo",
+        ];
+        remote_markers.iter().any(|kw| lower.contains(kw))
+    }
+
+    fn is_local_workspace_task(task: &str) -> bool {
+        let lower = task.to_lowercase();
+        let local_markers = [
+            "로컬",
+            "local",
+            "workspace",
+            "현재 폴더",
+            "현재 디렉토리",
+            "this project",
+            "this repo",
+            "프로젝트 폴더",
+            "경로",
+            "파일",
+            "readme.md",
+        ];
+
+        local_markers.iter().any(|kw| lower.contains(kw))
+            && !Self::has_explicit_remote_repo_reference(lower.as_str())
+    }
+
+    fn looks_like_follow_up_task(task: &str) -> bool {
+        let lower = task.trim().to_lowercase();
+        let token_count = lower.split_whitespace().count();
+        if token_count <= 5 {
+            return true;
+        }
+
+        let follow_up_markers = [
+            "그거",
+            "이거",
+            "저거",
+            "거기",
+            "로컬에",
+            "local",
+            "that",
+            "it",
+            "there",
+            "맞아",
+            "응",
+            "계속",
+            "이어서",
+        ];
+        follow_up_markers.iter().any(|kw| lower.contains(kw))
+    }
+
+    fn build_memory_query(
+        current_task: &str,
+        recent_messages: &[(i64, String, String, String)],
+    ) -> String {
+        let current = current_task.trim();
+        if current.is_empty() {
+            return String::new();
+        }
+
+        if !Self::looks_like_follow_up_task(current) {
+            return current.to_string();
+        }
+
+        let previous_user_message =
+            recent_messages
+                .iter()
+                .rev()
+                .find_map(|(_, role, content, _)| {
+                    if role == "user" && content.trim() != current {
+                        Some(content.trim().to_string())
+                    } else {
+                        None
+                    }
+                });
+
+        match previous_user_message {
+            Some(prev) if !prev.is_empty() => format!("{current} {prev}"),
+            _ => current.to_string(),
+        }
+    }
+
+    fn build_recent_history_chunks(
+        recent_messages: &[(i64, String, String, String)],
+        current_task: &str,
+    ) -> Vec<ContextChunk> {
+        let current = current_task.trim();
+        let mut selected = Vec::new();
+
+        for (_, role, content, _) in recent_messages.iter().rev() {
+            if role != "user" {
+                continue;
+            }
+            let trimmed = content.trim();
+            if trimmed.is_empty() || trimmed == current {
+                continue;
+            }
+            selected.push(trimmed.to_string());
+            if selected.len() >= 4 {
+                break;
+            }
+        }
+
+        selected.reverse();
+        selected
+            .into_iter()
+            .enumerate()
+            .map(|(idx, content)| ContextChunk {
+                id: format!("history-user-{idx}"),
+                scope: ContextScope::SessionShared,
+                kind: ContextKind::History,
+                content: format!("Previous user message: {content}"),
+                priority: 0.75 - (idx as f64 * 0.03),
+            })
+            .collect()
+    }
+
+    fn build_recent_run_summary(current_run_id: Uuid, runs: &[RunRecord]) -> Option<String> {
+        let previous = runs
+            .iter()
+            .find(|run| run.run_id != current_run_id && !run.outputs.is_empty())?;
+
+        let primary_output = previous
+            .outputs
+            .iter()
+            .find(|o| o.role == AgentRole::Summarizer && !o.output.trim().is_empty())
+            .or_else(|| {
+                previous
+                    .outputs
+                    .iter()
+                    .find(|o| !o.output.trim().is_empty())
+            })?;
+
+        Some(format!(
+            "Previous run task: {}\nPrevious run outcome: {}",
+            Self::trim_for_context(previous.task.as_str(), 220),
+            Self::trim_for_context(primary_output.output.as_str(), 420)
+        ))
+    }
+
+    fn trim_for_context(text: &str, max_chars: usize) -> String {
+        let normalized = text.trim();
+        if normalized.chars().count() <= max_chars {
+            return normalized.to_string();
+        }
+
+        let head_len = max_chars / 2;
+        let tail_len = max_chars.saturating_sub(head_len);
+        let head = normalized.chars().take(head_len).collect::<String>();
+        let tail = normalized
+            .chars()
+            .rev()
+            .take(tail_len)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        format!("{head}\n... [trimmed] ...\n{tail}")
+    }
+
     fn classify_task(
         task: &str,
         mcp_server_names: &[String],
@@ -1131,10 +1300,15 @@ impl Orchestrator {
             } else {
                 String::new()
             };
+            let local_first_hint = if Self::is_local_workspace_task(task) {
+                "\nLocal-first policy: if user intent points to local files/project workspace, prioritize filesystem tools and local paths before remote repository APIs."
+            } else {
+                ""
+            };
             format!(
                 "Plan work and constraints. Available MCP tools: [{}]. \
-                 If the task requires external data or operations, plan to use these tools via the tool_call node.{}",
-                tool_summary, guide
+                 If the task requires external data or operations, plan to use these tools via the tool_call node.{}{}",
+                tool_summary, guide, local_first_hint
             )
         } else {
             "Plan work and constraints.".to_string()
@@ -1378,13 +1552,18 @@ impl Orchestrator {
                     } else {
                         String::new()
                     };
+                    let local_first_hint = if Self::is_local_workspace_task(req.task.as_str()) {
+                        "\n\nLOCAL-WORKSPACE RULE:\n- If the task refers to local files/project folders, choose filesystem/* tools first.\n- Use github/* only when the user explicitly requests remote repository operations."
+                    } else {
+                        ""
+                    };
 
                     // Phase B: LLM decides which tool(s) to call
                     let selection_prompt = format!(
                         "You are the tool caller agent.\n\n\
                          USER TASK:\n{}\n\n\
                          PLANNER OUTPUT:\n{}\n\n\
-                         AVAILABLE MCP TOOLS:\n{}{}\n\n\
+                         AVAILABLE MCP TOOLS:\n{}{}{}\n\n\
                          Based on the planner output, select which tool(s) to call.\n\
                          Respond ONLY with a JSON array. Each element: \
                          {{\"tool_name\": \"server/tool_name\", \"arguments\": {{...}}}}\n\
@@ -1393,6 +1572,7 @@ impl Orchestrator {
                         dep_outputs.join("\n---\n"),
                         tool_list_str,
                         server_guide,
+                        local_first_hint,
                     );
 
                     let optimized = context.optimize(vec![]);
@@ -1526,14 +1706,24 @@ impl Orchestrator {
                     .map(|d| format!("{}: {}", d.node_id, d.output))
                     .collect::<Vec<_>>();
 
+                let recent_messages = memory
+                    .list_session_messages(session_id, 10)
+                    .await
+                    .unwrap_or_default();
+                let mut recent_history_chunks =
+                    Self::build_recent_history_chunks(&recent_messages, req.task.as_str());
+                let memory_query = Self::build_memory_query(req.task.as_str(), &recent_messages);
                 let memory_hits = memory
-                    .retrieve(session_id, req.task.as_str(), 8)
+                    .retrieve(session_id, memory_query.as_str(), 8)
                     .await
                     .unwrap_or_default();
                 let global_hits = memory
                     .search_knowledge(req.task.as_str(), 4)
                     .await
                     .unwrap_or_default();
+                let recent_runs = memory.list_session_runs(session_id, 4).await.unwrap_or_default();
+                let recent_run_summary = Self::build_recent_run_summary(run_id, &recent_runs);
+                let local_workspace_task = Self::is_local_workspace_task(req.task.as_str());
 
                 let mut chunks = vec![
                     ContextChunk {
@@ -1552,6 +1742,16 @@ impl Orchestrator {
                     },
                 ];
 
+                if local_workspace_task {
+                    chunks.push(ContextChunk {
+                        id: "hint-local-workspace".to_string(),
+                        scope: ContextScope::SessionShared,
+                        kind: ContextKind::Instructions,
+                        content: "Task likely targets local workspace files. Prefer filesystem tools and local paths first; use remote repository tools only when explicitly requested.".to_string(),
+                        priority: 0.93,
+                    });
+                }
+
                 for (idx, output) in dep_outputs.iter().enumerate() {
                     chunks.push(ContextChunk {
                         id: format!("dep-{idx}"),
@@ -1559,6 +1759,18 @@ impl Orchestrator {
                         kind: ContextKind::History,
                         content: output.clone(),
                         priority: 0.8,
+                    });
+                }
+
+                chunks.append(&mut recent_history_chunks);
+
+                if let Some(summary) = recent_run_summary {
+                    chunks.push(ContextChunk {
+                        id: "history-prev-run".to_string(),
+                        scope: ContextScope::SessionShared,
+                        kind: ContextKind::History,
+                        content: summary,
+                        priority: 0.78,
                     });
                 }
 
@@ -3210,10 +3422,12 @@ mod tests {
 
         let graph = build_trace_graph(&run, events.as_slice());
         assert_eq!(graph.nodes.len(), 2);
-        assert!(graph
-            .edges
-            .iter()
-            .any(|e| e.from == "plan" && e.to == "code"));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "plan" && e.to == "code")
+        );
 
         let code = graph
             .nodes
