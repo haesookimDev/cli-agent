@@ -193,6 +193,8 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
   const role = node.role ?? node.nodeId;
   const label = roleLabels[role] ?? role;
   const dotColor = isFailed ? "bg-red-500" : (roleColors[role] ?? "bg-slate-500");
+  const tokenText = node.tokens.trim();
+  const showEmptyState = node.toolCalls.length === 0 && tokenText.length === 0;
 
   const preview = node.tokens
     ? node.tokens.split("\n").find((l) => l.trim().length > 0)?.trim().slice(0, 80) ?? ""
@@ -254,11 +256,19 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
             </div>
           )}
 
-          {node.tokens && (
+          {tokenText && (
             <div className={`max-h-64 overflow-y-auto text-xs ${mdClasses}`}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {node.tokens}
+                {tokenText}
               </ReactMarkdown>
+            </div>
+          )}
+
+          {showEmptyState && (
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+              {role === "tool_caller"
+                ? "No recorded MCP tool call events for this node."
+                : "No streamed tokens were recorded for this node."}
             </div>
           )}
         </div>

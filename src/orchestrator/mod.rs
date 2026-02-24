@@ -1620,15 +1620,17 @@ impl Orchestrator {
                         .unwrap_or(llm_output.trim())
                         .trim();
 
-                    let tool_calls: Vec<serde_json::Value> =
-                        serde_json::from_str(json_str).unwrap_or_default();
+                    let tool_calls = parse_tool_calls(json_str);
 
                     if tool_calls.is_empty() {
                         return Ok(NodeExecutionResult {
                             node_id: node.id,
                             role: node.role,
                             model: "mcp:none".to_string(),
-                            output: llm_output,
+                            output: format!(
+                                "No executable tool calls were parsed.\nRaw selector output:\n{}",
+                                llm_output
+                            ),
                             duration_ms: started.elapsed().as_millis(),
                             succeeded: true,
                             error: None,
@@ -3256,6 +3258,64 @@ fn parse_agent_role(value: &str) -> Option<AgentRole> {
     }
 }
 
+fn parse_tool_calls(raw: &str) -> Vec<serde_json::Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut parsed = Vec::<serde_json::Value>::new();
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        collect_tool_calls(value, &mut parsed);
+    } else {
+        let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+        for value in stream.flatten() {
+            collect_tool_calls(value, &mut parsed);
+        }
+    }
+
+    let mut seen = HashSet::<String>::new();
+    let mut deduped = Vec::new();
+    for call in parsed {
+        let tool_name = call
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if tool_name.is_empty() {
+            continue;
+        }
+
+        let key = serde_json::json!({
+            "tool_name": tool_name,
+            "arguments": call.get("arguments").cloned().unwrap_or(serde_json::json!({})),
+        })
+        .to_string();
+        if seen.insert(key) {
+            deduped.push(call);
+        }
+    }
+
+    deduped
+}
+
+fn collect_tool_calls(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for item in values {
+                collect_tool_calls(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if map.contains_key("tool_name") {
+                out.push(serde_json::Value::Object(map));
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -3619,5 +3679,34 @@ mod tests {
         ];
 
         assert_eq!(compute_peak_parallelism(lanes.as_slice()), 3);
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_concatenated_arrays_and_dedupes() {
+        let raw = r#"[{"tool_name":"filesystem/list_allowed_directories","arguments":{}}]
+[{"tool_name":"filesystem/list_allowed_directories","arguments":{}}]
+{"tool_name":"filesystem/read_text_file","arguments":{"path":"README.md"}}"#;
+
+        let calls = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].get("tool_name").and_then(|v| v.as_str()),
+            Some("filesystem/list_allowed_directories")
+        );
+        assert_eq!(
+            calls[1].get("tool_name").and_then(|v| v.as_str()),
+            Some("filesystem/read_text_file")
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_accepts_single_object() {
+        let raw = r#"{"tool_name":"filesystem/list_directory","arguments":{"path":"."}}"#;
+        let calls = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("tool_name").and_then(|v| v.as_str()),
+            Some("filesystem/list_directory")
+        );
     }
 }
