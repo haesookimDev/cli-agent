@@ -54,41 +54,60 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
   const nodes = new Map<string, NodeTimeline>();
   const order: string[] = [];
 
+  const ensureNode = (nodeId: string, roleHint?: string | null): NodeTimeline | null => {
+    const id = nodeId.trim();
+    if (!id) return null;
+    let node = nodes.get(id);
+    if (!node) {
+      node = {
+        nodeId: id,
+        role: roleHint ?? null,
+        model: null,
+        status: "active",
+        tokens: "",
+        toolCalls: [],
+        startedAt: null,
+      };
+      nodes.set(id, node);
+      order.push(id);
+    } else if (!node.role && roleHint) {
+      node.role = roleHint;
+    }
+    return node;
+  };
+
   for (const ev of events) {
     const p = ev.payload as Record<string, unknown>;
 
-    if (ev.action === "node_started" && ev.actor_id) {
-      if (!nodes.has(ev.actor_id)) {
-        order.push(ev.actor_id);
-        nodes.set(ev.actor_id, {
-          nodeId: ev.actor_id,
-          role: (p.role as string) ?? null,
-          model: null,
-          status: "active",
-          tokens: "",
-          toolCalls: [],
-          startedAt: ev.timestamp,
-        });
+    if (ev.action === "node_started") {
+      const nodeId = ((p.node_id as string) ?? ev.actor_id ?? "").trim();
+      const role = (p.role as string) ?? null;
+      const node = ensureNode(nodeId, role);
+      if (node) {
+        node.status = "active";
+        if (!node.startedAt) node.startedAt = ev.timestamp;
       }
     }
 
     if (ev.action === "node_token_chunk") {
       const nodeId = (p.node_id as string) ?? ev.actor_id ?? "";
       const token = (p.token as string) ?? "";
-      const node = nodes.get(nodeId);
+      const role = (p.role as string) ?? null;
+      const node = ensureNode(nodeId, role);
       if (node) node.tokens += token;
     }
 
     if (ev.action === "model_selected") {
       const nodeId = (p.node_id as string) ?? ev.actor_id ?? "";
       const model = (p.model as string) ?? (p.model_id as string) ?? null;
-      const node = nodes.get(nodeId);
+      const role = (p.role as string) ?? null;
+      const node = ensureNode(nodeId, role);
       if (node && model) node.model = model;
     }
 
     if (ev.action === "mcp_tool_called") {
       const nodeId = (p.node_id as string) ?? ev.actor_id ?? "";
-      const node = nodes.get(nodeId);
+      const node = ensureNode(nodeId);
       if (node) {
         node.toolCalls.push({
           tool_name: (p.tool_name as string) ?? "unknown",
@@ -103,13 +122,29 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
       }
     }
 
-    if (ev.action === "node_completed" && ev.actor_id) {
-      const node = nodes.get(ev.actor_id);
-      if (node) node.status = "completed";
+    if (ev.action === "node_completed") {
+      const nodeId = ((p.node_id as string) ?? ev.actor_id ?? "").trim();
+      const role = (p.role as string) ?? null;
+      const node = ensureNode(nodeId, role);
+      if (node) {
+        node.status = "completed";
+        const model = (p.model as string) ?? null;
+        if (model) node.model = model;
+
+        const outputPreview = (p.output_preview as string) ?? "";
+        const outputTruncated = p.output_truncated === true;
+        if (outputPreview && node.tokens.trim().length === 0) {
+          node.tokens = outputTruncated
+            ? `${outputPreview}\n\n...[truncated]`
+            : outputPreview;
+        }
+      }
     }
 
-    if (ev.action === "node_failed" && ev.actor_id) {
-      const node = nodes.get(ev.actor_id);
+    if (ev.action === "node_failed") {
+      const nodeId = ((p.node_id as string) ?? ev.actor_id ?? "").trim();
+      const role = (p.role as string) ?? null;
+      const node = ensureNode(nodeId, role);
       if (node) node.status = "failed";
     }
   }
@@ -195,6 +230,10 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
   const dotColor = isFailed ? "bg-red-500" : (roleColors[role] ?? "bg-slate-500");
   const tokenText = node.tokens.trim();
   const showEmptyState = node.toolCalls.length === 0 && tokenText.length === 0;
+  const toolCallerNoExec =
+    role === "tool_caller" &&
+    node.toolCalls.length === 0 &&
+    (node.model?.startsWith("mcp:none") ?? false);
 
   const preview = node.tokens
     ? node.tokens.split("\n").find((l) => l.trim().length > 0)?.trim().slice(0, 80) ?? ""
@@ -261,6 +300,12 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {tokenText}
               </ReactMarkdown>
+            </div>
+          )}
+
+          {toolCallerNoExec && (
+            <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              Tool selector output was produced, but no executable MCP tool call event was recorded (`mcp:none`).
             </div>
           )}
 

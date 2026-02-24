@@ -33,6 +33,10 @@ pub enum RuntimeEvent {
     NodeCompleted {
         node_id: String,
         role: AgentRole,
+        model: String,
+        duration_ms: u128,
+        output_preview: String,
+        output_truncated: bool,
     },
     NodeFailed {
         node_id: String,
@@ -55,6 +59,21 @@ pub enum RuntimeEvent {
         token: String,
     },
     GraphCompleted,
+}
+
+const NODE_OUTPUT_PREVIEW_CHARS: usize = 8_192;
+
+fn truncate_for_event(value: &str, max_chars: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in value.chars() {
+        if count >= max_chars {
+            return (out, true);
+        }
+        out.push(ch);
+        count += 1;
+    }
+    (out, false)
 }
 
 pub type RunNodeFn = Arc<
@@ -191,9 +210,15 @@ impl AgentRuntime {
                         outputs.insert(node.id.clone(), ok.clone());
 
                         if let Some(sink) = &on_event {
+                            let (output_preview, output_truncated) =
+                                truncate_for_event(ok.output.as_str(), NODE_OUTPUT_PREVIEW_CHARS);
                             sink(RuntimeEvent::NodeCompleted {
                                 node_id: node.id.clone(),
                                 role: node.role,
+                                model: ok.model.clone(),
+                                duration_ms: ok.duration_ms,
+                                output_preview,
+                                output_truncated,
                             });
                         }
 

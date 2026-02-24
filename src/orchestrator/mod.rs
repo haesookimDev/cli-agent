@@ -2062,10 +2062,21 @@ impl Orchestrator {
                         "role": role,
                         "phase": "started"
                     }),
-                    RuntimeEvent::NodeCompleted { node_id, role } => serde_json::json!({
+                    RuntimeEvent::NodeCompleted {
+                        node_id,
+                        role,
+                        model,
+                        duration_ms,
+                        output_preview,
+                        output_truncated,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "role": role,
-                        "phase": "completed"
+                        "phase": "completed",
+                        "model": model,
+                        "duration_ms": duration_ms,
+                        "output_preview": output_preview,
+                        "output_truncated": output_truncated,
                     }),
                     RuntimeEvent::NodeFailed {
                         node_id,
@@ -2707,6 +2718,16 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
                         .get("role")
                         .and_then(|v| v.as_str())
                         .and_then(parse_agent_role);
+                    let model = event
+                        .payload
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    let duration_ms = event
+                        .payload
+                        .get("duration_ms")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u128);
                     let node = nodes.entry(node_id.to_string()).or_insert(NodeTraceState {
                         node_id: node_id.to_string(),
                         role,
@@ -2722,6 +2743,12 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
                     node.finished_at = Some(event.timestamp);
                     if node.role.is_none() {
                         node.role = role;
+                    }
+                    if node.model.is_none() {
+                        node.model = model;
+                    }
+                    if node.duration_ms.is_none() {
+                        node.duration_ms = duration_ms;
                     }
                 }
             }
