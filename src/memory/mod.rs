@@ -241,10 +241,29 @@ impl MemoryManager {
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryHit>> {
+        let follow_up_bias = looks_like_short_follow_up(query);
         let mut long_hits = self
             .store
             .search_memory(session_id, query, limit * 2)
             .await?;
+
+        // For short follow-up turns, lexical search can miss relevant prior context.
+        // In that case, backfill with recent session memories as low-confidence candidates.
+        if long_hits.is_empty() && follow_up_bias {
+            let recent = self
+                .store
+                .list_session_memory_items(session_id, None, limit * 3)
+                .await?;
+            for item in recent {
+                long_hits.push(MemoryHit {
+                    id: item.id,
+                    content: item.content,
+                    importance: item.importance,
+                    created_at: item.created_at,
+                    score: 0.0,
+                });
+            }
+        }
 
         let now = Instant::now();
         let mut short_hits = Vec::<MemoryHit>::new();
@@ -256,7 +275,7 @@ impl MemoryManager {
                 let similarity = similarity_score(&item.content, query);
                 let score = 0.35 * recency + 0.35 * item.importance + 0.30 * similarity;
 
-                if similarity > 0.0 {
+                if similarity > 0.0 || (follow_up_bias && recency > 0.4) {
                     short_hits.push(MemoryHit {
                         id: format!("short:{}", Uuid::new_v4()),
                         content: item.content.clone(),
@@ -484,6 +503,22 @@ impl MemoryManager {
 fn recency_score(inserted_at: Instant, now: Instant) -> f64 {
     let age = now.duration_since(inserted_at).as_secs_f64();
     (1.0 / (1.0 + age / 1800.0)).clamp(0.0, 1.0)
+}
+
+fn looks_like_short_follow_up(query: &str) -> bool {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized.split_whitespace().count() <= 5 {
+        return true;
+    }
+
+    let markers = [
+        "그거", "이거", "저거", "거기", "로컬", "local", "that", "it", "there", "이어", "계속",
+    ];
+    markers.iter().any(|kw| normalized.contains(kw))
 }
 
 fn similarity_score(text: &str, query: &str) -> f64 {

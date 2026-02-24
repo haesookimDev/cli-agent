@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -798,37 +799,61 @@ impl SqliteStore {
         query_text: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryHit>> {
-        let pattern = format!("%{}%", query_text.to_lowercase());
+        let normalized_query = query_text.trim().to_lowercase();
+        if normalized_query.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let rows = sqlx::query(
             r#"
             SELECT id, content, importance, created_at
             FROM memory_items
-            WHERE session_id = ?1 AND LOWER(content) LIKE ?2
-            ORDER BY importance DESC, created_at DESC
-            LIMIT ?3
+            WHERE session_id = ?1
+            ORDER BY updated_at DESC
+            LIMIT ?2
             "#,
         )
         .bind(session_id.to_string())
-        .bind(pattern)
-        .bind(limit as i64)
+        .bind((limit.max(10) * 20) as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        let mut out = Vec::with_capacity(rows.len());
+        let query_tokens = tokenize_lexical(normalized_query.as_str());
+        let mut scored = Vec::<(f64, MemoryHit)>::new();
         for row in rows {
             let created_at_raw: String = row.get("created_at");
             let created_at = DateTime::parse_from_rfc3339(&created_at_raw)?.with_timezone(&Utc);
+            let content: String = row.get("content");
+            let importance: f64 = row.get("importance");
+            let content_lower = content.to_lowercase();
 
-            out.push(MemoryHit {
-                id: row.get("id"),
-                content: row.get("content"),
-                importance: row.get("importance"),
-                created_at,
-                score: 0.0,
-            });
+            let full_match = content_lower.contains(normalized_query.as_str());
+            let token_score = token_overlap_score(&query_tokens, content_lower.as_str());
+            let lexical = if full_match { 1.0 } else { token_score };
+            if lexical <= 0.0 {
+                continue;
+            }
+
+            let age_secs = (Utc::now() - created_at).num_seconds().max(0) as f64;
+            let recency = (1.0 / (1.0 + age_secs / 7200.0)).clamp(0.0, 1.0);
+            let rank = (0.70 * lexical + 0.20 * importance + 0.10 * recency).clamp(0.0, 1.0);
+
+            scored.push((
+                rank,
+                MemoryHit {
+                    id: row.get("id"),
+                    content,
+                    importance,
+                    created_at,
+                    score: rank,
+                },
+            ));
         }
 
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut out = scored.into_iter().map(|(_, hit)| hit).collect::<Vec<_>>();
+        out.truncate(limit);
         Ok(out)
     }
 
@@ -1666,6 +1691,32 @@ fn parse_workflow_row(
 
 fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
+}
+
+fn tokenize_lexical(text: &str) -> HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn token_overlap_score(query_tokens: &HashSet<String>, content: &str) -> f64 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let content_tokens = tokenize_lexical(content);
+    if content_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let overlap = query_tokens
+        .iter()
+        .filter(|token| content_tokens.contains(*token))
+        .count() as f64;
+    (overlap / query_tokens.len() as f64).clamp(0.0, 1.0)
 }
 
 fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
