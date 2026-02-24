@@ -121,7 +121,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/sessions",
             post(create_session_handler).get(list_sessions_handler),
         )
-        .route("/v1/sessions/:session_id", get(get_session_handler).delete(delete_session_handler))
+        .route(
+            "/v1/sessions/:session_id",
+            get(get_session_handler).delete(delete_session_handler),
+        )
         .route(
             "/v1/sessions/:session_id/runs",
             get(list_session_runs_handler),
@@ -197,14 +200,8 @@ pub fn router(state: ApiState) -> Router {
             "/v1/terminal/sessions",
             post(create_terminal_handler).get(list_terminals_handler),
         )
-        .route(
-            "/v1/terminal/sessions/:id",
-            delete(kill_terminal_handler),
-        )
-        .route(
-            "/v1/terminal/sessions/:id/ws",
-            get(terminal_ws_handler),
-        )
+        .route("/v1/terminal/sessions/:id", delete(kill_terminal_handler))
+        .route("/v1/terminal/sessions/:id/ws", get(terminal_ws_handler))
         .with_state(state)
 }
 
@@ -1123,16 +1120,12 @@ async fn test_webhook_handler(
 
 // --- MCP ---
 
-async fn list_mcp_tools_handler(
-    State(state): State<ApiState>,
-) -> impl IntoResponse {
+async fn list_mcp_tools_handler(State(state): State<ApiState>) -> impl IntoResponse {
     let tools = state.orchestrator.list_mcp_tools().await;
     (StatusCode::OK, Json(serde_json::json!(tools)))
 }
 
-async fn list_mcp_servers_handler(
-    State(state): State<ApiState>,
-) -> impl IntoResponse {
+async fn list_mcp_servers_handler(State(state): State<ApiState>) -> impl IntoResponse {
     let servers = state.orchestrator.list_mcp_servers();
     (StatusCode::OK, Json(serde_json::json!(servers)))
 }
@@ -1211,7 +1204,10 @@ async fn get_settings_handler(
         settings.terminal_args = persisted.terminal_args;
         settings.terminal_auto_spawn = persisted.terminal_auto_spawn;
     }
-    (StatusCode::OK, Json(serde_json::to_value(settings).unwrap()))
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(settings).unwrap()),
+    )
 }
 
 async fn update_settings_handler(
@@ -1238,7 +1234,10 @@ async fn update_settings_handler(
 
     state.orchestrator.update_settings(patch).await;
     let settings = state.orchestrator.get_settings();
-    (StatusCode::OK, Json(serde_json::to_value(settings).unwrap()))
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(settings).unwrap()),
+    )
 }
 
 async fn list_models_handler(
@@ -1305,9 +1304,9 @@ async fn toggle_provider_handler(
         );
     }
 
-    let pk = match serde_json::from_value::<crate::router::ProviderKind>(
-        serde_json::Value::String(provider_name.clone()),
-    ) {
+    let pk = match serde_json::from_value::<crate::router::ProviderKind>(serde_json::Value::String(
+        provider_name.clone(),
+    )) {
         Ok(v) => v,
         Err(_) => {
             return (

@@ -80,8 +80,8 @@ impl AppConfig {
             .unwrap_or(false);
 
         let mcp_servers = if mcp_enabled {
-            let config_path = env::var("MCP_CONFIG_PATH")
-                .unwrap_or_else(|_| "mcp_servers.json".to_string());
+            let config_path =
+                env::var("MCP_CONFIG_PATH").unwrap_or_else(|_| "mcp_servers.json".to_string());
             match std::fs::read_to_string(&config_path) {
                 Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
                     eprintln!("warn: failed to parse {}: {}", config_path, e);

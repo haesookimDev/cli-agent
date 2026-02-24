@@ -44,11 +44,7 @@ impl CronScheduler {
 
                 match self
                     .orchestrator
-                    .execute_workflow(
-                        &schedule.workflow_id,
-                        schedule.parameters.clone(),
-                        None,
-                    )
+                    .execute_workflow(&schedule.workflow_id, schedule.parameters.clone(), None)
                     .await
                 {
                     Ok(submission) => {

@@ -199,7 +199,9 @@ impl AgentRuntime {
 
                         // When a node succeeds, its fallback node is no longer needed — skip it.
                         if let Some(fallback_id) = &node.policy.fallback_node {
-                            if graph.is_fallback_only(fallback_id) && !graph.is_forced_ready(fallback_id) {
+                            if graph.is_fallback_only(fallback_id)
+                                && !graph.is_forced_ready(fallback_id)
+                            {
                                 graph.set_status(fallback_id, NodeStatus::Skipped);
                                 if let Some(sink) = &on_event {
                                     sink(RuntimeEvent::NodeSkipped {

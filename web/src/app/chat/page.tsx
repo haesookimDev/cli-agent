@@ -92,10 +92,18 @@ function ChatContent() {
         `/v1/sessions/${sid}/messages?limit=200`,
       );
       setMessages((prev) => {
-        // Merge: keep local pending user messages if server hasn't returned them yet
-        const serverIds = new Set(msgs.map((m) => m.id));
+        // Merge: keep only pending user messages that the server truly hasn't persisted yet.
         const pendingUserMsgs = prev.filter(
-          (m) => m.id.startsWith("pending:") && m.role === "user" && !serverIds.has(m.id),
+          (m) =>
+            m.id.startsWith("pending:") &&
+            m.role === "user" &&
+            !msgs.some((serverMsg) => {
+              if (serverMsg.role !== "user") return false;
+              if (serverMsg.content !== m.content) return false;
+              const serverTs = new Date(serverMsg.timestamp).getTime();
+              const pendingTs = new Date(m.timestamp).getTime();
+              return Math.abs(serverTs - pendingTs) <= 15_000;
+            }),
         );
         if (pendingUserMsgs.length > 0) {
           // Insert pending messages at the right chronological position

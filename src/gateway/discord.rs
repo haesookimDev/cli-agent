@@ -12,8 +12,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::gateway::{
-    parse_profile, poll_and_deliver, GatewayAction, GatewayAdapter, GatewayCommand,
-    GatewayManager, GatewayResponse, GatewayResponsePayload, MessageOrigin, Platform,
+    GatewayAction, GatewayAdapter, GatewayCommand, GatewayManager, GatewayResponse,
+    GatewayResponsePayload, MessageOrigin, Platform, parse_profile, poll_and_deliver,
 };
 use crate::types::TaskProfile;
 
@@ -72,8 +72,8 @@ impl DiscordAdapter {
         )
         .map_err(|_| anyhow::anyhow!("invalid Ed25519 public key"))?;
 
-        let signature_bytes = hex::decode(signature_hex)
-            .map_err(|_| anyhow::anyhow!("invalid signature hex"))?;
+        let signature_bytes =
+            hex::decode(signature_hex).map_err(|_| anyhow::anyhow!("invalid signature hex"))?;
 
         let signature = Signature::from_bytes(
             signature_bytes
@@ -103,10 +103,7 @@ impl DiscordAdapter {
         let resp = self
             .client
             .patch(&url)
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.bot_token),
-            )
+            .header("Authorization", format!("Bot {}", self.config.bot_token))
             .json(&serde_json::json!({ "content": content }))
             .send()
             .await?;
@@ -126,10 +123,7 @@ impl DiscordAdapter {
         );
         self.client
             .post(&url)
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.bot_token),
-            )
+            .header("Authorization", format!("Bot {}", self.config.bot_token))
             .json(&serde_json::json!({ "content": content }))
             .send()
             .await?;
@@ -215,10 +209,7 @@ impl DiscordAdapter {
         let resp = self
             .client
             .put(&url)
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.bot_token),
-            )
+            .header("Authorization", format!("Bot {}", self.config.bot_token))
             .json(&commands)
             .send()
             .await?;
@@ -253,10 +244,7 @@ impl GatewayAdapter for DiscordAdapter {
             adapter: adapter.clone(),
         };
         Router::new()
-            .route(
-                "/gateway/discord/interactions",
-                post(interactions_handler),
-            )
+            .route("/gateway/discord/interactions", post(interactions_handler))
             .with_state(state)
     }
 
@@ -296,14 +284,11 @@ async fn interactions_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
-            )
+            );
         }
     };
 
-    let interaction_type = payload
-        .get("type")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let interaction_type = payload.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
 
     // Type 1: PING
     if interaction_type == 1 {
@@ -526,11 +511,7 @@ fn format_discord_response(payload: &GatewayResponsePayload) -> String {
                     )
                 })
                 .collect();
-            format!(
-                "**Recent Runs** ({})\n{}",
-                runs.len(),
-                lines.join("\n")
-            )
+            format!("**Recent Runs** ({})\n{}", runs.len(), lines.join("\n"))
         }
         GatewayResponsePayload::SessionList(sessions) => {
             let lines: Vec<String> = sessions
@@ -544,11 +525,7 @@ fn format_discord_response(payload: &GatewayResponsePayload) -> String {
                     )
                 })
                 .collect();
-            format!(
-                "**Sessions** ({})\n{}",
-                sessions.len(),
-                lines.join("\n")
-            )
+            format!("**Sessions** ({})\n{}", sessions.len(), lines.join("\n"))
         }
         GatewayResponsePayload::HelpText(text) => format!("```\n{}\n```", text),
         GatewayResponsePayload::Error(err) => format!("Error: {}", err),

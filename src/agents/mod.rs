@@ -208,16 +208,36 @@ fn agent_role_profile(role: AgentRole) -> TaskProfile {
 
 fn agent_role_prompt(role: AgentRole) -> &'static str {
     match role {
-        AgentRole::Planner => "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps.",
-        AgentRole::Extractor => "You are the extraction agent. Pull key facts and structured data with precision and low latency.",
-        AgentRole::Coder => "You are the coding agent. Produce implementable code-level output with tradeoffs and failure handling.",
-        AgentRole::Summarizer => "You are the summarizer agent. Consolidate all previous outputs into concise checkpoint summaries.",
-        AgentRole::Fallback => "You are the fallback agent. Recover gracefully when upstream nodes fail and provide safe alternatives.",
-        AgentRole::ToolCaller => "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results.",
-        AgentRole::Analyzer => "You are the analyzer agent. Examine data and results to identify patterns, anomalies, and insights.",
-        AgentRole::Reviewer => "You are the reviewer agent. Verify results against the original request, assess quality, and flag gaps. Output COMPLETE if satisfied, or INCOMPLETE: <reason> if not.",
-        AgentRole::Scheduler => "You are the scheduler agent. Manage cron schedules and workflow automation configurations.",
-        AgentRole::ConfigManager => "You are the config manager agent. Handle system settings changes including model toggles and preferences.",
+        AgentRole::Planner => {
+            "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps."
+        }
+        AgentRole::Extractor => {
+            "You are the extraction agent. Pull key facts and structured data with precision and low latency."
+        }
+        AgentRole::Coder => {
+            "You are the coding agent. Produce implementable code-level output with tradeoffs and failure handling."
+        }
+        AgentRole::Summarizer => {
+            "You are the summarizer agent. Consolidate all previous outputs into concise checkpoint summaries."
+        }
+        AgentRole::Fallback => {
+            "You are the fallback agent. Recover gracefully when upstream nodes fail and provide safe alternatives."
+        }
+        AgentRole::ToolCaller => {
+            "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results."
+        }
+        AgentRole::Analyzer => {
+            "You are the analyzer agent. Examine data and results to identify patterns, anomalies, and insights."
+        }
+        AgentRole::Reviewer => {
+            "You are the reviewer agent. Verify results against the original request, assess quality, and flag gaps. Output COMPLETE if satisfied, or INCOMPLETE: <reason> if not."
+        }
+        AgentRole::Scheduler => {
+            "You are the scheduler agent. Manage cron schedules and workflow automation configurations."
+        }
+        AgentRole::ConfigManager => {
+            "You are the config manager agent. Handle system settings changes including model toggles and preferences."
+        }
     }
 }
 

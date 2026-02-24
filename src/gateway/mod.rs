@@ -164,11 +164,7 @@ impl GatewayManager {
         match cmd.action {
             GatewayAction::SubmitRun { task, profile } => {
                 let session_id = self
-                    .resolve_session(
-                        cmd.origin.platform,
-                        &cmd.origin.channel_id,
-                        cmd.session_id,
-                    )
+                    .resolve_session(cmd.origin.platform, &cmd.origin.channel_id, cmd.session_id)
                     .await?;
                 let req = crate::types::RunRequest {
                     task,

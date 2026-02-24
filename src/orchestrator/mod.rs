@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::FutureExt;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -122,9 +123,9 @@ impl Orchestrator {
                 self.router.set_provider_disabled(*p, false);
             }
             for name in &disabled_providers {
-                if let Ok(pk) = serde_json::from_value::<ProviderKind>(
-                    serde_json::Value::String(name.clone()),
-                ) {
+                if let Ok(pk) =
+                    serde_json::from_value::<ProviderKind>(serde_json::Value::String(name.clone()))
+                {
                     self.router.set_provider_disabled(pk, true);
                 }
             }
@@ -188,6 +189,8 @@ impl Orchestrator {
     pub async fn submit_run(&self, req: RunRequest) -> anyhow::Result<RunSubmission> {
         let run_id = Uuid::new_v4();
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+        let mut req = req;
+        req.session_id = Some(session_id);
 
         self.memory.create_session(session_id).await?;
 
@@ -321,9 +324,7 @@ impl Orchestrator {
         for run in &runs {
             for output in &run.outputs {
                 if output.succeeded && !output.output.is_empty() {
-                    let ts = run
-                        .finished_at
-                        .unwrap_or(run.created_at);
+                    let ts = run.finished_at.unwrap_or(run.created_at);
                     messages.push(ChatMessage {
                         id: format!("out:{}:{}", run.run_id, output.node_id),
                         session_id,
@@ -713,13 +714,21 @@ impl Orchestrator {
             .await?;
 
         let mcp_server_names = self.mcp.server_names();
-        let mcp_tool_names: Vec<String> = self.mcp.list_all_tools().await
-            .into_iter().map(|t| t.name).collect();
+        let mcp_tool_names: Vec<String> = self
+            .mcp
+            .list_all_tools()
+            .await
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         let graph = self
             .workflow_graphs
             .remove(&run_id)
             .map(|(_, g)| g)
-            .unwrap_or_else(|| self.build_graph(req.task.as_str(), &mcp_server_names, &mcp_tool_names).unwrap());
+            .unwrap_or_else(|| {
+                self.build_graph(req.task.as_str(), &mcp_server_names, &mcp_tool_names)
+                    .unwrap()
+            });
         let graph_nodes = graph.nodes();
         self.record_action_event(
             run_id,
@@ -833,7 +842,13 @@ impl Orchestrator {
         let outputs_summary: String = results
             .iter()
             .filter(|r| r.succeeded)
-            .map(|r| format!("[{}] {}", r.node_id, r.output.chars().take(500).collect::<String>()))
+            .map(|r| {
+                format!(
+                    "[{}] {}",
+                    r.node_id,
+                    r.output.chars().take(500).collect::<String>()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n---\n");
 
@@ -900,13 +915,16 @@ impl Orchestrator {
         is_complete
     }
 
-    fn classify_task(task: &str, mcp_server_names: &[String], mcp_tool_names: &[String]) -> TaskType {
+    fn classify_task(
+        task: &str,
+        mcp_server_names: &[String],
+        mcp_tool_names: &[String],
+    ) -> TaskType {
         let lower = task.to_lowercase();
 
         // Configuration keywords
         let config_kw = [
-            "toggle", "enable", "disable", "setting", "config", "model",
-            "provider", "prefer",
+            "toggle", "enable", "disable", "setting", "config", "model", "provider", "prefer",
         ];
         if config_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::Configuration;
@@ -920,7 +938,9 @@ impl Orchestrator {
 
         // If MCP servers are registered, check if task mentions server or tool names
         if !mcp_server_names.is_empty() {
-            let matches_server = mcp_server_names.iter().any(|name| lower.contains(&name.to_lowercase()));
+            let matches_server = mcp_server_names
+                .iter()
+                .any(|name| lower.contains(&name.to_lowercase()));
             if matches_server {
                 return TaskType::ToolOperation;
             }
@@ -936,10 +956,28 @@ impl Orchestrator {
 
             // If tools are available and task involves file/project/repo operations
             let tool_action_kw = [
-                "파일", "file", "read", "읽어", "열어", "프로젝트", "project",
-                "repo", "repository", "디렉토리", "directory", "folder", "폴더",
-                "commit", "커밋", "branch", "브랜치", "issue", "이슈", "pr",
-                "search", "검색",
+                "파일",
+                "file",
+                "read",
+                "읽어",
+                "열어",
+                "프로젝트",
+                "project",
+                "repo",
+                "repository",
+                "디렉토리",
+                "directory",
+                "folder",
+                "폴더",
+                "commit",
+                "커밋",
+                "branch",
+                "브랜치",
+                "issue",
+                "이슈",
+                "pr",
+                "search",
+                "검색",
             ];
             if tool_action_kw.iter().any(|kw| lower.contains(kw)) {
                 return TaskType::ToolOperation;
@@ -948,8 +986,17 @@ impl Orchestrator {
 
         // Code generation keywords
         let code_kw = [
-            "code", "implement", "function", "class", "refactor", "write",
-            "bug", "fix", "debug", "api", "endpoint",
+            "code",
+            "implement",
+            "function",
+            "class",
+            "refactor",
+            "write",
+            "bug",
+            "fix",
+            "debug",
+            "api",
+            "endpoint",
         ];
         if code_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::CodeGeneration;
@@ -957,8 +1004,8 @@ impl Orchestrator {
 
         // Analysis keywords
         let analysis_kw = [
-            "analyze", "analysis", "pattern", "compare", "insight",
-            "metric", "stat", "evaluate", "assess",
+            "analyze", "analysis", "pattern", "compare", "insight", "metric", "stat", "evaluate",
+            "assess",
         ];
         if analysis_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::Analysis;
@@ -986,13 +1033,19 @@ impl Orchestrator {
         }
     }
 
-    fn build_graph(&self, task: &str, mcp_server_names: &[String], mcp_tool_names: &[String]) -> anyhow::Result<ExecutionGraph> {
+    fn build_graph(
+        &self,
+        task: &str,
+        mcp_server_names: &[String],
+        mcp_tool_names: &[String],
+    ) -> anyhow::Result<ExecutionGraph> {
         let task_type = Self::classify_task(task, mcp_server_names, mcp_tool_names);
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
         // Planner instructions — include available tools when MCP servers are registered
         let planner_instructions = if !mcp_tool_names.is_empty() {
-            let tool_summary = mcp_tool_names.iter()
+            let tool_summary = mcp_tool_names
+                .iter()
                 .take(30)
                 .cloned()
                 .collect::<Vec<_>>()
@@ -1172,8 +1225,7 @@ impl Orchestrator {
                     AgentRole::Summarizer,
                     "Summarize outcomes and produce checkpoint summary for context compaction.",
                 );
-                summarize.dependencies =
-                    vec!["code".to_string(), "fallback_code".to_string()];
+                summarize.dependencies = vec!["code".to_string(), "fallback_code".to_string()];
                 summarize.policy = Self::default_policy();
                 graph.add_node(summarize)?;
 
@@ -1548,7 +1600,12 @@ impl Orchestrator {
         })
     }
 
-    fn build_on_completed_fn(&self, run_id: Uuid, session_id: Uuid, task: String) -> OnNodeCompletedFn {
+    fn build_on_completed_fn(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        task: String,
+    ) -> OnNodeCompletedFn {
         let memory = self.memory.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
@@ -1655,6 +1712,28 @@ impl Orchestrator {
         let runs = self.runs.clone();
         let memory = self.memory.clone();
         let webhook = self.webhook.clone();
+        let token_memory = memory.clone();
+        let (token_tx, mut token_rx) = mpsc::unbounded_channel::<(String, AgentRole, String)>();
+
+        tokio::spawn(async move {
+            while let Some((node_id, role, token)) = token_rx.recv().await {
+                let _ = token_memory
+                    .append_run_action_event(
+                        run_id,
+                        session_id,
+                        RunActionType::NodeTokenChunk,
+                        Some("runtime"),
+                        Some(node_id.as_str()),
+                        None,
+                        serde_json::json!({
+                            "node_id": node_id,
+                            "role": role,
+                            "token": token,
+                        }),
+                    )
+                    .await;
+            }
+        });
 
         Arc::new(move |event: RuntimeEvent| {
             // Token chunks are high-frequency: store as action events only (skip timeline/session/webhook)
@@ -1664,27 +1743,7 @@ impl Orchestrator {
                 ref token,
             } = event
             {
-                let memory = memory.clone();
-                let node_id = node_id.clone();
-                let role = *role;
-                let token = token.clone();
-                tokio::spawn(async move {
-                    let _ = memory
-                        .append_run_action_event(
-                            run_id,
-                            session_id,
-                            RunActionType::NodeTokenChunk,
-                            Some("runtime"),
-                            Some(node_id.as_str()),
-                            None,
-                            serde_json::json!({
-                                "node_id": node_id,
-                                "role": role,
-                                "token": token,
-                            }),
-                        )
-                        .await;
-                });
+                let _ = token_tx.send((node_id.clone(), *role, token.clone()));
                 return;
             }
 
@@ -2042,10 +2101,7 @@ impl Orchestrator {
         Ok(template)
     }
 
-    pub async fn list_workflows(
-        &self,
-        limit: usize,
-    ) -> anyhow::Result<Vec<WorkflowTemplate>> {
+    pub async fn list_workflows(&self, limit: usize) -> anyhow::Result<Vec<WorkflowTemplate>> {
         self.memory.list_workflows(limit).await
     }
 
@@ -2083,11 +2139,17 @@ impl Orchestrator {
         Ok(schedule)
     }
 
-    pub async fn list_schedules(&self, limit: usize) -> anyhow::Result<Vec<crate::types::CronSchedule>> {
+    pub async fn list_schedules(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::types::CronSchedule>> {
         self.memory.list_schedules(limit).await
     }
 
-    pub async fn get_schedule(&self, id: Uuid) -> anyhow::Result<Option<crate::types::CronSchedule>> {
+    pub async fn get_schedule(
+        &self,
+        id: Uuid,
+    ) -> anyhow::Result<Option<crate::types::CronSchedule>> {
         self.memory.get_schedule(id).await
     }
 
@@ -2154,10 +2216,7 @@ impl Orchestrator {
         let task = format!(
             "Workflow: {} ({})",
             template.name,
-            params
-                .as_ref()
-                .map(|p| p.to_string())
-                .unwrap_or_default()
+            params.as_ref().map(|p| p.to_string()).unwrap_or_default()
         );
 
         let req = RunRequest {
@@ -2942,21 +3001,31 @@ mod tests {
 
         // Complex/CodeGeneration task should have full graph
         let graph = orchestrator
-            .build_graph("implement a webhook integration endpoint with code", &no_servers, &no_tools)
+            .build_graph(
+                "implement a webhook integration endpoint with code",
+                &no_servers,
+                &no_tools,
+            )
             .unwrap();
         assert!(graph.node("plan").is_some());
         assert!(graph.node("code").is_some());
         assert!(graph.node("webhook_validation").is_some());
 
         // SimpleQuery should have minimal graph
-        let simple = orchestrator.build_graph("hello world", &no_servers, &no_tools).unwrap();
+        let simple = orchestrator
+            .build_graph("hello world", &no_servers, &no_tools)
+            .unwrap();
         assert!(simple.node("plan").is_some());
         assert!(simple.node("summarize").is_some());
         assert!(simple.node("code").is_none());
 
         // Analysis task should have analyzer
         let analysis = orchestrator
-            .build_graph("analyze the performance patterns and evaluate metrics", &no_servers, &no_tools)
+            .build_graph(
+                "analyze the performance patterns and evaluate metrics",
+                &no_servers,
+                &no_tools,
+            )
             .unwrap();
         assert!(analysis.node("plan").is_some());
         assert!(analysis.node("analyze").is_some());

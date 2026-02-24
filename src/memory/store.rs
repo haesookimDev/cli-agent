@@ -1297,7 +1297,10 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn list_due_schedules(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<CronSchedule>> {
+    pub async fn list_due_schedules(
+        &self,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<CronSchedule>> {
         let rows = sqlx::query(
             r#"
             SELECT id, workflow_id, cron_expr, enabled, parameters, last_run_at, next_run_at, created_at

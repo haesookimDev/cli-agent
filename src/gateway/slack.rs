@@ -12,8 +12,8 @@ use sha2::Sha256;
 use tracing::{error, info, warn};
 
 use crate::gateway::{
-    parse_gateway_text, poll_and_deliver, GatewayAdapter, GatewayManager, GatewayResponse,
-    GatewayResponsePayload, MessageOrigin, Platform,
+    GatewayAdapter, GatewayManager, GatewayResponse, GatewayResponsePayload, MessageOrigin,
+    Platform, parse_gateway_text, poll_and_deliver,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -102,10 +102,7 @@ impl SlackAdapter {
         let resp = self
             .client
             .post("https://slack.com/api/chat.postMessage")
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.config.bot_token),
-            )
+            .header("Authorization", format!("Bearer {}", self.config.bot_token))
             .json(&body)
             .send()
             .await?;
@@ -171,7 +168,10 @@ async fn slash_command_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if let Err(err) = state.adapter.verify_slack_signature(&headers, body.as_ref()) {
+    if let Err(err) = state
+        .adapter
+        .verify_slack_signature(&headers, body.as_ref())
+    {
         warn!("slack signature verification failed: {err}");
         return (StatusCode::UNAUTHORIZED, "invalid signature".to_string());
     }
@@ -212,18 +212,20 @@ async fn slash_command_handler(
                 error!("slack respond_to_url failed: {err}");
             }
         } else {
-            if let Err(err) = adapter
-                .post_message(&channel_id, None, &formatted)
-                .await
-            {
+            if let Err(err) = adapter.post_message(&channel_id, None, &formatted).await {
                 error!("slack post_message failed: {err}");
             }
         }
 
         if is_run {
             if let GatewayResponsePayload::RunSubmitted(ref sub) = response.payload {
-                poll_and_deliver(manager, adapter as Arc<dyn GatewayAdapter>, sub.run_id, origin)
-                    .await;
+                poll_and_deliver(
+                    manager,
+                    adapter as Arc<dyn GatewayAdapter>,
+                    sub.run_id,
+                    origin,
+                )
+                .await;
             }
         }
     });
@@ -236,7 +238,10 @@ async fn events_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if let Err(err) = state.adapter.verify_slack_signature(&headers, body.as_ref()) {
+    if let Err(err) = state
+        .adapter
+        .verify_slack_signature(&headers, body.as_ref())
+    {
         warn!("slack events signature verification failed: {err}");
         return (
             StatusCode::UNAUTHORIZED,
@@ -250,14 +255,11 @@ async fn events_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
-            )
+            );
         }
     };
 
-    let event_type = payload
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let event_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     if event_type == "url_verification" {
         let challenge = payload
@@ -275,10 +277,7 @@ async fn events_handler(
             let sub_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if sub_type == "app_mention" || sub_type == "message" {
                 let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let channel = event
-                    .get("channel")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let channel = event.get("channel").and_then(|v| v.as_str()).unwrap_or("");
                 let user = event.get("user").and_then(|v| v.as_str()).unwrap_or("");
                 let thread_ts = event
                     .get("thread_ts")
@@ -300,8 +299,7 @@ async fn events_handler(
                 };
 
                 let cmd = parse_gateway_text(&cleaned_text, origin.clone());
-                let is_run =
-                    matches!(cmd.action, crate::gateway::GatewayAction::SubmitRun { .. });
+                let is_run = matches!(cmd.action, crate::gateway::GatewayAction::SubmitRun { .. });
                 let manager = state.manager.clone();
                 let adapter = state.adapter.clone();
 

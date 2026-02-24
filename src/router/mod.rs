@@ -1,5 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -196,11 +196,7 @@ impl ModelRouter {
     }
 
     pub fn disabled_providers(&self) -> Vec<ProviderKind> {
-        self.client
-            .disabled
-            .iter()
-            .map(|v| *v.key())
-            .collect()
+        self.client.disabled.iter().map(|v| *v.key()).collect()
     }
 
     pub fn set_preferred_model(&self, model_id: Option<String>) {
@@ -255,10 +251,10 @@ impl ModelRouter {
 
     fn cache_ttl_secs(profile: TaskProfile) -> u64 {
         match profile {
-            TaskProfile::Planning => 300,    // 5 min
-            TaskProfile::Extraction => 900,  // 15 min
-            TaskProfile::Coding => 600,      // 10 min
-            TaskProfile::General => 600,     // 10 min
+            TaskProfile::Planning => 300,   // 5 min
+            TaskProfile::Extraction => 900, // 15 min
+            TaskProfile::Coding => 600,     // 10 min
+            TaskProfile::General => 600,    // 10 min
         }
     }
 
@@ -486,11 +482,7 @@ impl ProviderClient {
         }
     }
 
-    async fn generate_openai(
-        &self,
-        model: &ModelSpec,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
+    async fn generate_openai(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
         let api_key = self
             .openai_api_key
             .as_deref()
@@ -520,11 +512,7 @@ impl ProviderClient {
             .ok_or_else(|| anyhow::anyhow!("unexpected OpenAI response format"))
     }
 
-    async fn generate_anthropic(
-        &self,
-        model: &ModelSpec,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
+    async fn generate_anthropic(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
         let api_key = self
             .anthropic_api_key
             .as_deref()
@@ -557,11 +545,7 @@ impl ProviderClient {
             .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic response format"))
     }
 
-    async fn generate_gemini(
-        &self,
-        model: &ModelSpec,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
+    async fn generate_gemini(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
         let api_key = self
             .gemini_api_key
             .as_deref()
@@ -594,11 +578,7 @@ impl ProviderClient {
             .ok_or_else(|| anyhow::anyhow!("unexpected Gemini response format"))
     }
 
-    async fn generate_vllm(
-        &self,
-        model: &ModelSpec,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
+    async fn generate_vllm(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
         let endpoint = format!(
             "{}/v1/chat/completions",
             self.vllm_base_url.trim_end_matches('/')
@@ -613,9 +593,7 @@ impl ProviderClient {
             }))
             .send()
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("vLLM server unavailable at {}", self.vllm_base_url)
-            })?;
+            .map_err(|_| anyhow::anyhow!("vLLM server unavailable at {}", self.vllm_base_url))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -648,12 +626,8 @@ impl ProviderClient {
             ProviderKind::OpenAi | ProviderKind::Vllm => {
                 self.stream_openai_compat(model, prompt, on_token).await
             }
-            ProviderKind::Anthropic => {
-                self.stream_anthropic(model, prompt, on_token).await
-            }
-            ProviderKind::Gemini => {
-                self.stream_gemini(model, prompt, on_token).await
-            }
+            ProviderKind::Anthropic => self.stream_anthropic(model, prompt, on_token).await,
+            ProviderKind::Gemini => self.stream_gemini(model, prompt, on_token).await,
             ProviderKind::Mock => {
                 let output = mock_inference(model, prompt);
                 on_token(&output);
@@ -678,14 +652,11 @@ impl ProviderClient {
             "https://api.openai.com/v1/chat/completions".to_string()
         };
 
-        let mut req = self
-            .http
-            .post(&base_url)
-            .json(&serde_json::json!({
-                "model": model.model_id,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": true,
-            }));
+        let mut req = self.http.post(&base_url).json(&serde_json::json!({
+            "model": model.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": true,
+        }));
 
         if model.provider == ProviderKind::OpenAi {
             let api_key = self
@@ -704,22 +675,21 @@ impl ProviderClient {
 
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut buf = Vec::<u8>::new();
+        let mut done = false;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            buf.extend_from_slice(&bytes);
 
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].to_string();
-                buf = buf[pos + 1..].to_string();
-
-                let line = line.trim();
+            for raw_line in drain_sse_lines(&mut buf) {
+                let line = raw_line.trim();
                 if line.is_empty() || !line.starts_with("data: ") {
                     continue;
                 }
                 let data = &line[6..];
                 if data == "[DONE]" {
+                    done = true;
                     break;
                 }
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
@@ -730,6 +700,9 @@ impl ProviderClient {
                         }
                     }
                 }
+            }
+            if done {
+                break;
             }
         }
 
@@ -771,17 +744,14 @@ impl ProviderClient {
 
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut buf = Vec::<u8>::new();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            buf.extend_from_slice(&bytes);
 
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].to_string();
-                buf = buf[pos + 1..].to_string();
-
-                let line = line.trim();
+            for raw_line in drain_sse_lines(&mut buf) {
+                let line = raw_line.trim();
                 if line.is_empty() || !line.starts_with("data: ") {
                     continue;
                 }
@@ -836,24 +806,20 @@ impl ProviderClient {
 
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut buf = Vec::<u8>::new();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            buf.extend_from_slice(&bytes);
 
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].to_string();
-                buf = buf[pos + 1..].to_string();
-
-                let line = line.trim();
+            for raw_line in drain_sse_lines(&mut buf) {
+                let line = raw_line.trim();
                 if line.is_empty() || !line.starts_with("data: ") {
                     continue;
                 }
                 let data = &line[6..];
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(text) =
-                        val["candidates"][0]["content"]["parts"][0]["text"].as_str()
+                    if let Some(text) = val["candidates"][0]["content"]["parts"][0]["text"].as_str()
                     {
                         if !text.is_empty() {
                             on_token(text);
@@ -866,6 +832,21 @@ impl ProviderClient {
 
         Ok(full_output)
     }
+}
+
+fn drain_sse_lines(buf: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let mut line = buf.drain(..=pos).collect::<Vec<u8>>();
+        if line.last().copied() == Some(b'\n') {
+            line.pop();
+        }
+        if line.last().copied() == Some(b'\r') {
+            line.pop();
+        }
+        lines.push(String::from_utf8_lossy(line.as_slice()).into_owned());
+    }
+    lines
 }
 
 fn score_model(model: &ModelSpec, constraints: &RoutingConstraints) -> f64 {

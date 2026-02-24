@@ -514,13 +514,21 @@ async fn handle_key(
                 KeyCode::Up | KeyCode::Char('k') => {
                     let prev = state.settings_selected.saturating_sub(1);
                     // skip separator
-                    let prev = if prev == separator_idx { separator_idx - 1 } else { prev };
+                    let prev = if prev == separator_idx {
+                        separator_idx - 1
+                    } else {
+                        prev
+                    };
                     state.settings_selected = prev;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let next = state.settings_selected + 1;
                     // skip separator
-                    let next = if next == separator_idx { separator_idx + 1 } else { next };
+                    let next = if next == separator_idx {
+                        separator_idx + 1
+                    } else {
+                        next
+                    };
                     state.settings_selected = next.min(settings_max);
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
@@ -530,19 +538,25 @@ async fn handle_key(
                                 cycle_profile_back(state.settings.default_profile);
                         }
                         1 => {
-                            state.settings.auto_refresh_ms =
-                                state.settings.auto_refresh_ms.saturating_sub(250)
-                                    .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
+                            state.settings.auto_refresh_ms = state
+                                .settings
+                                .auto_refresh_ms
+                                .saturating_sub(250)
+                                .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
                         }
                         2 => {
-                            state.settings.session_limit =
-                                state.settings.session_limit.saturating_sub(5)
-                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                            state.settings.session_limit = state
+                                .settings
+                                .session_limit
+                                .saturating_sub(5)
+                                .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
                         }
                         3 => {
-                            state.settings.run_limit =
-                                state.settings.run_limit.saturating_sub(5)
-                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                            state.settings.run_limit = state
+                                .settings
+                                .run_limit
+                                .saturating_sub(5)
+                                .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
                         }
                         4 => {
                             state.settings.follow_active_session =
@@ -563,19 +577,16 @@ async fn handle_key(
                                 cycle_profile(state.settings.default_profile);
                         }
                         1 => {
-                            state.settings.auto_refresh_ms =
-                                (state.settings.auto_refresh_ms + 250)
-                                    .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
+                            state.settings.auto_refresh_ms = (state.settings.auto_refresh_ms + 250)
+                                .clamp(MIN_REFRESH_MS, MAX_REFRESH_MS);
                         }
                         2 => {
-                            state.settings.session_limit =
-                                (state.settings.session_limit + 5)
-                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                            state.settings.session_limit = (state.settings.session_limit + 5)
+                                .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
                         }
                         3 => {
-                            state.settings.run_limit =
-                                (state.settings.run_limit + 5)
-                                    .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
+                            state.settings.run_limit = (state.settings.run_limit + 5)
+                                .clamp(MIN_LIST_LIMIT, MAX_LIST_LIMIT);
                         }
                         4 => {
                             state.settings.follow_active_session =
@@ -650,10 +661,7 @@ async fn handle_key(
                     state.rebuild_views();
                     state.set_status(format!("{} filter cleared", pane_label(state.focus)));
                 } else {
-                    state.set_status(format!(
-                        "{} filter already empty",
-                        pane_label(state.focus)
-                    ));
+                    state.set_status(format!("{} filter already empty", pane_label(state.focus)));
                 }
             }
         }
@@ -1176,10 +1184,8 @@ fn draw_runs(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, state:
                 let duration_text = if r.status.is_terminal() {
                     match (r.started_at, r.finished_at) {
                         (Some(start), Some(end)) => {
-                            let ms = end
-                                .signed_duration_since(start)
-                                .num_milliseconds()
-                                .max(0) as u128;
+                            let ms =
+                                end.signed_duration_since(start).num_milliseconds().max(0) as u128;
                             format!(" {}", format_duration_ms(ms))
                         }
                         _ => String::new(),
@@ -1347,10 +1353,7 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
             };
             let marker = status_marker(node.status.as_str());
             lines.push(Line::from(vec![
-                Span::styled(
-                    marker.to_string(),
-                    run_status_style(node.status.as_str()),
-                ),
+                Span::styled(marker.to_string(), run_status_style(node.status.as_str())),
                 Span::raw(" "),
                 Span::styled(
                     node.node_id.clone(),
@@ -1567,9 +1570,7 @@ fn footer_lines(state: &TuiState) -> Vec<Line<'static>> {
             vec![Line::from(vec![
                 Span::styled(
                     format!(" Delete session {}?  ", short_uuid(*id)),
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("y", key_style),
                 Span::styled(" confirm  ", desc_style),
@@ -1798,16 +1799,11 @@ fn draw_settings_overlay(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     for (i, info) in state.model_list.iter().enumerate() {
         let row_idx = separator_idx + 1 + i;
         let is_selected = row_idx == state.settings_selected;
-        let is_disabled = state
-            .settings
-            .disabled_models
-            .contains(&info.model_id);
+        let is_disabled = state.settings.disabled_models.contains(&info.model_id);
         let (status_text, status_style) = if is_disabled {
             (
                 "OFF",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )
         } else {
             (

@@ -9,18 +9,18 @@ use uuid::Uuid;
 use cli_agent::agents::AgentRegistry;
 use cli_agent::config::AppConfig;
 use cli_agent::context::ContextManager;
+use cli_agent::gateway::GatewayManager;
 use cli_agent::gateway::discord::{DiscordAdapter, DiscordConfig};
 use cli_agent::gateway::slack::{SlackAdapter, SlackConfig};
-use cli_agent::gateway::GatewayManager;
 use cli_agent::interface::api::{self, ApiState};
 use cli_agent::interface::tui;
 use cli_agent::memory::MemoryManager;
 use cli_agent::orchestrator::Orchestrator;
 use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
-use cli_agent::types::{RunRequest, TaskProfile};
 use cli_agent::scheduler::CronScheduler;
 use cli_agent::terminal::TerminalManager;
+use cli_agent::types::{RunRequest, TaskProfile};
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
 
 #[derive(Debug, Parser)]
@@ -103,12 +103,8 @@ async fn main() -> anyhow::Result<()> {
     let mut mcp_registry = cli_agent::mcp::McpRegistry::new();
     for server_cfg in &cfg.mcp_servers {
         let args: Vec<&str> = server_cfg.args.split_whitespace().collect();
-        match cli_agent::mcp::McpClient::spawn(
-            &server_cfg.command,
-            &args,
-            server_cfg.env.clone(),
-        )
-        .await
+        match cli_agent::mcp::McpClient::spawn(&server_cfg.command, &args, server_cfg.env.clone())
+            .await
         {
             Ok(client) => {
                 if let Err(e) = client.initialize().await {
@@ -120,7 +116,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let client = Arc::new(client);
                 mcp_registry
-                    .register(server_cfg.name.clone(), server_cfg.description.clone(), client)
+                    .register(
+                        server_cfg.name.clone(),
+                        server_cfg.description.clone(),
+                        client,
+                    )
                     .await;
                 tracing::info!("MCP server '{}' started", server_cfg.name);
             }
@@ -217,7 +217,16 @@ async fn main() -> anyhow::Result<()> {
             println!("  web client: http://{addr}/web-client");
             println!("  dashboard:  http://{addr}/dashboard");
             let terminal = TerminalManager::new();
-            api::serve(addr, ApiState { orchestrator, auth, terminal }, Some(gateway_router)).await?;
+            api::serve(
+                addr,
+                ApiState {
+                    orchestrator,
+                    auth,
+                    terminal,
+                },
+                Some(gateway_router),
+            )
+            .await?;
         }
         Commands::Replay { session } => {
             let events = orchestrator.replay_session(session).await?;
