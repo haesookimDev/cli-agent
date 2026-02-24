@@ -8,6 +8,65 @@
 - 코드 수정 중에는 단계별 검증(관련 테스트/빌드/타입체크) 통과 후 즉시 커밋한다.
 - 한 커밋은 가능한 한 하나의 목적만 포함해야 하며, 무관한 파일 변경을 섞지 않는다.
 - 커밋 메시지는 작업 의도와 영향 범위를 명확하게 작성한다.
+- 아래 가이드라인을 기반으로 생성해라
+#### Commit Guidelines
+1. Git commit message structure:
+	- The commit message should follow this structure:
+		'''
+		type: subject
+		
+		body(optional)
+		
+		footer(optional)
+		'''
+	- The type should be one of the following:
+		- feat: A new feature
+		- fix: A bug fix
+		- docs: Changes to documentation
+		- style: Formatting, missing semi colons, etc; no code change
+		- refactor: Refactoring production code
+		- test: Adding tests, refactoring test; no production code change
+		- chore: Updating build tasks, package manager configs, etc; no production code change
+		
+	- The subject:
+		- Must be no longer than 50 characters.
+		- Should start with a capital letter.
+		- Should not end with a period.
+		- Use an imperative tone to describe what a commit does, rather than what it did. For example, use change; not changed or changes.
+		
+	- The body(optional):
+		- Include this section only if the changes require additional explanation.
+		- Explain what and why the changes were made in more detail, while the code itself explains how.
+		- Ensure that each line in the body does not exceed 72 characters.
+		
+	- The footer(optional):
+		- Only include a footer if the user provides specific information, such as issue tracker IDs.
+
+2. Process:
+    - First, summarize the key changes from given output of the **git diff --staged** command.
+    - Ensure the message clearly reflects the purpose of the changes.
+    - Write the commit message adhering to Git commit message structure.
+    - Here's an example commit message to follow:
+			style: Enhance button component design
+			
+			Improved button design to better address user feedback on
+			visibility and consistency across different devices. The new
+			design aims to create a more cohesive and accessible user
+			interface.
+			
+			- Updated color scheme to improve contrast and ensure compliance
+			  with accessibility standards.
+			- Increased font size and adjusted font weight for better
+			  readability on smaller screens.
+			- Standardized button sizes and padding for consistency across
+			  all pages.
+			- Enhanced hover and active states to provide clearer visual
+			  feedback to users.
+			
+			Resolves: #123
+			See also: #456, #789
+    - The commit message should be concise, clear, and follow the structure outlined above.
+    - Do not include any additional explanations or comments outside of the commit message format.
 
 ### Session ID Consistency
 - `submit_run`에서 생성/확정한 `session_id`는 `execute_run`까지 동일하게 전달되어야 한다.
