@@ -31,6 +31,7 @@ function ChatContent() {
   const [task, setTask] = useState("");
   const [profile, setProfile] = useState<TaskProfile>("general");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [showTerminal, setShowTerminal] = useState(false);
 
   // Events per run (for timeline display — both SSE and API-loaded)
@@ -172,7 +173,8 @@ function ChatContent() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!task.trim()) return;
+    if (!task.trim() || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
 
     try {
@@ -208,6 +210,7 @@ function ChatContent() {
     } catch (err) {
       console.error("submit:", err);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -427,7 +430,11 @@ function ChatContent() {
               value={task}
               onChange={(e) => setTask(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing
+                ) {
                   e.preventDefault();
                   handleSubmit(e);
                 }
