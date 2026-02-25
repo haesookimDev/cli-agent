@@ -817,11 +817,9 @@ impl Orchestrator {
                 .find(|r| r.run_id != run_id && r.status == RunStatus::Succeeded)
             {
                 Some(prev) => {
-                    let prev_type = Self::classify_task(
+                    let prev_type = Self::classify_task_fallback(
                         prev.task.as_str(),
-                        &mcp_server_names,
-                        &mcp_tool_names,
-                        None,
+                        !mcp_server_names.is_empty(),
                     );
                     let prev_plan = prev
                         .outputs
@@ -836,20 +834,18 @@ impl Orchestrator {
             (None, None)
         };
 
-        let graph = self
-            .workflow_graphs
-            .remove(&run_id)
-            .map(|(_, g)| g)
-            .unwrap_or_else(|| {
-                self.build_graph(
+        let graph = match self.workflow_graphs.remove(&run_id).map(|(_, g)| g) {
+            Some(g) => g,
+            None => self
+                .build_graph(
                     req.task.as_str(),
                     &mcp_server_names,
                     &mcp_tool_names,
                     previous_task_type,
                     previous_plan,
                 )
-                .unwrap()
-            });
+                .await?,
+        };
         let graph_nodes = graph.nodes();
         self.record_action_event(
             run_id,
@@ -1244,11 +1240,43 @@ impl Orchestrator {
         format!("{head}\n... [trimmed] ...\n{tail}")
     }
 
-    fn classify_task(
+    /// Strip markdown fences and try to extract text content from JSON wrappers.
+    fn clean_llm_output(raw: &str) -> String {
+        let mut text = raw.trim().to_string();
+
+        // Strip markdown code fences
+        if text.starts_with("```") {
+            // Remove opening fence (with optional language tag)
+            if let Some(end_of_first_line) = text.find('\n') {
+                text = text[end_of_first_line + 1..].to_string();
+            }
+            if text.ends_with("```") {
+                text = text[..text.len() - 3].to_string();
+            }
+            text = text.trim().to_string();
+        }
+
+        // If the output looks like a JSON object with common LLM response fields, extract content
+        if text.starts_with('{') && text.ends_with('}') {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&text) {
+                // Try common content field names
+                for key in ["content", "answer", "response", "summary", "text", "message"] {
+                    if let Some(val) = obj.get(key).and_then(|v| v.as_str()) {
+                        return val.trim().to_string();
+                    }
+                }
+            }
+        }
+
+        text
+    }
+
+    async fn classify_task(
         task: &str,
         mcp_server_names: &[String],
         mcp_tool_names: &[String],
         previous_task_type: Option<TaskType>,
+        router: &ModelRouter,
     ) -> TaskType {
         // If this is a continuation command and we have session context, inherit
         if Self::is_continuation_command(task) {
@@ -1257,105 +1285,107 @@ impl Orchestrator {
             }
         }
 
+        let has_mcp = !mcp_server_names.is_empty();
         let lower = task.to_lowercase();
 
-        // Configuration keywords
-        let config_kw = [
-            "toggle", "enable", "disable", "setting", "config", "model", "provider", "prefer",
-        ];
-        if config_kw.iter().any(|kw| lower.contains(kw)) {
-            return TaskType::Configuration;
-        }
-
-        // Tool / MCP operation keywords
-        let tool_kw = ["mcp", "tool call", "tool 호출", "도구"];
-        if tool_kw.iter().any(|kw| lower.contains(kw)) {
-            return TaskType::ToolOperation;
-        }
-
-        // If MCP servers are registered, check if task mentions server or tool names
-        if !mcp_server_names.is_empty() {
+        // Quick check: if MCP tools are available and task explicitly mentions a tool/server name
+        if has_mcp {
             let matches_server = mcp_server_names
                 .iter()
                 .any(|name| lower.contains(&name.to_lowercase()));
-            if matches_server {
-                return TaskType::ToolOperation;
-            }
-
-            // Check bare tool names (e.g. "search_repositories" from "github/search_repositories")
             let matches_tool = mcp_tool_names.iter().any(|name| {
                 let bare = name.rsplit('/').next().unwrap_or(name);
                 lower.contains(&bare.to_lowercase())
             });
-            if matches_tool {
-                return TaskType::ToolOperation;
-            }
-
-            // If tools are available and task involves file/project/repo operations
-            let tool_action_kw = [
-                "파일",
-                "file",
-                "read",
-                "읽어",
-                "열어",
-                "프로젝트",
-                "project",
-                "repo",
-                "repository",
-                "디렉토리",
-                "directory",
-                "folder",
-                "폴더",
-                "commit",
-                "커밋",
-                "branch",
-                "브랜치",
-                "issue",
-                "이슈",
-                "pr",
-                "search",
-                "검색",
-            ];
-            if tool_action_kw.iter().any(|kw| lower.contains(kw)) {
+            if matches_server || matches_tool {
                 return TaskType::ToolOperation;
             }
         }
 
-        // Code generation keywords
-        let code_kw = [
-            "code",
-            "implement",
-            "function",
-            "class",
-            "refactor",
-            "write",
-            "bug",
-            "fix",
-            "debug",
-            "api",
-            "endpoint",
-        ];
+        // LLM-based classification
+        let tool_context = if has_mcp {
+            format!(
+                "\nAvailable MCP tools: [{}]",
+                mcp_tool_names.iter().take(15).cloned().collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            String::new()
+        };
+
+        let classification_prompt = format!(
+            "Classify the following user task into exactly ONE type.\n\n\
+             Task types:\n\
+             - simple_query: Questions or lookups that need no external action (e.g. greetings, factual Q&A, explanations)\n\
+             - analysis: Tasks requiring data extraction, pattern analysis, or evaluation\n\
+             - code_generation: Tasks involving writing, fixing, refactoring, or debugging code\n\
+             - configuration: Tasks that CHANGE system settings (enable/disable features, switch models, update preferences)\n\
+             - config_query: Tasks that ASK ABOUT current system state or settings without changing them (e.g. \"what backend is active?\", \"show current model\")\n\
+             - tool_operation: Tasks requiring external tool calls (file I/O, API calls, MCP tools){tool_ctx}\n\
+             - complex: Multi-step tasks spanning multiple categories\n\n\
+             User task: \"{task}\"\n\n\
+             Respond with ONLY the type name, nothing else.",
+            tool_ctx = tool_context,
+            task = task,
+        );
+
+        let constraints = crate::router::RoutingConstraints {
+            quality_weight: 0.3,
+            latency_budget_ms: 3_000,
+            cost_budget: 0.01,
+            min_context: 1_000,
+            tool_call_weight: 0.0,
+        };
+
+        match router
+            .infer(
+                crate::types::TaskProfile::General,
+                &classification_prompt,
+                &constraints,
+            )
+            .await
+        {
+            Ok((_decision, result)) => {
+                let output = result.output.trim().to_lowercase();
+                match output.as_str() {
+                    "simple_query" => TaskType::SimpleQuery,
+                    "analysis" => TaskType::Analysis,
+                    "code_generation" => TaskType::CodeGeneration,
+                    "configuration" => TaskType::Configuration,
+                    "config_query" => TaskType::ConfigQuery,
+                    "tool_operation" => TaskType::ToolOperation,
+                    "complex" => TaskType::Complex,
+                    _ => Self::classify_task_fallback(task, has_mcp),
+                }
+            }
+            Err(_) => Self::classify_task_fallback(task, has_mcp),
+        }
+    }
+
+    /// Fast keyword-based fallback when LLM classification is unavailable.
+    fn classify_task_fallback(task: &str, has_mcp: bool) -> TaskType {
+        let lower = task.to_lowercase();
+
+        let config_kw = ["setting", "config", "model", "provider", "backend"];
+        if config_kw.iter().any(|kw| lower.contains(kw)) {
+            return TaskType::Configuration;
+        }
+        if has_mcp {
+            let tool_kw = ["mcp", "file", "repo", "commit", "branch", "search"];
+            if tool_kw.iter().any(|kw| lower.contains(kw)) {
+                return TaskType::ToolOperation;
+            }
+        }
+        let code_kw = ["code", "implement", "function", "refactor", "bug", "fix", "debug"];
         if code_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::CodeGeneration;
         }
-
-        // Analysis keywords
-        let analysis_kw = [
-            "analyze", "analysis", "pattern", "compare", "insight", "metric", "stat", "evaluate",
-            "assess",
-        ];
+        let analysis_kw = ["analyze", "analysis", "pattern", "compare", "evaluate"];
         if analysis_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::Analysis;
         }
-
-        // Simple query: short tasks without action verbs
-        if lower.split_whitespace().count() <= 8
-            && !lower.contains("and")
-            && !lower.contains("then")
-        {
+        if lower.split_whitespace().count() <= 8 {
             return TaskType::SimpleQuery;
         }
-
         TaskType::Complex
     }
 
@@ -1370,7 +1400,47 @@ impl Orchestrator {
         }
     }
 
-    fn build_graph(
+    async fn build_system_state_snapshot(&self) -> String {
+        let settings = self.get_settings();
+        let coder_backend = self.coder_manager.default_backend_kind();
+        let mcp_servers = self.mcp.server_descriptions();
+
+        let persisted = self.memory.store().load_settings().await.ok().flatten();
+        let (term_cmd, term_args, term_auto) = match persisted {
+            Some(ref s) => (s.terminal_command.as_str(), &s.terminal_args, s.terminal_auto_spawn),
+            None => (settings.terminal_command.as_str(), &settings.terminal_args, settings.terminal_auto_spawn),
+        };
+
+        let mcp_section = if mcp_servers.is_empty() {
+            "  MCP servers: (none)".to_string()
+        } else {
+            let lines: Vec<String> = mcp_servers
+                .iter()
+                .map(|(name, desc)| format!("    - {}: {}", name, desc))
+                .collect();
+            format!("  MCP servers:\n{}", lines.join("\n"))
+        };
+
+        format!(
+            "- Preferred model: {}\n\
+             - Disabled models: [{}]\n\
+             - Disabled providers: [{}]\n\
+             - Coder backend: {}\n\
+             - Terminal command: {} {}\n\
+             - Terminal auto-spawn: {}\n\
+             {}",
+            settings.preferred_model.as_deref().unwrap_or("(auto)"),
+            settings.disabled_models.join(", "),
+            settings.disabled_providers.join(", "),
+            coder_backend,
+            term_cmd,
+            term_args.join(" "),
+            term_auto,
+            mcp_section,
+        )
+    }
+
+    async fn build_graph(
         &self,
         task: &str,
         mcp_server_names: &[String],
@@ -1378,7 +1448,9 @@ impl Orchestrator {
         previous_task_type: Option<TaskType>,
         previous_plan: Option<String>,
     ) -> anyhow::Result<ExecutionGraph> {
-        let task_type = Self::classify_task(task, mcp_server_names, mcp_tool_names, previous_task_type);
+        let task_type = Self::classify_task(
+            task, mcp_server_names, mcp_tool_names, previous_task_type, &self.router,
+        ).await;
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
         // Planner instructions — include available tools when MCP servers are registered
@@ -1480,12 +1552,34 @@ impl Orchestrator {
                 summarize.policy = Self::default_policy();
                 graph.add_node(summarize)?;
             }
+            TaskType::ConfigQuery => {
+                // Read-only config query: plan → summarize with system state
+                let state_snapshot = self.build_system_state_snapshot().await;
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    format!(
+                        "Answer the user's question about system configuration using the information below.\n\n\
+                         CURRENT SYSTEM STATE:\n{}\n\n\
+                         Provide a clear, human-readable answer. Do not output raw JSON.",
+                        state_snapshot
+                    ),
+                );
+                summarize.dependencies = vec!["plan".to_string()];
+                summarize.policy = Self::default_policy();
+                graph.add_node(summarize)?;
+            }
             TaskType::Configuration => {
-                // plan → config_manage → summarize
+                // Mutation: plan → config_manage → summarize with system state context
+                let state_snapshot = self.build_system_state_snapshot().await;
                 let mut config = AgentNode::new(
                     "config_manage",
                     AgentRole::ConfigManager,
-                    "Execute the configuration changes requested by the user.",
+                    format!(
+                        "Execute the configuration changes requested by the user.\n\n\
+                         CURRENT SYSTEM STATE (before changes):\n{}",
+                        state_snapshot
+                    ),
                 );
                 config.dependencies = vec!["plan".to_string()];
                 config.policy = ExecutionPolicy {
@@ -2529,14 +2623,21 @@ impl Orchestrator {
 
         let records = outputs
             .into_iter()
-            .map(|n| AgentExecutionRecord {
-                node_id: n.node_id,
-                role: n.role,
-                model: n.model,
-                output: n.output,
-                duration_ms: n.duration_ms,
-                succeeded: n.succeeded,
-                error: n.error,
+            .map(|n| {
+                let output = if n.role == AgentRole::Summarizer {
+                    Self::clean_llm_output(&n.output)
+                } else {
+                    n.output
+                };
+                AgentExecutionRecord {
+                    node_id: n.node_id,
+                    role: n.role,
+                    model: n.model,
+                    output,
+                    duration_ms: n.duration_ms,
+                    succeeded: n.succeeded,
+                    error: n.error,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -3699,6 +3800,7 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .unwrap();
         assert!(graph.node("plan").is_some());
         assert!(graph.node("code").is_some());
@@ -3707,6 +3809,7 @@ mod tests {
         // SimpleQuery should have minimal graph
         let simple = orchestrator
             .build_graph("hello world", &no_servers, &no_tools, None, None)
+            .await
             .unwrap();
         assert!(simple.node("plan").is_some());
         assert!(simple.node("summarize").is_some());
@@ -3721,6 +3824,7 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .unwrap();
         assert!(analysis.node("plan").is_some());
         assert!(analysis.node("analyze").is_some());

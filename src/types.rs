@@ -75,6 +75,7 @@ pub enum TaskType {
     Analysis,
     CodeGeneration,
     Configuration,
+    ConfigQuery,
     ToolOperation,
     Complex,
 }
