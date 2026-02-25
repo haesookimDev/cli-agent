@@ -255,6 +255,58 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS run_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                failure_class TEXT,
+                reason TEXT,
+                delta_prompt_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, node_id, attempt_no)
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_run_attempts_run ON run_attempts(run_id);"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS coder_sessions (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                terminal_session_id TEXT,
+                working_dir TEXT,
+                worktree_branch TEXT,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                files_changed_json TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_coder_sessions_run ON coder_sessions(run_id);"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -1643,6 +1695,103 @@ impl SqliteStore {
         .await?;
         Ok(())
     }
+
+    // --- Coder Sessions ---
+
+    pub async fn insert_coder_session(
+        &self,
+        id: &str,
+        run_id: Uuid,
+        node_id: &str,
+        backend: &str,
+        terminal_session_id: Option<&str>,
+        working_dir: Option<&str>,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO coder_sessions (id, run_id, node_id, backend, terminal_session_id, working_dir, status, started_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+        )
+        .bind(id)
+        .bind(run_id.to_string())
+        .bind(node_id)
+        .bind(backend)
+        .bind(terminal_session_id)
+        .bind(working_dir)
+        .bind(status)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_coder_session_completed(
+        &self,
+        id: &str,
+        status: &str,
+        exit_code: Option<i32>,
+        files_changed_json: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE coder_sessions
+            SET status = ?1, exit_code = ?2, files_changed_json = ?3, ended_at = ?4
+            WHERE id = ?5
+            "#,
+        )
+        .bind(status)
+        .bind(exit_code)
+        .bind(files_changed_json)
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_coder_sessions_for_run(
+        &self,
+        run_id: Uuid,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            r#"SELECT * FROM coder_sessions WHERE run_id = ?1 ORDER BY started_at"#,
+        )
+        .bind(run_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut result = Vec::new();
+        for r in rows {
+            let id: String = r.get("id");
+            let node_id: String = r.get("node_id");
+            let backend: String = r.get("backend");
+            let terminal_sid: Option<String> = r.get("terminal_session_id");
+            let working_dir: Option<String> = r.get("working_dir");
+            let worktree_branch: Option<String> = r.get("worktree_branch");
+            let status: String = r.get("status");
+            let exit_code: Option<i32> = r.get("exit_code");
+            let files_json: Option<String> = r.get("files_changed_json");
+            let started_at: String = r.get("started_at");
+            let ended_at: Option<String> = r.get("ended_at");
+            result.push(serde_json::json!({
+                "id": id,
+                "run_id": run_id.to_string(),
+                "node_id": node_id,
+                "backend": backend,
+                "terminal_session_id": terminal_sid,
+                "working_dir": working_dir,
+                "worktree_branch": worktree_branch,
+                "status": status,
+                "exit_code": exit_code,
+                "files_changed": files_json.and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok()),
+                "started_at": started_at,
+                "ended_at": ended_at,
+            }));
+        }
+        Ok(result)
+    }
 }
 
 fn parse_schedule_row(r: &sqlx::sqlite::SqliteRow) -> anyhow::Result<CronSchedule> {
@@ -1743,6 +1892,8 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "verification_complete" => RunActionType::VerificationComplete,
         "replan_triggered" => RunActionType::ReplanTriggered,
         "terminal_suggested" => RunActionType::TerminalSuggested,
+        "coder_session_started" => RunActionType::CoderSessionStarted,
+        "coder_session_completed" => RunActionType::CoderSessionCompleted,
         _ => {
             return Err(anyhow::anyhow!("unknown run action event type: {value}"));
         }
