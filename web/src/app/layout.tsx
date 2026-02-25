@@ -23,7 +23,9 @@ export default function RootLayout({
             <span className="text-xs text-slate-400">v0.1.0</span>
           </header>
           <Nav />
-          <main className="min-h-0 flex-1">{children}</main>
+          <main className="min-h-0 flex-1 overflow-y-auto pb-4">
+            {children}
+          </main>
         </div>
       </body>
     </html>
