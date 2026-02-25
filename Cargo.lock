@@ -376,6 +376,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "sha2",
+ "shell-words",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

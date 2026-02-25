@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, warn};
+use tracing::{debug, warn, error};
 
 use crate::types::{McpToolCallResult, McpToolDefinition};
 
@@ -45,13 +45,57 @@ impl McpClient {
         args: &[&str],
         env: HashMap<String, String>,
     ) -> anyhow::Result<Self> {
-        let mut child = Command::new(command)
-            .args(args)
-            .envs(env)
+        let mut cmd = if cfg!(target_os = "windows") {
+            let full_args = format!(
+                "{} {}",
+                command,
+                args.iter()
+                    .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.to_string() })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let mut c = Command::new("cmd.exe");
+            c.args(["/C", &full_args]);
+            c
+        } else {
+            let mut c = Command::new(command);
+            c.args(args);
+            c
+        };
+
+        // Inherit parent environment then overlay config-specific vars
+        cmd.envs(std::env::vars());
+        cmd.envs(env);
+
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
+
+        // Drain stderr in background for diagnostics
+        if let Some(stderr) = child.stderr.take() {
+            let mut reader = BufReader::new(stderr);
+            tokio::spawn(async move {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                debug!("MCP stderr: {}", trimmed);
+                            }
+                        }
+                        Err(e) => {
+                            error!("MCP stderr read error: {e}");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         let stdin = child
             .stdin
