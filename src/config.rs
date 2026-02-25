@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::types::McpServerConfig;
+use crate::types::{CoderBackendKind, McpServerConfig};
 
 /// Substitutes `${VAR_NAME}` patterns with environment variable values.
 /// Unset variables are replaced with an empty string.
@@ -41,6 +41,11 @@ pub struct AppConfig {
     pub github_token: Option<String>,
     pub mcp_enabled: bool,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub coder_backend: CoderBackendKind,
+    pub coder_command: String,
+    pub coder_args: Vec<String>,
+    pub coder_working_dir: Option<String>,
+    pub coder_timeout_ms: u64,
 }
 
 impl AppConfig {
@@ -124,6 +129,27 @@ impl AppConfig {
             Vec::new()
         };
 
+        let coder_backend = match env::var("CODER_BACKEND")
+            .unwrap_or_else(|_| "llm".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "claude_code" => CoderBackendKind::ClaudeCode,
+            "codex" => CoderBackendKind::Codex,
+            _ => CoderBackendKind::Llm,
+        };
+        let coder_command =
+            env::var("CODER_COMMAND").unwrap_or_else(|_| "claude".to_string());
+        let coder_args: Vec<String> = env::var("CODER_ARGS")
+            .ok()
+            .map(|v| shell_words::split(&v).unwrap_or_else(|_| vec![v]))
+            .unwrap_or_default();
+        let coder_working_dir = env::var("CODER_WORKING_DIR").ok();
+        let coder_timeout_ms = env::var("CODER_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300_000);
+
         let cfg = Self {
             data_dir,
             session_dir,
@@ -143,6 +169,11 @@ impl AppConfig {
             github_token,
             mcp_enabled,
             mcp_servers,
+            coder_backend,
+            coder_command,
+            coder_args,
+            coder_working_dir,
+            coder_timeout_ms,
         };
 
         cfg.ensure_dirs()?;
