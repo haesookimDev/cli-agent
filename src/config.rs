@@ -5,6 +5,22 @@ use anyhow::Context;
 
 use crate::types::McpServerConfig;
 
+/// Substitutes `${VAR_NAME}` patterns with environment variable values.
+/// Unset variables are replaced with an empty string.
+fn expand_env_vars(input: &str) -> String {
+    let mut result = input.to_string();
+    while let Some(start) = result.find("${") {
+        if let Some(end) = result[start..].find('}') {
+            let var_name = &result[start + 2..start + end];
+            let value = env::var(var_name).unwrap_or_default();
+            result = format!("{}{}{}", &result[..start], value, &result[start + end + 1..]);
+        } else {
+            break;
+        }
+    }
+    result
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub data_dir: PathBuf,
@@ -83,10 +99,22 @@ impl AppConfig {
             let config_path =
                 env::var("MCP_CONFIG_PATH").unwrap_or_else(|_| "mcp_servers.json".to_string());
             match std::fs::read_to_string(&config_path) {
-                Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
-                    eprintln!("warn: failed to parse {}: {}", config_path, e);
-                    Vec::new()
-                }),
+                Ok(json) => {
+                    let mut servers: Vec<McpServerConfig> =
+                        serde_json::from_str(&json).unwrap_or_else(|e| {
+                            eprintln!("warn: failed to parse {}: {}", config_path, e);
+                            Vec::new()
+                        });
+                    for server in &mut servers {
+                        server.args = expand_env_vars(&server.args);
+                        server.env = server
+                            .env
+                            .iter()
+                            .map(|(k, v)| (k.clone(), expand_env_vars(v)))
+                            .collect();
+                    }
+                    servers
+                }
                 Err(e) => {
                     eprintln!("warn: failed to read {}: {}", config_path, e);
                     Vec::new()

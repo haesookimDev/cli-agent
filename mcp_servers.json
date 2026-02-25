@@ -5,31 +5,29 @@
     "command": "npx",
     "args": "-y @modelcontextprotocol/server-github",
     "env": {
-      "GITHUB_PERSONAL_ACCESS_TOKEN": "your-github-pat-here"
+      "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
     }
   },
   {
     "name": "filesystem",
     "description": "Local filesystem access. Use for reading/writing/searching files on the local machine. Scoped to allowed directories only.",
     "command": "npx",
-    "args": "-y @modelcontextprotocol/server-filesystem /tmp /path/to/your/project",
+    "args": "-y @modelcontextprotocol/server-filesystem ${AGENT_WORKSPACE_DIR} ${AGENT_EXTRA_DIR}",
     "env": {}
   },
   {
     "name": "duckduckgo",
-    "description": "Free web search with NO rate limit and NO API key required. Use as the DEFAULT first choice for general web searches. Privacy-focused. Best for: quick lookups, general questions, keyword searches. Limitations: no image/video/news-specific search, results may be less detailed than Brave.",
+    "description": "Free web search with NO rate limit and NO API key required. Use as the DEFAULT first choice for general web searches. Privacy-focused. Best for: quick lookups, general questions, keyword searches. Rate limit: 1/sec, 15000/month.",
     "command": "npx",
-    "args": "-y @nicekid1/duckduckgo-mcp-server",
+    "args": "-y @ericthered926/duckduckgo-mcp-server",
     "env": {}
   },
   {
-    "name": "brave-search",
-    "description": "High-quality web search via Brave Search API. Limit: 2,000 requests/month (free tier). Use when DuckDuckGo results are insufficient or when you need image/video/news search. Best for: detailed web search, news, image search, local business lookup. Prefer DuckDuckGo for simple queries to conserve quota.",
-    "command": "npx",
-    "args": "-y @modelcontextprotocol/server-brave-search",
-    "env": {
-      "BRAVE_API_KEY": "your-brave-api-key-here"
-    }
+    "name": "git",
+    "description": "Git CLI operations for local repositories. Use for: status, diff, commit, log, branch, push, pull, merge, tag. Always prefer this over github/* for local git operations.",
+    "command": "uvx",
+    "args": "mcp-server-git --repository ${AGENT_WORKSPACE_DIR}",
+    "env": {}
   },
   {
     "name": "tavily",
@@ -37,7 +35,7 @@
     "command": "npx",
     "args": "-y tavily-mcp@latest",
     "env": {
-      "TAVILY_API_KEY": "your-tavily-api-key-here"
+      "TAVILY_API_KEY": "${TAVILY_API_KEY}"
     }
   }
 ]
