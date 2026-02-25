@@ -57,6 +57,29 @@ pub enum RuntimeEvent {
         node_id: String,
         role: AgentRole,
         token: String,
+        token_seq: u64,
+    },
+    CoderSessionStarted {
+        node_id: String,
+        session_id: String,
+        backend: String,
+    },
+    CoderOutputChunk {
+        node_id: String,
+        session_id: String,
+        stream: String,
+        content: String,
+    },
+    CoderFileChanged {
+        node_id: String,
+        session_id: String,
+        file: crate::types::CoderFileChanged,
+    },
+    CoderSessionCompleted {
+        node_id: String,
+        session_id: String,
+        files_changed: Vec<crate::types::CoderFileChanged>,
+        exit_code: i32,
     },
     GraphCompleted,
 }

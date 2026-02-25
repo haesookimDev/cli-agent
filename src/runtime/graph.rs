@@ -63,6 +63,7 @@ pub struct AgentNode {
     pub dependencies: Vec<String>,
     pub policy: ExecutionPolicy,
     pub depth: u8,
+    pub retry_context: Option<String>,
 }
 
 impl AgentNode {
@@ -74,6 +75,7 @@ impl AgentNode {
             dependencies: Vec::new(),
             policy: ExecutionPolicy::default(),
             depth: 0,
+            retry_context: None,
         }
     }
 }
