@@ -196,6 +196,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/runs/:run_id/trace", get(get_run_trace_handler))
         .route("/v1/runs/:run_id/stream", get(stream_run_handler))
         .route(
+            "/v1/runs/:run_id/coder-sessions",
+            get(list_coder_sessions_handler),
+        )
+        .route(
             "/v1/webhooks/endpoints",
             post(register_webhook_handler).get(list_webhooks_handler),
         )
@@ -1172,6 +1176,37 @@ async fn get_run_trace_handler(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "run not found"})),
         ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+async fn list_coder_sessions_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.list_coder_sessions(run_id).await {
+        Ok(sessions) => (StatusCode::OK, Json(serde_json::json!({ "sessions": sessions }))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
