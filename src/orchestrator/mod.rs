@@ -1,3 +1,6 @@
+pub mod coder_backend;
+pub mod prompt_composer;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +45,7 @@ pub struct Orchestrator {
     controls: Arc<DashMap<Uuid, RunControl>>,
     workflow_graphs: Arc<DashMap<Uuid, ExecutionGraph>>,
     max_graph_depth: u8,
+    coder_manager: Arc<coder_backend::CoderSessionManager>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +64,7 @@ impl Orchestrator {
         webhook: Arc<WebhookDispatcher>,
         max_graph_depth: u8,
         mcp: Arc<McpRegistry>,
+        coder_manager: Arc<coder_backend::CoderSessionManager>,
     ) -> Self {
         Self {
             runtime,
@@ -73,11 +78,19 @@ impl Orchestrator {
             controls: Arc::new(DashMap::new()),
             workflow_graphs: Arc::new(DashMap::new()),
             max_graph_depth,
+            coder_manager,
         }
     }
 
     pub fn router(&self) -> &Arc<ModelRouter> {
         &self.router
+    }
+
+    pub async fn list_coder_sessions(
+        &self,
+        run_id: Uuid,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.coder_manager.list_sessions_for_run(run_id).await
     }
 
     pub fn get_settings(&self) -> crate::types::AppSettings {
@@ -1608,6 +1621,7 @@ impl Orchestrator {
         let memory = self.memory.clone();
         let context = self.context.clone();
         let mcp = self.mcp.clone();
+        let coder_manager = self.coder_manager.clone();
 
         Arc::new(move |node: AgentNode, deps: Vec<NodeExecutionResult>| {
             let agents = agents.clone();
@@ -1617,6 +1631,7 @@ impl Orchestrator {
             let req = req.clone();
             let mcp = mcp.clone();
             let event_sink = event_sink.clone();
+            let coder_manager = coder_manager.clone();
 
             async move {
                 let started = Instant::now();
@@ -1857,6 +1872,84 @@ impl Orchestrator {
                     });
                 }
 
+                // CLI coder path: delegate to CoderSessionManager for non-LLM backends
+                if node.role == AgentRole::Coder {
+                    let backend_kind = coder_manager.default_backend_kind();
+                    if backend_kind != crate::types::CoderBackendKind::Llm {
+                        let node_id_for_chunk = node.id.clone();
+                        let event_sink_for_chunk = event_sink.clone();
+                        let chunk_callback: Arc<dyn Fn(crate::types::CoderOutputChunk) + Send + Sync> =
+                            Arc::new(move |chunk: crate::types::CoderOutputChunk| {
+                                event_sink_for_chunk(RuntimeEvent::CoderOutputChunk {
+                                    node_id: node_id_for_chunk.clone(),
+                                    session_id: chunk.session_id.clone(),
+                                    stream: chunk.stream.clone(),
+                                    content: chunk.content.clone(),
+                                });
+                            });
+
+                        event_sink(RuntimeEvent::CoderSessionStarted {
+                            node_id: node.id.clone(),
+                            session_id: String::new(),
+                            backend: backend_kind.to_string(),
+                        });
+
+                        let context_str = deps
+                            .iter()
+                            .map(|d| format!("{}: {}", d.node_id, d.output))
+                            .collect::<Vec<_>>()
+                            .join("\n---\n");
+
+                        let result = coder_manager
+                            .run_session(
+                                run_id,
+                                &node.id,
+                                backend_kind,
+                                &req.task,
+                                &context_str,
+                                chunk_callback,
+                            )
+                            .await;
+
+                        return match result {
+                            Ok(session_result) => {
+                                event_sink(RuntimeEvent::CoderSessionCompleted {
+                                    node_id: node.id.clone(),
+                                    session_id: String::new(),
+                                    files_changed: session_result.files_changed.clone(),
+                                    exit_code: session_result.exit_code,
+                                });
+
+                                Ok(NodeExecutionResult {
+                                    node_id: node.id,
+                                    role: node.role,
+                                    model: format!("coder:{}", backend_kind),
+                                    output: session_result.output,
+                                    duration_ms: session_result.duration_ms,
+                                    succeeded: session_result.exit_code == 0,
+                                    error: if session_result.exit_code != 0 {
+                                        Some(format!(
+                                            "coder exited with code {}",
+                                            session_result.exit_code
+                                        ))
+                                    } else {
+                                        None
+                                    },
+                                })
+                            }
+                            Err(err) => Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: format!("coder:{}", backend_kind),
+                                output: String::new(),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(err.to_string()),
+                            }),
+                        };
+                    }
+                }
+
                 let dep_outputs = deps
                     .iter()
                     .map(|d| format!("{}: {}", d.node_id, d.output))
@@ -1977,11 +2070,15 @@ impl Orchestrator {
                 let token_node_id = node.id.clone();
                 let token_role = node.role;
                 let token_sink = event_sink.clone();
+                let token_seq_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let token_counter = token_seq_counter.clone();
                 let on_token: crate::router::TokenCallback = Arc::new(move |token: &str| {
+                    let seq = token_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     token_sink(RuntimeEvent::NodeTokenChunk {
                         node_id: token_node_id.clone(),
                         role: token_role,
                         token: token.to_string(),
+                        token_seq: seq,
                     });
                 });
 
@@ -2138,8 +2235,11 @@ impl Orchestrator {
                     }
                 }
 
-                // Emit TerminalSuggested when Coder node completes successfully
-                if node.role == AgentRole::Coder && result.succeeded {
+                // Emit TerminalSuggested when Coder node completes via LLM backend
+                if node.role == AgentRole::Coder
+                    && result.succeeded
+                    && !result.model.starts_with("coder:")
+                {
                     let _ = memory
                         .append_run_action_event(
                             run_id,
@@ -2194,6 +2294,7 @@ impl Orchestrator {
                 ref node_id,
                 ref role,
                 ref token,
+                token_seq: _,
             } = event
             {
                 let _ = token_tx.send((node_id.clone(), *role, token.clone()));
@@ -2260,6 +2361,32 @@ impl Orchestrator {
                         "dependencies": dependencies,
                     }),
                     RuntimeEvent::NodeTokenChunk { .. } => unreachable!(),
+                    RuntimeEvent::CoderSessionStarted { node_id, session_id, backend } => serde_json::json!({
+                        "node_id": node_id,
+                        "session_id": session_id,
+                        "backend": backend,
+                        "phase": "coder_session_started",
+                    }),
+                    RuntimeEvent::CoderOutputChunk { node_id, session_id, stream, content } => serde_json::json!({
+                        "node_id": node_id,
+                        "session_id": session_id,
+                        "stream": stream,
+                        "content": content,
+                        "phase": "coder_output_chunk",
+                    }),
+                    RuntimeEvent::CoderFileChanged { node_id, session_id, file } => serde_json::json!({
+                        "node_id": node_id,
+                        "session_id": session_id,
+                        "file": file,
+                        "phase": "coder_file_changed",
+                    }),
+                    RuntimeEvent::CoderSessionCompleted { node_id, session_id, files_changed, exit_code } => serde_json::json!({
+                        "node_id": node_id,
+                        "session_id": session_id,
+                        "files_changed": files_changed,
+                        "exit_code": exit_code,
+                        "phase": "coder_session_completed",
+                    }),
                     RuntimeEvent::GraphCompleted => {
                         serde_json::json!({ "phase": "graph_completed" })
                     }
@@ -2272,6 +2399,10 @@ impl Orchestrator {
                     RuntimeEvent::NodeSkipped { .. }
                     | RuntimeEvent::DynamicNodeAdded { .. }
                     | RuntimeEvent::NodeTokenChunk { .. }
+                    | RuntimeEvent::CoderSessionStarted { .. }
+                    | RuntimeEvent::CoderOutputChunk { .. }
+                    | RuntimeEvent::CoderFileChanged { .. }
+                    | RuntimeEvent::CoderSessionCompleted { .. }
                     | RuntimeEvent::GraphCompleted => SessionEventType::RunProgress,
                 };
 
@@ -2292,6 +2423,18 @@ impl Orchestrator {
                         (RunActionType::DynamicNodeAdded, Some(node_id.as_str()))
                     }
                     RuntimeEvent::NodeTokenChunk { .. } => unreachable!(),
+                    RuntimeEvent::CoderSessionStarted { node_id, .. } => {
+                        (RunActionType::CoderSessionStarted, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::CoderOutputChunk { node_id, .. } => {
+                        (RunActionType::NodeTokenChunk, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::CoderFileChanged { node_id, .. } => {
+                        (RunActionType::CoderSessionStarted, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::CoderSessionCompleted { node_id, .. } => {
+                        (RunActionType::CoderSessionCompleted, Some(node_id.as_str()))
+                    }
                     RuntimeEvent::GraphCompleted => (RunActionType::GraphCompleted, Some("graph")),
                 };
 
@@ -3039,7 +3182,9 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::VerificationStarted
             | RunActionType::VerificationComplete
             | RunActionType::ReplanTriggered
-            | RunActionType::TerminalSuggested => {}
+            | RunActionType::TerminalSuggested
+            | RunActionType::CoderSessionStarted
+            | RunActionType::CoderSessionCompleted => {}
         }
     }
 
@@ -3523,15 +3668,23 @@ mod tests {
             Duration::from_secs(1),
         ));
 
+        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None));
+        let mut coder_mgr = coder_backend::CoderSessionManager::new(
+            memory.clone(),
+            std::env::temp_dir(),
+            crate::types::CoderBackendKind::Llm,
+        );
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
         let orchestrator = Orchestrator::new(
             AgentRuntime::new(4),
             AgentRegistry::builtin(),
-            Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None)),
+            router,
             memory,
             Arc::new(ContextManager::new(8_000)),
             webhook,
             6,
             Arc::new(McpRegistry::new()),
+            Arc::new(coder_mgr),
         );
 
         let no_servers: Vec<String> = vec![];

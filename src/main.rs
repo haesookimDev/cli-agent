@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +17,14 @@ use cli_agent::interface::api::{self, ApiState};
 use cli_agent::interface::tui;
 use cli_agent::memory::MemoryManager;
 use cli_agent::orchestrator::Orchestrator;
+use cli_agent::orchestrator::coder_backend::{
+    ClaudeCodeBackend, CodexBackend, CoderSessionManager, LlmCoderBackend,
+};
 use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
 use cli_agent::scheduler::CronScheduler;
 use cli_agent::terminal::TerminalManager;
-use cli_agent::types::{RunRequest, TaskProfile};
+use cli_agent::types::{CoderBackendKind, RunRequest, TaskProfile};
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
 
 #[derive(Debug, Parser)]
@@ -134,6 +138,34 @@ async fn main() -> anyhow::Result<()> {
     }
     let mcp = Arc::new(mcp_registry);
 
+    let mut coder_mgr = CoderSessionManager::new(
+        memory.clone(),
+        cfg.coder_working_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        cfg.coder_backend,
+    );
+    coder_mgr.register_backend(Arc::new(LlmCoderBackend::new(router.clone())));
+    match cfg.coder_backend {
+        CoderBackendKind::ClaudeCode => {
+            coder_mgr.register_backend(Arc::new(ClaudeCodeBackend::new(
+                cfg.coder_command.clone(),
+                cfg.coder_args.clone(),
+                Duration::from_millis(cfg.coder_timeout_ms),
+            )));
+        }
+        CoderBackendKind::Codex => {
+            coder_mgr.register_backend(Arc::new(CodexBackend::new(
+                cfg.coder_command.clone(),
+                cfg.coder_args.clone(),
+                Duration::from_millis(cfg.coder_timeout_ms),
+            )));
+        }
+        CoderBackendKind::Llm => {}
+    }
+    let coder_manager = Arc::new(coder_mgr);
+
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
         AgentRegistry::builtin(),
@@ -143,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         webhook,
         cfg.max_graph_depth,
         mcp,
+        coder_manager,
     );
     orchestrator.load_persisted_settings().await;
 
