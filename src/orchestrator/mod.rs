@@ -792,13 +792,50 @@ impl Orchestrator {
             .into_iter()
             .map(|t| t.name)
             .collect();
+        // Resolve previous run context for continuation detection
+        let (previous_task_type, previous_plan) = if Self::is_continuation_command(req.task.as_str()) {
+            let session_runs = self
+                .memory
+                .list_session_runs(session_id, 5)
+                .await
+                .unwrap_or_default();
+            match session_runs
+                .iter()
+                .find(|r| r.run_id != run_id && r.status == RunStatus::Succeeded)
+            {
+                Some(prev) => {
+                    let prev_type = Self::classify_task(
+                        prev.task.as_str(),
+                        &mcp_server_names,
+                        &mcp_tool_names,
+                        None,
+                    );
+                    let prev_plan = prev
+                        .outputs
+                        .iter()
+                        .find(|o| o.role == AgentRole::Planner && o.succeeded)
+                        .map(|o| o.output.clone());
+                    (Some(prev_type), prev_plan)
+                }
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
         let graph = self
             .workflow_graphs
             .remove(&run_id)
             .map(|(_, g)| g)
             .unwrap_or_else(|| {
-                self.build_graph(req.task.as_str(), &mcp_server_names, &mcp_tool_names)
-                    .unwrap()
+                self.build_graph(
+                    req.task.as_str(),
+                    &mcp_server_names,
+                    &mcp_tool_names,
+                    previous_task_type,
+                    previous_plan,
+                )
+                .unwrap()
             });
         let graph_nodes = graph.nodes();
         self.record_action_event(
@@ -862,24 +899,24 @@ impl Orchestrator {
 
         match outputs {
             Ok(node_results) => {
-                let final_status = if cancel_flag.load(Ordering::Relaxed) {
-                    RunStatus::Cancelled
+                if cancel_flag.load(Ordering::Relaxed) {
+                    self.finish_run(run_id, RunStatus::Cancelled, node_results, None)
+                        .await?;
                 } else if node_results.iter().all(|r| r.succeeded) {
-                    // Verification loop: check if the request was fully satisfied
-                    let verified = self
+                    let (verified, reason) = self
                         .verify_completion(run_id, session_id, &req.task, &node_results)
                         .await;
-                    if verified {
-                        RunStatus::Succeeded
+                    let error_message = if verified {
+                        None
                     } else {
-                        RunStatus::Succeeded // Still mark as succeeded but log the gap
-                    }
+                        Some(format!("Verification incomplete: {}", reason))
+                    };
+                    self.finish_run(run_id, RunStatus::Succeeded, node_results, error_message)
+                        .await?;
                 } else {
-                    RunStatus::Failed
-                };
-
-                self.finish_run(run_id, final_status, node_results, None)
-                    .await?;
+                    self.finish_run(run_id, RunStatus::Failed, node_results, None)
+                        .await?;
+                }
             }
             Err(err) => {
                 self.finish_run(run_id, RunStatus::Failed, vec![], Some(err.to_string()))
@@ -896,7 +933,7 @@ impl Orchestrator {
         session_id: Uuid,
         original_task: &str,
         results: &[NodeExecutionResult],
-    ) -> bool {
+    ) -> (bool, String) {
         // Record verification start
         self.record_action_event(
             run_id,
@@ -983,7 +1020,7 @@ impl Orchestrator {
         )
         .await;
 
-        is_complete
+        (is_complete, reason)
     }
 
     fn has_explicit_remote_repo_reference(task: &str) -> bool {
@@ -1015,9 +1052,23 @@ impl Orchestrator {
             "경로",
             "파일",
             "readme.md",
+            "current directory",
+            "current folder",
+            "my project",
+            "my repo",
+            "working directory",
+            "작성",
+            "수정",
+            "편집",
+            "커밋",
         ];
 
-        local_markers.iter().any(|kw| lower.contains(kw))
+        let has_path_like = lower.contains('/')
+            && !lower.contains("http://")
+            && !lower.contains("https://")
+            && !lower.contains("github.com");
+
+        (local_markers.iter().any(|kw| lower.contains(kw)) || has_path_like)
             && !Self::has_explicit_remote_repo_reference(lower.as_str())
     }
 
@@ -1044,6 +1095,31 @@ impl Orchestrator {
             "이어서",
         ];
         follow_up_markers.iter().any(|kw| lower.contains(kw))
+    }
+
+    /// Detects explicit continuation/execution commands that should inherit
+    /// the previous run's TaskType rather than being classified independently.
+    fn is_continuation_command(task: &str) -> bool {
+        let lower = task.trim().to_lowercase();
+        // Must be short (no substantive new task content)
+        if lower.split_whitespace().count() > 6 {
+            return false;
+        }
+        let continuation_markers = [
+            "실행해",
+            "진행해",
+            "계속해",
+            "이어서",
+            "다음 작업",
+            "go ahead",
+            "do it",
+            "execute",
+            "proceed",
+            "continue",
+            "run it",
+            "carry on",
+        ];
+        continuation_markers.iter().any(|kw| lower.contains(kw))
     }
 
     fn build_memory_query(
@@ -1159,7 +1235,15 @@ impl Orchestrator {
         task: &str,
         mcp_server_names: &[String],
         mcp_tool_names: &[String],
+        previous_task_type: Option<TaskType>,
     ) -> TaskType {
+        // If this is a continuation command and we have session context, inherit
+        if Self::is_continuation_command(task) {
+            if let Some(prev_type) = previous_task_type {
+                return prev_type;
+            }
+        }
+
         let lower = task.to_lowercase();
 
         // Configuration keywords
@@ -1278,8 +1362,10 @@ impl Orchestrator {
         task: &str,
         mcp_server_names: &[String],
         mcp_tool_names: &[String],
+        previous_task_type: Option<TaskType>,
+        previous_plan: Option<String>,
     ) -> anyhow::Result<ExecutionGraph> {
-        let task_type = Self::classify_task(task, mcp_server_names, mcp_tool_names);
+        let task_type = Self::classify_task(task, mcp_server_names, mcp_tool_names, previous_task_type);
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
         // Planner instructions — include available tools when MCP servers are registered
@@ -1301,7 +1387,11 @@ impl Orchestrator {
                 String::new()
             };
             let local_first_hint = if Self::is_local_workspace_task(task) {
-                "\nLocal-first policy: if user intent points to local files/project workspace, prioritize filesystem tools and local paths before remote repository APIs."
+                "\n\nSTRICT LOCAL-FIRST POLICY:\n\
+                 - You MUST plan filesystem/* tools for any task involving local files, directories, or project workspace contents.\n\
+                 - NEVER plan github/* or remote API calls for reading/writing local files.\n\
+                 - Only plan github/* when the user explicitly asks for remote repository operations (e.g., creating PRs, checking remote issues).\n\
+                 - For file edits and commits on local projects, use filesystem/* tools (read, write, edit)."
             } else {
                 ""
             };
@@ -1312,6 +1402,17 @@ impl Orchestrator {
             )
         } else {
             "Plan work and constraints.".to_string()
+        };
+
+        // Inject previous plan context for continuation commands
+        let planner_instructions = if let Some(ref prev_plan) = previous_plan {
+            format!(
+                "{}\n\nPREVIOUS PLAN (from prior run in this session — continue execution from here):\n{}",
+                planner_instructions,
+                Self::trim_for_context(prev_plan, 800)
+            )
+        } else {
+            planner_instructions
         };
 
         let mut plan = AgentNode::new("plan", AgentRole::Planner, planner_instructions);
@@ -1553,152 +1654,205 @@ impl Orchestrator {
                         String::new()
                     };
                     let local_first_hint = if Self::is_local_workspace_task(req.task.as_str()) {
-                        "\n\nLOCAL-WORKSPACE RULE:\n- If the task refers to local files/project folders, choose filesystem/* tools first.\n- Use github/* only when the user explicitly requests remote repository operations."
+                        "\n\nSTRICT LOCAL-WORKSPACE RULE:\n\
+                         - You MUST select filesystem/* tools for any operation on local files or directories.\n\
+                         - NEVER select github/* tools for reading or modifying local project files.\n\
+                         - github/* tools are ONLY for explicitly remote operations (PRs, issues, remote repo metadata).\n\
+                         - If the planner mentions local file paths, you MUST use filesystem/* tools regardless of what other tools are available."
                     } else {
                         ""
                     };
 
-                    // Phase B: LLM decides which tool(s) to call
-                    let selection_prompt = format!(
-                        "You are the tool caller agent.\n\n\
-                         USER TASK:\n{}\n\n\
-                         PLANNER OUTPUT:\n{}\n\n\
-                         AVAILABLE MCP TOOLS:\n{}{}{}\n\n\
-                         Based on the planner output, select which tool(s) to call.\n\
-                         Respond ONLY with a JSON array. Each element: \
-                         {{\"tool_name\": \"server/tool_name\", \"arguments\": {{...}}}}\n\
-                         If no tool is needed, respond with [].",
-                        req.task,
-                        dep_outputs.join("\n---\n"),
-                        tool_list_str,
-                        server_guide,
-                        local_first_hint,
-                    );
+                    // Phase B+C: Iterative tool calling loop
+                    const MAX_TOOL_ITERATIONS: usize = 5;
+                    let mut all_results: Vec<String> = Vec::new();
+                    let mut total_tool_calls: usize = 0;
+                    let mut any_failure = false;
 
-                    let optimized = context.optimize(vec![]);
-                    let brief = context.build_structured_brief(
-                        req.task.clone(),
-                        vec!["select tools".to_string()],
-                        vec![format!("node={}", node.id)],
-                        vec![],
-                    );
+                    for iteration in 0..MAX_TOOL_ITERATIONS {
+                        let iteration_context = if all_results.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n\nPREVIOUS TOOL RESULTS (iterations 0..{}):\n{}",
+                                iteration - 1,
+                                all_results.join("\n---\n")
+                            )
+                        };
 
-                    let selection_input = AgentInput {
-                        task: req.task.clone(),
-                        instructions: selection_prompt,
-                        context: optimized,
-                        dependency_outputs: dep_outputs,
-                        brief,
-                    };
+                        let selection_prompt = format!(
+                            "You are the tool caller agent.\n\n\
+                             USER TASK:\n{}\n\n\
+                             PLANNER OUTPUT:\n{}\n\n\
+                             AVAILABLE MCP TOOLS:\n{}{}{}{}\n\n\
+                             INSTRUCTIONS:\n\
+                             - Select the NEXT tool call(s) needed to complete the task.\n\
+                             - You may use results from previous iterations to inform arguments.\n\
+                             - If the task requires sequential steps (e.g., read a value, then use it), \
+                               select only the NEXT step's tool(s) in this iteration.\n\
+                             - When ALL steps are complete and no more tools are needed, respond with exactly: DONE\n\n\
+                             Respond ONLY with a JSON array of tool calls, OR the word DONE.\n\
+                             Each element: {{\"tool_name\": \"server/tool_name\", \"arguments\": {{...}}}}",
+                            req.task,
+                            dep_outputs.join("\n---\n"),
+                            tool_list_str,
+                            server_guide,
+                            local_first_hint,
+                            iteration_context,
+                        );
 
-                    let selection_result = agents
-                        .run_role(AgentRole::ToolCaller, selection_input, router.clone())
-                        .await;
+                        let optimized = context.optimize(vec![]);
+                        let brief = context.build_structured_brief(
+                            req.task.clone(),
+                            vec!["select tools".to_string()],
+                            vec![format!("node={}", node.id), format!("iteration={iteration}")],
+                            vec![],
+                        );
 
-                    let llm_output = match selection_result {
-                        Ok(output) => output.content,
-                        Err(err) => {
+                        let selection_input = AgentInput {
+                            task: req.task.clone(),
+                            instructions: selection_prompt,
+                            context: optimized,
+                            dependency_outputs: dep_outputs.clone(),
+                            brief,
+                        };
+
+                        let selection_result = agents
+                            .run_role(AgentRole::ToolCaller, selection_input, router.clone())
+                            .await;
+
+                        let llm_output = match selection_result {
+                            Ok(output) => output.content,
+                            Err(err) => {
+                                return Ok(NodeExecutionResult {
+                                    node_id: node.id,
+                                    role: node.role,
+                                    model: "unavailable".to_string(),
+                                    output: all_results.join("\n---\n"),
+                                    duration_ms: started.elapsed().as_millis(),
+                                    succeeded: false,
+                                    error: Some(format!(
+                                        "LLM tool selection failed at iteration {iteration}: {err}"
+                                    )),
+                                });
+                            }
+                        };
+
+                        // Check for DONE signal
+                        let trimmed_output = llm_output.trim();
+                        if trimmed_output.eq_ignore_ascii_case("done")
+                            || trimmed_output == "\"DONE\""
+                            || trimmed_output == "\"done\""
+                        {
+                            break;
+                        }
+
+                        // Parse LLM response (strip markdown fences)
+                        let json_str = trimmed_output
+                            .strip_prefix("```json")
+                            .or_else(|| trimmed_output.strip_prefix("```"))
+                            .unwrap_or(trimmed_output)
+                            .strip_suffix("```")
+                            .unwrap_or(trimmed_output)
+                            .trim();
+
+                        let tool_calls = parse_tool_calls(json_str);
+
+                        if tool_calls.is_empty() {
+                            // If we have prior results, treat as implicit completion
+                            if !all_results.is_empty() {
+                                break;
+                            }
+                            // No prior results — this is a failure
                             return Ok(NodeExecutionResult {
                                 node_id: node.id,
                                 role: node.role,
-                                model: "unavailable".to_string(),
-                                output: String::new(),
+                                model: "mcp:none".to_string(),
+                                output: format!(
+                                    "No executable tool calls were parsed.\nRaw selector output:\n{}",
+                                    llm_output
+                                ),
                                 duration_ms: started.elapsed().as_millis(),
                                 succeeded: false,
-                                error: Some(format!("LLM tool selection failed: {err}")),
+                                error: Some("No executable tool calls were parsed from LLM output".to_string()),
                             });
                         }
-                    };
 
-                    // Phase C: Parse LLM response and execute MCP calls
-                    let json_str = llm_output
-                        .trim()
-                        .strip_prefix("```json")
-                        .or_else(|| llm_output.trim().strip_prefix("```"))
-                        .unwrap_or(llm_output.trim())
-                        .strip_suffix("```")
-                        .unwrap_or(llm_output.trim())
-                        .trim();
+                        // Execute tool calls for this iteration
+                        for call in &tool_calls {
+                            let tool_name = call
+                                .get("tool_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let arguments = call
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or(serde_json::json!({}));
+                            let arguments_snapshot = arguments.clone();
 
-                    let tool_calls = parse_tool_calls(json_str);
-
-                    if tool_calls.is_empty() {
-                        return Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
-                            model: "mcp:none".to_string(),
-                            output: format!(
-                                "No executable tool calls were parsed.\nRaw selector output:\n{}",
-                                llm_output
-                            ),
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: true,
-                            error: None,
-                        });
-                    }
-
-                    let mut results = Vec::new();
-                    for call in &tool_calls {
-                        let tool_name = call
-                            .get("tool_name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let arguments = call
-                            .get("arguments")
-                            .cloned()
-                            .unwrap_or(serde_json::json!({}));
-                        let arguments_snapshot = arguments.clone();
-
-                        match mcp.call_tool(&tool_name, arguments).await {
-                            Ok(result) => {
-                                let _ = memory
-                                    .append_run_action_event(
-                                        run_id,
-                                        session_id,
-                                        RunActionType::McpToolCalled,
-                                        Some("node"),
-                                        Some(node.id.as_str()),
-                                        None,
-                                        serde_json::json!({
-                                            "node_id": node.id,
-                                            "tool_name": tool_name,
-                                            "arguments": arguments_snapshot,
-                                            "succeeded": result.succeeded,
-                                            "content": result.content,
-                                            "error": result.error,
-                                            "duration_ms": result.duration_ms,
-                                        }),
-                                    )
-                                    .await;
-                                results.push(format!(
-                                    "[{}] {}: {}",
-                                    if result.succeeded { "OK" } else { "ERR" },
-                                    tool_name,
-                                    result.content
-                                ));
+                            match mcp.call_tool(&tool_name, arguments).await {
+                                Ok(result) => {
+                                    let _ = memory
+                                        .append_run_action_event(
+                                            run_id,
+                                            session_id,
+                                            RunActionType::McpToolCalled,
+                                            Some("node"),
+                                            Some(node.id.as_str()),
+                                            None,
+                                            serde_json::json!({
+                                                "node_id": node.id,
+                                                "tool_name": tool_name,
+                                                "arguments": arguments_snapshot,
+                                                "succeeded": result.succeeded,
+                                                "content": result.content,
+                                                "error": result.error,
+                                                "duration_ms": result.duration_ms,
+                                                "iteration": iteration,
+                                            }),
+                                        )
+                                        .await;
+                                    if !result.succeeded {
+                                        any_failure = true;
+                                    }
+                                    all_results.push(format!(
+                                        "[iter={}] [{}] {}: {}",
+                                        iteration,
+                                        if result.succeeded { "OK" } else { "ERR" },
+                                        tool_name,
+                                        result.content
+                                    ));
+                                }
+                                Err(err) => {
+                                    any_failure = true;
+                                    all_results.push(format!(
+                                        "[iter={}] [ERR] {}: {}",
+                                        iteration, tool_name, err
+                                    ));
+                                }
                             }
-                            Err(err) => {
-                                results
-                                    .push(format!("[ERR] {}: {}", tool_name, err));
-                            }
+                            total_tool_calls += 1;
                         }
                     }
 
-                    let all_succeeded = results.iter().all(|r| r.starts_with("[OK]"));
-                    let combined_output = results.join("\n---\n");
+                    // Final result assembly
+                    let all_succeeded = !any_failure && total_tool_calls > 0;
+                    let combined_output = all_results.join("\n---\n");
 
                     return Ok(NodeExecutionResult {
                         node_id: node.id,
                         role: node.role,
-                        model: format!("mcp:{}", tool_calls.len()),
+                        model: format!("mcp:{}", total_tool_calls),
                         output: combined_output,
                         duration_ms: started.elapsed().as_millis(),
                         succeeded: all_succeeded,
                         error: if all_succeeded {
                             None
+                        } else if total_tool_calls == 0 {
+                            Some("No tool calls were executed across all iterations".to_string())
                         } else {
-                            Some("one or more tool calls failed".to_string())
+                            Some("One or more tool calls failed".to_string())
                         },
                     });
                 }
@@ -3389,6 +3543,8 @@ mod tests {
                 "implement a webhook integration endpoint with code",
                 &no_servers,
                 &no_tools,
+                None,
+                None,
             )
             .unwrap();
         assert!(graph.node("plan").is_some());
@@ -3397,7 +3553,7 @@ mod tests {
 
         // SimpleQuery should have minimal graph
         let simple = orchestrator
-            .build_graph("hello world", &no_servers, &no_tools)
+            .build_graph("hello world", &no_servers, &no_tools, None, None)
             .unwrap();
         assert!(simple.node("plan").is_some());
         assert!(simple.node("summarize").is_some());
@@ -3409,6 +3565,8 @@ mod tests {
                 "analyze the performance patterns and evaluate metrics",
                 &no_servers,
                 &no_tools,
+                None,
+                None,
             )
             .unwrap();
         assert!(analysis.node("plan").is_some());
