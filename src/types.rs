@@ -291,6 +291,8 @@ pub enum RunActionType {
     VerificationComplete,
     ReplanTriggered,
     TerminalSuggested,
+    CoderSessionStarted,
+    CoderSessionCompleted,
 }
 
 impl Display for RunActionType {
@@ -318,6 +320,8 @@ impl Display for RunActionType {
             RunActionType::VerificationComplete => "verification_complete",
             RunActionType::ReplanTriggered => "replan_triggered",
             RunActionType::TerminalSuggested => "terminal_suggested",
+            RunActionType::CoderSessionStarted => "coder_session_started",
+            RunActionType::CoderSessionCompleted => "coder_session_completed",
         };
         write!(f, "{s}")
     }
@@ -606,4 +610,66 @@ pub struct WorkflowParameter {
     pub name: String,
     pub description: String,
     pub default_value: Option<String>,
+}
+
+// --- Coder Backend Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoderBackendKind {
+    ClaudeCode,
+    Codex,
+    Llm,
+}
+
+impl Default for CoderBackendKind {
+    fn default() -> Self {
+        Self::Llm
+    }
+}
+
+impl Display for CoderBackendKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            CoderBackendKind::ClaudeCode => "claude_code",
+            CoderBackendKind::Codex => "codex",
+            CoderBackendKind::Llm => "llm",
+        };
+        write!(f, "{s}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoderOutputChunk {
+    pub session_id: String,
+    pub stream: String,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoderFileChanged {
+    pub path: String,
+    pub change_type: String,
+    pub diff_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoderSessionResult {
+    pub output: String,
+    pub exit_code: i32,
+    pub files_changed: Vec<CoderFileChanged>,
+    pub duration_ms: u128,
+}
+
+// --- Prompt Composer Types ---
+
+#[derive(Debug, Clone, Default)]
+pub struct PromptLayers {
+    pub system_policy: String,
+    pub task_intent: String,
+    pub session_anchor: String,
+    pub memory_retrieval: String,
+    pub failure_delta: Option<String>,
+    pub output_schema: String,
 }
