@@ -79,6 +79,7 @@ pub enum TaskType {
     Configuration,
     ConfigQuery,
     ToolOperation,
+    ExternalProject,
     Complex,
 }
 
@@ -151,6 +152,7 @@ pub struct RunRequest {
     pub session_id: Option<Uuid>,
     pub workflow_id: Option<String>,
     pub workflow_params: Option<serde_json::Value>,
+    pub repo_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +302,8 @@ pub enum RunActionType {
     ValidationFailed,
     GitCommitCreated,
     GitPushCompleted,
+    RepoCloneCompleted,
+    RepoAnalysisCompleted,
 }
 
 impl Display for RunActionType {
@@ -333,6 +337,8 @@ impl Display for RunActionType {
             RunActionType::ValidationFailed => "validation_failed",
             RunActionType::GitCommitCreated => "git_commit_created",
             RunActionType::GitPushCompleted => "git_push_completed",
+            RunActionType::RepoCloneCompleted => "repo_clone_completed",
+            RunActionType::RepoAnalysisCompleted => "repo_analysis_completed",
         };
         write!(f, "{s}")
     }
@@ -746,4 +752,70 @@ pub struct ValidationResult {
     pub stderr: String,
     pub duration_ms: u128,
     pub passed: bool,
+}
+
+// --- Repo Analysis Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechStack {
+    pub primary_language: String,
+    pub languages: Vec<(String, f32)>,
+    pub frameworks: Vec<String>,
+    pub package_manager: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectedCommands {
+    pub lint_commands: Vec<String>,
+    pub build_commands: Vec<String>,
+    pub test_commands: Vec<String>,
+}
+
+impl DetectedCommands {
+    pub fn has_lint(&self) -> bool {
+        !self.lint_commands.is_empty() || !self.build_commands.is_empty()
+    }
+
+    pub fn has_test(&self) -> bool {
+        !self.test_commands.is_empty()
+    }
+
+    pub fn lint_and_build_commands(&self) -> Vec<String> {
+        self.lint_commands
+            .iter()
+            .chain(self.build_commands.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoAnalysis {
+    pub repo_path: String,
+    pub tech_stack: TechStack,
+    pub detected_commands: DetectedCommands,
+    pub repo_map: String,
+    pub file_count: usize,
+    pub key_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoAnalysisConfig {
+    pub clone_base_dir: String,
+    pub shallow_clone: bool,
+    pub max_files_to_scan: usize,
+    pub max_file_size_bytes: u64,
+    pub repo_map_max_tokens: usize,
+}
+
+impl Default for RepoAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            clone_base_dir: "data/repos".to_string(),
+            shallow_clone: true,
+            max_files_to_scan: 5000,
+            max_file_size_bytes: 100_000,
+            repo_map_max_tokens: 4000,
+        }
+    }
 }

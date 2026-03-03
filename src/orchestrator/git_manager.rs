@@ -110,6 +110,70 @@ impl GitManager {
         }
     }
 
+    /// Clone a git repository. Returns the path to the cloned repo.
+    pub async fn clone_repo(
+        url: &str,
+        target_dir: &Path,
+        shallow: bool,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        let repo_name = url
+            .rsplit('/')
+            .next()
+            .unwrap_or("repo")
+            .trim_end_matches(".git");
+        let clone_path = target_dir.join(repo_name);
+
+        if clone_path.exists() && Self::is_git_repo(&clone_path).await {
+            Self::run_git(&clone_path, &["pull", "--ff-only"])
+                .await
+                .ok();
+            return Ok(clone_path);
+        }
+
+        let clone_path_str = clone_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid clone path"))?;
+
+        let mut args = vec!["clone"];
+        if shallow {
+            args.extend(["--depth", "1"]);
+        }
+        args.push(url);
+        args.push(clone_path_str);
+
+        let output = Command::new("git")
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("git clone failed: {}", stderr));
+        }
+
+        Ok(clone_path)
+    }
+
+    /// Checkout a specific ref (branch, tag, commit).
+    pub async fn checkout_ref(working_dir: &Path, ref_name: &str) -> anyhow::Result<()> {
+        Self::run_git(working_dir, &["checkout", ref_name]).await?;
+        Ok(())
+    }
+
+    /// Unshallow a shallow clone (needed before creating branches).
+    pub async fn unshallow(working_dir: &Path) -> anyhow::Result<()> {
+        let is_shallow = Self::run_git(working_dir, &["rev-parse", "--is-shallow-repository"])
+            .await
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        if is_shallow {
+            Self::run_git(working_dir, &["fetch", "--unshallow"]).await?;
+        }
+        Ok(())
+    }
+
     fn truncate(text: &str, max_chars: usize) -> &str {
         if text.len() <= max_chars {
             text

@@ -93,6 +93,16 @@ pub enum RuntimeEvent {
         commit_message: String,
         pushed: bool,
     },
+    RepoCloned {
+        node_id: String,
+        repo_path: String,
+        shallow: bool,
+    },
+    RepoAnalyzed {
+        node_id: String,
+        primary_language: String,
+        file_count: usize,
+    },
 }
 
 const NODE_OUTPUT_PREVIEW_CHARS: usize = 8_192;

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::types::{CoderBackendKind, McpServerConfig, ValidationConfig};
+use crate::types::{CoderBackendKind, McpServerConfig, RepoAnalysisConfig, ValidationConfig};
 
 /// Substitutes `${VAR_NAME}` patterns with environment variable values.
 /// Unset variables are replaced with an empty string.
@@ -47,6 +47,7 @@ pub struct AppConfig {
     pub coder_working_dir: Option<String>,
     pub coder_timeout_ms: u64,
     pub validation: ValidationConfig,
+    pub repo_analysis: RepoAnalysisConfig,
 }
 
 impl AppConfig {
@@ -192,6 +193,26 @@ impl AppConfig {
                 .unwrap_or(true),
         };
 
+        let repo_analysis = RepoAnalysisConfig {
+            clone_base_dir: env::var("REPO_CLONE_DIR")
+                .unwrap_or_else(|_| data_dir.join("repos").to_string_lossy().to_string()),
+            shallow_clone: env::var("REPO_SHALLOW_CLONE")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true),
+            max_files_to_scan: env::var("REPO_MAX_FILES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5000),
+            max_file_size_bytes: env::var("REPO_MAX_FILE_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100_000),
+            repo_map_max_tokens: env::var("REPO_MAP_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4000),
+        };
+
         let cfg = Self {
             data_dir,
             session_dir,
@@ -217,6 +238,7 @@ impl AppConfig {
             coder_working_dir,
             coder_timeout_ms,
             validation,
+            repo_analysis,
         };
 
         cfg.ensure_dirs()?;
@@ -231,6 +253,10 @@ impl AppConfig {
                 "failed to create session dir {}",
                 self.session_dir.display()
             )
+        })?;
+        let repo_dir = std::path::PathBuf::from(&self.repo_analysis.clone_base_dir);
+        std::fs::create_dir_all(&repo_dir).with_context(|| {
+            format!("failed to create repo clone dir {}", repo_dir.display())
         })?;
         Ok(())
     }

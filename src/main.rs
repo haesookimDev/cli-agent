@@ -167,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
     let coder_manager = Arc::new(coder_mgr);
 
     let validation_config = Arc::new(cfg.validation);
+    let repo_analysis_config = Arc::new(cfg.repo_analysis);
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
         AgentRegistry::builtin(),
@@ -178,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         mcp,
         coder_manager,
         validation_config,
+        repo_analysis_config,
     );
     orchestrator.load_persisted_settings().await;
 

@@ -1,6 +1,7 @@
 pub mod coder_backend;
 pub mod git_manager;
 pub mod prompt_composer;
+pub mod repo_analyzer;
 pub mod validator;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -27,10 +28,11 @@ use crate::runtime::{
 };
 use crate::types::{
     AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, KnowledgeItem, McpToolDefinition,
-    NodeTraceState, RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane,
-    RunBehaviorSummary, RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace,
-    RunTraceGraph, SessionEvent, SessionEventType, SessionMemoryItem, SubtaskPlan, TaskType,
-    TraceEdge, ValidationConfig, WebhookDeliveryRecord, WebhookEndpoint, WorkflowTemplate,
+    NodeTraceState, RepoAnalysis, RepoAnalysisConfig, RunActionEvent, RunActionType,
+    RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView, RunRecord,
+    RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
+    SessionMemoryItem, SubtaskPlan, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
+    WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -49,6 +51,8 @@ pub struct Orchestrator {
     max_graph_depth: u8,
     coder_manager: Arc<coder_backend::CoderSessionManager>,
     validation_config: Arc<ValidationConfig>,
+    repo_analysis_config: Arc<RepoAnalysisConfig>,
+    repo_analyses: Arc<DashMap<Uuid, RepoAnalysis>>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,7 @@ impl Orchestrator {
         mcp: Arc<McpRegistry>,
         coder_manager: Arc<coder_backend::CoderSessionManager>,
         validation_config: Arc<ValidationConfig>,
+        repo_analysis_config: Arc<RepoAnalysisConfig>,
     ) -> Self {
         Self {
             runtime,
@@ -84,6 +89,8 @@ impl Orchestrator {
             max_graph_depth,
             coder_manager,
             validation_config,
+            repo_analysis_config,
+            repo_analyses: Arc::new(DashMap::new()),
         }
     }
 
@@ -848,6 +855,7 @@ impl Orchestrator {
                     &mcp_tool_names,
                     previous_task_type,
                     previous_plan,
+                    req.repo_url.as_deref(),
                 )
                 .await?,
         };
@@ -1282,7 +1290,13 @@ impl Orchestrator {
         mcp_tool_names: &[String],
         previous_task_type: Option<TaskType>,
         router: &ModelRouter,
+        repo_url: Option<&str>,
     ) -> TaskType {
+        // If a repo_url is provided, this is an external project task
+        if repo_url.is_some() {
+            return TaskType::ExternalProject;
+        }
+
         // If this is a continuation command and we have session context, inherit
         if Self::is_continuation_command(task) {
             if let Some(prev_type) = previous_task_type {
@@ -1326,6 +1340,7 @@ impl Orchestrator {
              - configuration: Tasks that CHANGE system settings (enable/disable features, switch models, update preferences)\n\
              - config_query: Tasks that ASK ABOUT current system state or settings without changing them (e.g. \"what backend is active?\", \"show current model\")\n\
              - tool_operation: Tasks requiring external tool calls (file I/O, API calls, MCP tools){tool_ctx}\n\
+             - external_project: Tasks involving cloning, analyzing, or modifying an external repository given a URL or path\n\
              - complex: Multi-step tasks spanning multiple categories\n\n\
              User task: \"{task}\"\n\n\
              Respond with ONLY the type name, nothing else.",
@@ -1358,6 +1373,7 @@ impl Orchestrator {
                     "configuration" => TaskType::Configuration,
                     "config_query" => TaskType::ConfigQuery,
                     "tool_operation" => TaskType::ToolOperation,
+                    "external_project" => TaskType::ExternalProject,
                     "complex" => TaskType::Complex,
                     _ => Self::classify_task_fallback(task, has_mcp),
                 }
@@ -1380,6 +1396,13 @@ impl Orchestrator {
                 return TaskType::ToolOperation;
             }
         }
+        let external_kw = ["clone", "github.com", "gitlab.com", "bitbucket.org"];
+        if external_kw.iter().any(|kw| lower.contains(kw))
+            || (lower.contains("https://") && lower.contains(".git"))
+        {
+            return TaskType::ExternalProject;
+        }
+
         let code_kw = ["code", "implement", "function", "refactor", "bug", "fix", "debug"];
         if code_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::CodeGeneration;
@@ -1452,9 +1475,10 @@ impl Orchestrator {
         mcp_tool_names: &[String],
         previous_task_type: Option<TaskType>,
         previous_plan: Option<String>,
+        repo_url: Option<&str>,
     ) -> anyhow::Result<ExecutionGraph> {
         let task_type = Self::classify_task(
-            task, mcp_server_names, mcp_tool_names, previous_task_type, &self.router,
+            task, mcp_server_names, mcp_tool_names, previous_task_type, &self.router, repo_url,
         ).await;
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
@@ -1626,6 +1650,94 @@ impl Orchestrator {
                 summarize.policy = Self::default_policy();
                 graph.add_node(summarize)?;
             }
+            TaskType::ExternalProject => {
+                let mut repo_analyze = AgentNode::new(
+                    "repo_analyze",
+                    AgentRole::Analyzer,
+                    "Clone and analyze the external repository.",
+                );
+                repo_analyze.dependencies = vec!["plan".to_string()];
+                repo_analyze.depth = 1;
+                repo_analyze.policy = ExecutionPolicy {
+                    timeout_ms: 300_000,
+                    retry: 1,
+                    ..Self::default_policy()
+                };
+                graph.add_node(repo_analyze)?;
+
+                let mut extract = AgentNode::new(
+                    "extract",
+                    AgentRole::Extractor,
+                    "Extract structured facts from the repo analysis and user task.",
+                );
+                extract.dependencies = vec!["repo_analyze".to_string()];
+                extract.depth = 2;
+                extract.policy = ExecutionPolicy {
+                    max_parallelism: 2,
+                    ..Self::default_policy()
+                };
+                graph.add_node(extract)?;
+
+                let mut context_probe = AgentNode::new(
+                    "context_probe",
+                    AgentRole::Extractor,
+                    "Probe repo map for high-value code areas to focus modification.",
+                );
+                context_probe.dependencies = vec!["repo_analyze".to_string()];
+                context_probe.depth = 2;
+                context_probe.policy = ExecutionPolicy {
+                    max_parallelism: 2,
+                    timeout_ms: 60_000,
+                    ..Self::default_policy()
+                };
+                graph.add_node(context_probe)?;
+
+                let mut code = AgentNode::new(
+                    "code",
+                    AgentRole::Coder,
+                    "Modify the external repository code based on plan and repo context.",
+                );
+                code.dependencies = vec!["extract".to_string(), "context_probe".to_string()];
+                code.depth = 3;
+                code.policy = ExecutionPolicy {
+                    max_parallelism: 2,
+                    retry: 2,
+                    timeout_ms: 300_000,
+                    circuit_breaker: 2,
+                    on_dependency_failure: DependencyFailurePolicy::FailFast,
+                    fallback_node: Some("fallback_code".to_string()),
+                };
+                graph.add_node(code)?;
+
+                let mut fallback_code = AgentNode::new(
+                    "fallback_code",
+                    AgentRole::Fallback,
+                    "Recover from coding failures in external repo.",
+                );
+                fallback_code.dependencies = vec!["code".to_string()];
+                fallback_code.depth = 4;
+                fallback_code.policy = Self::default_policy();
+                graph.add_node(fallback_code)?;
+
+                // Validation node: uses detected commands from repo analysis
+                let mut validate_lint = AgentNode::new(
+                    "validate_lint",
+                    AgentRole::Validator,
+                    "external_lint",
+                );
+                validate_lint.dependencies = vec!["code".to_string()];
+                validate_lint.depth = 4;
+                validate_lint.policy = ExecutionPolicy {
+                    timeout_ms: 120_000,
+                    retry: 0,
+                    on_dependency_failure: DependencyFailurePolicy::FallbackNode,
+                    fallback_node: Some("fallback_code".to_string()),
+                    ..Self::default_policy()
+                };
+                graph.add_node(validate_lint)?;
+
+                // summarize omitted — dynamically injected by on_completed
+            }
             TaskType::CodeGeneration | TaskType::Complex => {
                 // Full graph: plan → extract + context_probe → code → fallback → summarize
                 let mut extract = AgentNode::new(
@@ -1744,6 +1856,8 @@ impl Orchestrator {
         let mcp = self.mcp.clone();
         let coder_manager = self.coder_manager.clone();
         let validation_config = self.validation_config.clone();
+        let repo_analysis_config = self.repo_analysis_config.clone();
+        let repo_analyses = self.repo_analyses.clone();
 
         Arc::new(move |node: AgentNode, deps: Vec<NodeExecutionResult>| {
             let agents = agents.clone();
@@ -1755,9 +1869,91 @@ impl Orchestrator {
             let event_sink = event_sink.clone();
             let coder_manager = coder_manager.clone();
             let validation_config = validation_config.clone();
+            let repo_analysis_config = repo_analysis_config.clone();
+            let repo_analyses = repo_analyses.clone();
 
             async move {
                 let started = Instant::now();
+
+                // --- Repo analysis handler ---
+                if node.id == "repo_analyze" && node.role == AgentRole::Analyzer {
+                    let repo_config = repo_analysis_config.clone();
+
+                    let repo_url = req.repo_url.clone().or_else(|| {
+                        extract_repo_url_from_text(&req.task)
+                    }).or_else(|| {
+                        deps.iter()
+                            .find(|d| d.node_id == "plan" && d.succeeded)
+                            .and_then(|d| extract_repo_url_from_text(&d.output))
+                    });
+
+                    let Some(url) = repo_url else {
+                        return Ok(NodeExecutionResult {
+                            node_id: node.id,
+                            role: node.role,
+                            model: "repo_analyzer".to_string(),
+                            output: "No repository URL found in request or planner output".to_string(),
+                            duration_ms: started.elapsed().as_millis(),
+                            succeeded: false,
+                            error: Some("missing repo_url".to_string()),
+                        });
+                    };
+
+                    let clone_dir = std::path::PathBuf::from(&repo_config.clone_base_dir);
+                    let repo_path = match git_manager::GitManager::clone_repo(&url, &clone_dir, repo_config.shallow_clone).await {
+                        Ok(path) => path,
+                        Err(e) => {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "repo_analyzer".to_string(),
+                                output: format!("Clone failed: {}", e),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(format!("clone failed: {}", e)),
+                            });
+                        }
+                    };
+
+                    event_sink(RuntimeEvent::RepoCloned {
+                        node_id: node.id.clone(),
+                        repo_path: repo_path.to_string_lossy().to_string(),
+                        shallow: repo_config.shallow_clone,
+                    });
+
+                    let analyzer = repo_analyzer::RepoAnalyzer::new((*repo_config).clone());
+                    match analyzer.analyze(&repo_path, &router).await {
+                        Ok(analysis) => {
+                            event_sink(RuntimeEvent::RepoAnalyzed {
+                                node_id: node.id.clone(),
+                                primary_language: analysis.tech_stack.primary_language.clone(),
+                                file_count: analysis.file_count,
+                            });
+                            let output = serde_json::to_string(&analysis).unwrap_or_default();
+                            repo_analyses.insert(run_id, analysis);
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "repo_analyzer".to_string(),
+                                output,
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: true,
+                                error: None,
+                            });
+                        }
+                        Err(e) => {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "repo_analyzer".to_string(),
+                                output: format!("Analysis failed: {}", e),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(e.to_string()),
+                            });
+                        }
+                    }
+                }
 
                 // Validator role: run lint/build/test/git commands
                 if node.role == AgentRole::Validator {
@@ -2204,16 +2400,46 @@ impl Orchestrator {
                             .collect::<Vec<_>>()
                             .join("\n---\n");
 
-                        let result = coder_manager
-                            .run_session(
-                                run_id,
-                                &node.id,
-                                backend_kind,
-                                &req.task,
-                                &context_str,
-                                chunk_callback,
-                            )
-                            .await;
+                        // Check if this is an external project run
+                        let external_analysis = repo_analyses.get(&run_id);
+                        let (effective_working_dir, enriched_task) = if let Some(ref analysis) = external_analysis {
+                            let enriched = format!(
+                                "{}\n\nREPOSITORY MAP:\n{}\n\nTECH STACK: {} ({})\nKey files: {}",
+                                req.task,
+                                analysis.repo_map,
+                                analysis.tech_stack.primary_language,
+                                analysis.tech_stack.frameworks.join(", "),
+                                analysis.key_files.join(", "),
+                            );
+                            (std::path::PathBuf::from(&analysis.repo_path), enriched)
+                        } else {
+                            (coder_manager.default_working_dir().to_path_buf(), req.task.clone())
+                        };
+
+                        let result = if external_analysis.is_some() {
+                            coder_manager
+                                .run_session_at(
+                                    run_id,
+                                    &node.id,
+                                    backend_kind,
+                                    &enriched_task,
+                                    &context_str,
+                                    &effective_working_dir,
+                                    chunk_callback,
+                                )
+                                .await
+                        } else {
+                            coder_manager
+                                .run_session(
+                                    run_id,
+                                    &node.id,
+                                    backend_kind,
+                                    &req.task,
+                                    &context_str,
+                                    chunk_callback,
+                                )
+                                .await
+                        };
 
                         return match result {
                             Ok(session_result) => {
@@ -4213,6 +4439,7 @@ mod tests {
             Arc::new(McpRegistry::new()),
             Arc::new(coder_mgr),
             Arc::new(ValidationConfig::default()),
+            Arc::new(RepoAnalysisConfig::default()),
         );
 
         let no_servers: Vec<String> = vec![];
@@ -4226,6 +4453,7 @@ mod tests {
                 &no_tools,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -4235,7 +4463,7 @@ mod tests {
 
         // SimpleQuery should have minimal graph
         let simple = orchestrator
-            .build_graph("hello world", &no_servers, &no_tools, None, None)
+            .build_graph("hello world", &no_servers, &no_tools, None, None, None)
             .await
             .unwrap();
         assert!(simple.node("plan").is_some());
@@ -4248,6 +4476,7 @@ mod tests {
                 "analyze the performance patterns and evaluate metrics",
                 &no_servers,
                 &no_tools,
+                None,
                 None,
                 None,
             )

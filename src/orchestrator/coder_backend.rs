@@ -402,6 +402,83 @@ impl CoderSessionManager {
         result
     }
 
+    pub fn default_working_dir(&self) -> &Path {
+        &self.default_working_dir
+    }
+
+    /// Run a coder session with a custom working directory (for external repos).
+    pub async fn run_session_at(
+        &self,
+        run_id: Uuid,
+        node_id: &str,
+        backend_kind: CoderBackendKind,
+        task: &str,
+        context: &str,
+        working_dir: &Path,
+        on_chunk: Arc<dyn Fn(CoderOutputChunk) + Send + Sync>,
+    ) -> anyhow::Result<CoderSessionResult> {
+        let backend = self
+            .backends
+            .get(&backend_kind)
+            .ok_or_else(|| anyhow::anyhow!("coder backend {:?} not registered", backend_kind))?;
+
+        let session_id = Uuid::new_v4().to_string();
+
+        let _ = self
+            .memory
+            .store()
+            .insert_coder_session(
+                &session_id,
+                run_id,
+                node_id,
+                &backend_kind.to_string(),
+                None,
+                Some(working_dir.to_str().unwrap_or("")),
+                "running",
+            )
+            .await;
+
+        self.active_sessions.insert(
+            session_id.clone(),
+            CoderSessionState {
+                _id: session_id.clone(),
+                _run_id: run_id,
+                _node_id: node_id.to_string(),
+                _backend: backend_kind,
+                _working_dir: working_dir.to_path_buf(),
+                _started_at: Instant::now(),
+            },
+        );
+
+        let result = backend.run(task, context, working_dir, on_chunk).await;
+
+        match &result {
+            Ok(r) => {
+                let files_json = serde_json::to_string(&r.files_changed).ok();
+                let _ = self
+                    .memory
+                    .store()
+                    .update_coder_session_completed(
+                        &session_id,
+                        "completed",
+                        Some(r.exit_code),
+                        files_json.as_deref(),
+                    )
+                    .await;
+            }
+            Err(_) => {
+                let _ = self
+                    .memory
+                    .store()
+                    .update_coder_session_completed(&session_id, "failed", None, None)
+                    .await;
+            }
+        }
+
+        self.active_sessions.remove(&session_id);
+        result
+    }
+
     pub async fn list_sessions_for_run(
         &self,
         run_id: Uuid,
