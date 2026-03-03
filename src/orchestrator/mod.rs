@@ -656,6 +656,7 @@ impl Orchestrator {
             session_id: Some(run.session_id),
             workflow_id: None,
             workflow_params: None,
+            repo_url: None,
         };
         self.submit_run(req).await
     }
@@ -675,6 +676,7 @@ impl Orchestrator {
             session_id: target_session.or(Some(run.session_id)),
             workflow_id: None,
             workflow_params: None,
+            repo_url: None,
         };
         self.submit_run(req).await
     }
@@ -2075,6 +2077,62 @@ impl Orchestrator {
                         });
                     }
 
+                    // External project validation: use detected commands from repo analysis
+                    if instructions.contains("external") {
+                        let analysis = repo_analyses.get(&run_id);
+                        if let Some(ref analysis) = analysis {
+                            let working_dir = std::path::PathBuf::from(&analysis.repo_path);
+                            let (commands, timeout) = if instructions.contains("test") {
+                                (analysis.detected_commands.test_commands.clone(), validation_config.test_timeout_ms)
+                            } else {
+                                (analysis.detected_commands.lint_and_build_commands(), validation_config.lint_timeout_ms)
+                            };
+
+                            if commands.is_empty() {
+                                return Ok(NodeExecutionResult {
+                                    node_id: node.id,
+                                    role: node.role,
+                                    model: "validator".to_string(),
+                                    output: "No commands detected for this phase".to_string(),
+                                    duration_ms: started.elapsed().as_millis(),
+                                    succeeded: true,
+                                    error: None,
+                                });
+                            }
+
+                            let results = validator::CommandRunner::run_commands(&commands, &working_dir, timeout).await;
+                            let all_passed = results.iter().all(|r| r.passed);
+                            let output = serde_json::to_string(&results).unwrap_or_default();
+
+                            let phase = if instructions.contains("test") { "external_test" } else { "external_lint" };
+                            event_sink(RuntimeEvent::ValidationCompleted {
+                                node_id: node.id.clone(),
+                                phase: phase.to_string(),
+                                passed: all_passed,
+                            });
+
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "validator".to_string(),
+                                output,
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: all_passed,
+                                error: if all_passed { None } else { Some("external validation failed".to_string()) },
+                            });
+                        } else {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "validator".to_string(),
+                                output: "No repo analysis available".to_string(),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: true,
+                                error: None,
+                            });
+                        }
+                    }
+
                     // Lint or test phase
                     let (commands, timeout) = if instructions.contains("test") {
                         (
@@ -2731,10 +2789,12 @@ impl Orchestrator {
     ) -> OnNodeCompletedFn {
         let memory = self.memory.clone();
         let validation_config = self.validation_config.clone();
+        let repo_analyses = self.repo_analyses.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
             let memory = memory.clone();
             let validation_config = validation_config.clone();
+            let repo_analyses = repo_analyses.clone();
             async move {
                 let mut dynamic_nodes = Vec::new();
 
@@ -2932,6 +2992,36 @@ impl Orchestrator {
                     let is_test = node.instructions.contains("test");
 
                     if is_lint {
+                        // External project lint success
+                        if node.instructions.contains("external") {
+                            let analysis = repo_analyses.get(&run_id);
+                            let has_test = analysis.as_ref().map(|a| a.detected_commands.has_test()).unwrap_or(false);
+                            if has_test {
+                                // Inject external_test
+                                let mut test_node = AgentNode::new(
+                                    "validate_test",
+                                    AgentRole::Validator,
+                                    "external_test",
+                                );
+                                test_node.dependencies = vec![node.id.clone()];
+                                test_node.depth = node.depth + 1;
+                                test_node.policy = ExecutionPolicy {
+                                    timeout_ms: validation_config.test_timeout_ms,
+                                    retry: 0,
+                                    ..Self::default_policy()
+                                };
+                                dynamic_nodes.push(test_node);
+                            } else {
+                                Self::inject_git_and_summarize(
+                                    &validation_config,
+                                    &node,
+                                    &mut dynamic_nodes,
+                                    run_id,
+                                );
+                            }
+                            return Ok(dynamic_nodes);
+                        }
+
                         // Lint passed: inject test phase if configured, else summarize
                         if validation_config.has_test() {
                             let test_id = if node.id == "validate_lint" {
@@ -2963,6 +3053,17 @@ impl Orchestrator {
                             );
                         }
                     } else if is_test {
+                        // External project test success
+                        if node.instructions.contains("external") {
+                            Self::inject_git_and_summarize(
+                                &validation_config,
+                                &node,
+                                &mut dynamic_nodes,
+                                run_id,
+                            );
+                            return Ok(dynamic_nodes);
+                        }
+
                         // Test passed: inject git commit (if configured) then summarize
                         Self::inject_git_and_summarize(
                             &validation_config,
@@ -3119,6 +3220,16 @@ impl Orchestrator {
                         "commit_message": commit_message,
                         "pushed": pushed,
                     }),
+                    RuntimeEvent::RepoCloned { node_id, repo_path, shallow } => serde_json::json!({
+                        "node_id": node_id,
+                        "repo_path": repo_path,
+                        "shallow": shallow,
+                    }),
+                    RuntimeEvent::RepoAnalyzed { node_id, primary_language, file_count } => serde_json::json!({
+                        "node_id": node_id,
+                        "primary_language": primary_language,
+                        "file_count": file_count,
+                    }),
                 };
 
                 let event_type = match event_clone {
@@ -3135,6 +3246,9 @@ impl Orchestrator {
                     | RuntimeEvent::GraphCompleted
                     | RuntimeEvent::ValidationCompleted { .. }
                     | RuntimeEvent::GitCommitCreated { .. } => SessionEventType::RunProgress,
+                    RuntimeEvent::RepoCloned { .. } | RuntimeEvent::RepoAnalyzed { .. } => {
+                        SessionEventType::AgentOutput
+                    }
                 };
 
                 let (action, actor_id) = match &event_clone {
@@ -3177,6 +3291,12 @@ impl Orchestrator {
                     }
                     RuntimeEvent::GitCommitCreated { node_id, .. } => {
                         (RunActionType::GitCommitCreated, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::RepoCloned { node_id, .. } => {
+                        (RunActionType::RepoCloneCompleted, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::RepoAnalyzed { node_id, .. } => {
+                        (RunActionType::RepoAnalysisCompleted, Some(node_id.as_str()))
                     }
                 };
 
@@ -3581,6 +3701,7 @@ impl Orchestrator {
             session_id,
             workflow_id: Some(workflow_id.to_string()),
             workflow_params: params,
+            repo_url: None,
         };
 
         let run_id = Uuid::new_v4();
@@ -3937,7 +4058,9 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::ValidationPassed
             | RunActionType::ValidationFailed
             | RunActionType::GitCommitCreated
-            | RunActionType::GitPushCompleted => {}
+            | RunActionType::GitPushCompleted
+            | RunActionType::RepoCloneCompleted
+            | RunActionType::RepoAnalysisCompleted => {}
         }
     }
 
@@ -4335,6 +4458,23 @@ fn parse_agent_role(value: &str) -> Option<AgentRole> {
         "tool_caller" => Some(AgentRole::ToolCaller),
         _ => None,
     }
+}
+
+fn extract_repo_url_from_text(text: &str) -> Option<String> {
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '/' && c != ':' && c != '.' && c != '-' && c != '_' && c != '@'
+        });
+        if (trimmed.starts_with("https://") || trimmed.starts_with("git@"))
+            && (trimmed.contains("github.com")
+                || trimmed.contains("gitlab.com")
+                || trimmed.contains("bitbucket.org")
+                || trimmed.ends_with(".git"))
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 fn parse_tool_calls(raw: &str) -> Vec<serde_json::Value> {

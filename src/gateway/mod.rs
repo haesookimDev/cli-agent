@@ -172,6 +172,7 @@ impl GatewayManager {
                     session_id: Some(session_id),
                     workflow_id: None,
                     workflow_params: None,
+                    repo_url: None,
                 };
                 let sub = self.orchestrator.submit_run(req).await?;
                 Ok(GatewayResponsePayload::RunSubmitted(sub))

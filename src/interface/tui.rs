@@ -405,6 +405,7 @@ async fn handle_key(
                             session_id: state.active_or_selected_session_id(),
                             workflow_id: None,
                             workflow_params: None,
+                            repo_url: None,
                         };
                         match orchestrator.submit_run(req).await {
                             Ok(sub) => {

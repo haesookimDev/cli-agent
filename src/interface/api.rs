@@ -48,6 +48,7 @@ struct CreateRunRequest {
     #[serde(default)]
     profile: Option<TaskProfile>,
     session_id: Option<Uuid>,
+    repo_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -895,6 +896,7 @@ async fn create_run_handler(
         session_id: req.session_id,
         workflow_id: None,
         workflow_params: None,
+        repo_url: req.repo_url,
     };
 
     match state.orchestrator.submit_run(run_req).await {

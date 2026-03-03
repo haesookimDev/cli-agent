@@ -196,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
                 session_id: session,
                 workflow_id: None,
                 workflow_params: None,
+                repo_url: None,
             };
 
             if no_wait {
