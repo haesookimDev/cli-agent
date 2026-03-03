@@ -82,6 +82,17 @@ pub enum RuntimeEvent {
         exit_code: i32,
     },
     GraphCompleted,
+    ValidationCompleted {
+        node_id: String,
+        phase: String,
+        passed: bool,
+    },
+    GitCommitCreated {
+        node_id: String,
+        commit_hash: String,
+        commit_message: String,
+        pushed: bool,
+    },
 }
 
 const NODE_OUTPUT_PREVIEW_CHARS: usize = 8_192;

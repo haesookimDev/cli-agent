@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::types::{CoderBackendKind, McpServerConfig};
+use crate::types::{CoderBackendKind, McpServerConfig, ValidationConfig};
 
 /// Substitutes `${VAR_NAME}` patterns with environment variable values.
 /// Unset variables are replaced with an empty string.
@@ -46,6 +46,7 @@ pub struct AppConfig {
     pub coder_args: Vec<String>,
     pub coder_working_dir: Option<String>,
     pub coder_timeout_ms: u64,
+    pub validation: ValidationConfig,
 }
 
 impl AppConfig {
@@ -150,6 +151,47 @@ impl AppConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(300_000);
 
+        let parse_commands = |var: &str| -> Vec<String> {
+            env::var(var)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default()
+        };
+
+        let validation_working_dir = env::var("VALIDATION_WORKING_DIR")
+            .ok()
+            .or_else(|| coder_working_dir.clone());
+
+        let validation = ValidationConfig {
+            lint_commands: parse_commands("VALIDATION_LINT_COMMANDS"),
+            build_commands: parse_commands("VALIDATION_BUILD_COMMANDS"),
+            test_commands: parse_commands("VALIDATION_TEST_COMMANDS"),
+            working_dir: validation_working_dir,
+            max_fix_iterations: env::var("VALIDATION_MAX_FIX_ITERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+            lint_timeout_ms: env::var("VALIDATION_LINT_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60_000),
+            test_timeout_ms: env::var("VALIDATION_TEST_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120_000),
+            git_auto_commit: env::var("GIT_AUTO_COMMIT")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            git_auto_push: env::var("GIT_AUTO_PUSH")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            git_branch_prefix: env::var("GIT_BRANCH_PREFIX").ok(),
+            git_protect_dirty: env::var("GIT_PROTECT_DIRTY")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true),
+        };
+
         let cfg = Self {
             data_dir,
             session_dir,
@@ -174,6 +216,7 @@ impl AppConfig {
             coder_args,
             coder_working_dir,
             coder_timeout_ms,
+            validation,
         };
 
         cfg.ensure_dirs()?;

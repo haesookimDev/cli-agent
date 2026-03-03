@@ -1,5 +1,7 @@
 pub mod coder_backend;
+pub mod git_manager;
 pub mod prompt_composer;
+pub mod validator;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use crate::types::{
     NodeTraceState, RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane,
     RunBehaviorSummary, RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace,
     RunTraceGraph, SessionEvent, SessionEventType, SessionMemoryItem, SubtaskPlan, TaskType,
-    TraceEdge, WebhookDeliveryRecord, WebhookEndpoint, WorkflowTemplate,
+    TraceEdge, ValidationConfig, WebhookDeliveryRecord, WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -46,6 +48,7 @@ pub struct Orchestrator {
     workflow_graphs: Arc<DashMap<Uuid, ExecutionGraph>>,
     max_graph_depth: u8,
     coder_manager: Arc<coder_backend::CoderSessionManager>,
+    validation_config: Arc<ValidationConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +68,7 @@ impl Orchestrator {
         max_graph_depth: u8,
         mcp: Arc<McpRegistry>,
         coder_manager: Arc<coder_backend::CoderSessionManager>,
+        validation_config: Arc<ValidationConfig>,
     ) -> Self {
         Self {
             runtime,
@@ -79,6 +83,7 @@ impl Orchestrator {
             workflow_graphs: Arc::new(DashMap::new()),
             max_graph_depth,
             coder_manager,
+            validation_config,
         }
     }
 
@@ -1673,14 +1678,36 @@ impl Orchestrator {
                 fallback_code.policy = Self::default_policy();
                 graph.add_node(fallback_code)?;
 
-                let mut summarize = AgentNode::new(
-                    "summarize",
-                    AgentRole::Summarizer,
-                    "Summarize outcomes and produce checkpoint summary for context compaction.",
-                );
-                summarize.dependencies = vec!["code".to_string(), "fallback_code".to_string()];
-                summarize.policy = Self::default_policy();
-                graph.add_node(summarize)?;
+                // When validation is configured, insert validate_lint after code.
+                // Summarize is injected dynamically via on_completed.
+                if self.validation_config.has_lint() {
+                    let mut validate_lint = AgentNode::new(
+                        "validate_lint",
+                        AgentRole::Validator,
+                        "lint",
+                    );
+                    validate_lint.dependencies = vec!["code".to_string()];
+                    validate_lint.policy = ExecutionPolicy {
+                        timeout_ms: self.validation_config.lint_timeout_ms,
+                        retry: 0,
+                        on_dependency_failure: DependencyFailurePolicy::FallbackNode,
+                        fallback_node: Some("fallback_code".to_string()),
+                        ..Self::default_policy()
+                    };
+                    graph.add_node(validate_lint)?;
+                    // No static summarize — injected dynamically after validation chain
+                } else {
+                    // No validation: keep original static summarize
+                    let mut summarize = AgentNode::new(
+                        "summarize",
+                        AgentRole::Summarizer,
+                        "Summarize outcomes and produce checkpoint summary for context compaction.",
+                    );
+                    summarize.dependencies =
+                        vec!["code".to_string(), "fallback_code".to_string()];
+                    summarize.policy = Self::default_policy();
+                    graph.add_node(summarize)?;
+                }
 
                 // Conditional webhook validation
                 if task.to_lowercase().contains("webhook") {
@@ -1716,6 +1743,7 @@ impl Orchestrator {
         let context = self.context.clone();
         let mcp = self.mcp.clone();
         let coder_manager = self.coder_manager.clone();
+        let validation_config = self.validation_config.clone();
 
         Arc::new(move |node: AgentNode, deps: Vec<NodeExecutionResult>| {
             let agents = agents.clone();
@@ -1726,9 +1754,191 @@ impl Orchestrator {
             let mcp = mcp.clone();
             let event_sink = event_sink.clone();
             let coder_manager = coder_manager.clone();
+            let validation_config = validation_config.clone();
 
             async move {
                 let started = Instant::now();
+
+                // Validator role: run lint/build/test/git commands
+                if node.role == AgentRole::Validator {
+                    let working_dir = validation_config
+                        .working_dir
+                        .as_ref()
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        });
+                    let instructions = node.instructions.as_str();
+
+                    if instructions.contains("git") {
+                        // Git automation phase
+                        use crate::orchestrator::git_manager::GitManager;
+
+                        if !GitManager::is_git_repo(&working_dir).await {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "git".to_string(),
+                                output: "Not a git repository".to_string(),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some("working directory is not a git repository".to_string()),
+                            });
+                        }
+
+                        let stashed = if validation_config.git_protect_dirty {
+                            GitManager::stash_save(&working_dir, "agent-auto-stash")
+                                .await
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if let Some(ref prefix) = validation_config.git_branch_prefix {
+                            let branch_name = format!("{}{}", prefix, run_id);
+                            if let Err(e) = GitManager::create_branch(&working_dir, &branch_name).await {
+                                tracing::warn!("branch creation failed (may already exist): {e}");
+                            }
+                        }
+
+                        if let Err(e) = GitManager::stage_all(&working_dir).await {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "git".to_string(),
+                                output: format!("git stage failed: {e}"),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(e.to_string()),
+                            });
+                        }
+
+                        let diff = GitManager::staged_diff(&working_dir)
+                            .await
+                            .unwrap_or_default();
+
+                        let commit_msg = GitManager::generate_commit_message(
+                            &diff, &req.task, &router,
+                        )
+                        .await
+                        .unwrap_or_else(|_| "chore: Agent-generated changes".to_string());
+
+                        let commit_hash = match GitManager::commit(&working_dir, &commit_msg).await {
+                            Ok(hash) => hash,
+                            Err(e) => {
+                                if stashed {
+                                    let _ = GitManager::stash_pop(&working_dir).await;
+                                }
+                                return Ok(NodeExecutionResult {
+                                    node_id: node.id,
+                                    role: node.role,
+                                    model: "git".to_string(),
+                                    output: format!("git commit failed: {e}"),
+                                    duration_ms: started.elapsed().as_millis(),
+                                    succeeded: false,
+                                    error: Some(e.to_string()),
+                                });
+                            }
+                        };
+
+                        let mut pushed = false;
+                        if validation_config.git_auto_push {
+                            let branch = GitManager::current_branch(&working_dir)
+                                .await
+                                .unwrap_or_else(|_| "HEAD".to_string());
+                            match GitManager::push(&working_dir, &branch).await {
+                                Ok(()) => pushed = true,
+                                Err(e) => tracing::warn!("git push failed: {e}"),
+                            }
+                        }
+
+                        if stashed {
+                            let _ = GitManager::stash_pop(&working_dir).await;
+                        }
+
+                        event_sink(RuntimeEvent::GitCommitCreated {
+                            node_id: node.id.clone(),
+                            commit_hash: commit_hash.clone(),
+                            commit_message: commit_msg.clone(),
+                            pushed,
+                        });
+
+                        return Ok(NodeExecutionResult {
+                            node_id: node.id,
+                            role: node.role,
+                            model: "git".to_string(),
+                            output: serde_json::json!({
+                                "commit_hash": commit_hash,
+                                "commit_message": commit_msg,
+                                "pushed": pushed,
+                            })
+                            .to_string(),
+                            duration_ms: started.elapsed().as_millis(),
+                            succeeded: true,
+                            error: None,
+                        });
+                    }
+
+                    // Lint or test phase
+                    let (commands, timeout) = if instructions.contains("test") {
+                        (
+                            validation_config.test_commands.clone(),
+                            validation_config.test_timeout_ms,
+                        )
+                    } else {
+                        (
+                            validation_config.lint_and_build_commands(),
+                            validation_config.lint_timeout_ms,
+                        )
+                    };
+
+                    let phase = if instructions.contains("test") {
+                        "test"
+                    } else {
+                        "lint"
+                    };
+
+                    let results = validator::CommandRunner::run_commands(
+                        &commands,
+                        &working_dir,
+                        timeout,
+                    )
+                    .await;
+
+                    let all_passed = results.iter().all(|r| r.passed);
+                    let output = serde_json::to_string(&results).unwrap_or_default();
+
+                    event_sink(RuntimeEvent::ValidationCompleted {
+                        node_id: node.id.clone(),
+                        phase: phase.to_string(),
+                        passed: all_passed,
+                    });
+
+                    let error = if all_passed {
+                        None
+                    } else {
+                        results
+                            .iter()
+                            .find(|r| !r.passed)
+                            .map(|r| {
+                                format!(
+                                    "{}: {}",
+                                    r.command,
+                                    r.stderr.chars().take(500).collect::<String>()
+                                )
+                            })
+                    };
+
+                    return Ok(NodeExecutionResult {
+                        node_id: node.id,
+                        role: node.role,
+                        model: "shell".to_string(),
+                        output,
+                        duration_ms: started.elapsed().as_millis(),
+                        succeeded: all_passed,
+                        error,
+                    });
+                }
 
                 // ToolCaller role: LLM-driven tool selection + MCP execution
                 if node.role == AgentRole::ToolCaller {
@@ -2244,6 +2454,49 @@ impl Orchestrator {
         })
     }
 
+    fn inject_git_and_summarize(
+        config: &ValidationConfig,
+        completed_node: &AgentNode,
+        dynamic_nodes: &mut Vec<AgentNode>,
+        run_id: Uuid,
+    ) {
+        let mut last_dep = completed_node.id.clone();
+        let mut depth = completed_node.depth + 1;
+
+        if config.git_auto_commit {
+            let mut git_node = AgentNode::new("git_commit", AgentRole::Validator, "git");
+            git_node.dependencies = vec![last_dep];
+            git_node.depth = depth;
+            git_node.policy = ExecutionPolicy {
+                timeout_ms: 60_000,
+                retry: 0,
+                ..ExecutionPolicy::default()
+            };
+            last_dep = "git_commit".to_string();
+            depth += 1;
+            dynamic_nodes.push(git_node);
+        }
+
+        let mut summarize = AgentNode::new(
+            format!("summarize_final_{}", run_id),
+            AgentRole::Summarizer,
+            "Summarize the code generation, validation, and commit results.",
+        );
+        summarize.dependencies = vec![last_dep];
+        summarize.depth = depth;
+        summarize.policy = ExecutionPolicy::default();
+        dynamic_nodes.push(summarize);
+    }
+
+    fn parse_fix_iteration(node_id: &str) -> u8 {
+        // "validate_lint" → 0, "validate_lint_1" → 1, "validate_test_2" → 2
+        node_id
+            .rsplit('_')
+            .next()
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(0)
+    }
+
     fn build_on_completed_fn(
         &self,
         run_id: Uuid,
@@ -2251,9 +2504,11 @@ impl Orchestrator {
         task: String,
     ) -> OnNodeCompletedFn {
         let memory = self.memory.clone();
+        let validation_config = self.validation_config.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
             let memory = memory.clone();
+            let validation_config = validation_config.clone();
             async move {
                 let mut dynamic_nodes = Vec::new();
 
@@ -2315,7 +2570,7 @@ impl Orchestrator {
                             AgentRole::Summarizer,
                             "Create checkpoint summary to reduce context pressure.",
                         );
-                        dynamic.dependencies = vec![node.id];
+                        dynamic.dependencies = vec![node.id.clone()];
                         dynamic.depth = node.depth + 1;
                         dynamic.policy = ExecutionPolicy {
                             max_parallelism: 1,
@@ -2347,6 +2602,149 @@ impl Orchestrator {
                             }),
                         )
                         .await;
+                }
+
+                // --- Validator dynamic node injection ---
+
+                if node.role == AgentRole::Validator && !result.succeeded {
+                    // Validator failed: inject fix + re-validate (up to max iterations)
+                    let iteration = Self::parse_fix_iteration(&node.id);
+                    let max_iters = validation_config.max_fix_iterations;
+
+                    let phase = if node.instructions.contains("test") {
+                        "test"
+                    } else {
+                        "lint"
+                    };
+
+                    if iteration < max_iters {
+                        let next_iter = iteration + 1;
+
+                        // Inject Coder fix node with error context
+                        let fix_id = format!("fix_{}_{}", phase, next_iter);
+                        let error_output: String =
+                            result.output.chars().take(2000).collect();
+                        let mut fix_node = AgentNode::new(
+                            fix_id.clone(),
+                            AgentRole::Coder,
+                            format!(
+                                "The previous {} validation failed. Fix ONLY the reported errors below.\n\n\
+                                 ERRORS:\n{}\n\n\
+                                 Do not change unrelated code.",
+                                phase, error_output
+                            ),
+                        );
+                        fix_node.dependencies = vec![node.id.clone()];
+                        fix_node.depth = node.depth + 1;
+                        fix_node.retry_context = Some(result.output.clone());
+                        fix_node.policy = ExecutionPolicy {
+                            timeout_ms: 180_000,
+                            retry: 1,
+                            ..ExecutionPolicy::default()
+                        };
+                        dynamic_nodes.push(fix_node);
+
+                        // Inject re-validate node
+                        let revalidate_id =
+                            format!("validate_{}_{}", phase, next_iter);
+                        let mut revalidate = AgentNode::new(
+                            revalidate_id,
+                            AgentRole::Validator,
+                            phase.to_string(),
+                        );
+                        revalidate.dependencies = vec![fix_id];
+                        revalidate.depth = node.depth + 2;
+                        revalidate.policy = ExecutionPolicy {
+                            timeout_ms: if phase == "test" {
+                                validation_config.test_timeout_ms
+                            } else {
+                                validation_config.lint_timeout_ms
+                            },
+                            retry: 0,
+                            ..ExecutionPolicy::default()
+                        };
+                        dynamic_nodes.push(revalidate);
+
+                        let _ = memory
+                            .append_run_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::ReplanTriggered,
+                                Some("validator"),
+                                Some(&node.id),
+                                None,
+                                serde_json::json!({
+                                    "phase": phase,
+                                    "iteration": next_iter,
+                                    "reason": result.error,
+                                }),
+                            )
+                            .await;
+                    } else {
+                        // Max iterations reached: inject fallback summarize
+                        let mut summarize_failed = AgentNode::new(
+                            "summarize_failed",
+                            AgentRole::Summarizer,
+                            format!(
+                                "Validation failed after {} fix attempts. Summarize the errors and partial results.\n\n\
+                                 LAST ERROR:\n{}",
+                                max_iters,
+                                result.error.as_deref().unwrap_or("unknown")
+                            ),
+                        );
+                        summarize_failed.dependencies = vec![node.id.clone()];
+                        summarize_failed.depth = node.depth + 1;
+                        summarize_failed.policy = ExecutionPolicy::default();
+                        dynamic_nodes.push(summarize_failed);
+                    }
+                }
+
+                if node.role == AgentRole::Validator && result.succeeded {
+                    let is_lint = node.instructions.contains("lint")
+                        || (!node.instructions.contains("test")
+                            && !node.instructions.contains("git"));
+                    let is_test = node.instructions.contains("test");
+
+                    if is_lint {
+                        // Lint passed: inject test phase if configured, else summarize
+                        if validation_config.has_test() {
+                            let test_id = if node.id == "validate_lint" {
+                                "validate_test".to_string()
+                            } else {
+                                let iter = Self::parse_fix_iteration(&node.id);
+                                format!("validate_test_{}", iter)
+                            };
+                            let mut test_node = AgentNode::new(
+                                test_id,
+                                AgentRole::Validator,
+                                "test",
+                            );
+                            test_node.dependencies = vec![node.id.clone()];
+                            test_node.depth = node.depth + 1;
+                            test_node.policy = ExecutionPolicy {
+                                timeout_ms: validation_config.test_timeout_ms,
+                                retry: 0,
+                                ..ExecutionPolicy::default()
+                            };
+                            dynamic_nodes.push(test_node);
+                        } else {
+                            // No test: go directly to git or summarize
+                            Self::inject_git_and_summarize(
+                                &validation_config,
+                                &node,
+                                &mut dynamic_nodes,
+                                run_id,
+                            );
+                        }
+                    } else if is_test {
+                        // Test passed: inject git commit (if configured) then summarize
+                        Self::inject_git_and_summarize(
+                            &validation_config,
+                            &node,
+                            &mut dynamic_nodes,
+                            run_id,
+                        );
+                    }
                 }
 
                 Ok(dynamic_nodes)
@@ -2484,6 +2882,17 @@ impl Orchestrator {
                     RuntimeEvent::GraphCompleted => {
                         serde_json::json!({ "phase": "graph_completed" })
                     }
+                    RuntimeEvent::ValidationCompleted { node_id, phase, passed } => serde_json::json!({
+                        "node_id": node_id,
+                        "phase": phase,
+                        "passed": passed,
+                    }),
+                    RuntimeEvent::GitCommitCreated { node_id, commit_hash, commit_message, pushed } => serde_json::json!({
+                        "node_id": node_id,
+                        "commit_hash": commit_hash,
+                        "commit_message": commit_message,
+                        "pushed": pushed,
+                    }),
                 };
 
                 let event_type = match event_clone {
@@ -2497,7 +2906,9 @@ impl Orchestrator {
                     | RuntimeEvent::CoderOutputChunk { .. }
                     | RuntimeEvent::CoderFileChanged { .. }
                     | RuntimeEvent::CoderSessionCompleted { .. }
-                    | RuntimeEvent::GraphCompleted => SessionEventType::RunProgress,
+                    | RuntimeEvent::GraphCompleted
+                    | RuntimeEvent::ValidationCompleted { .. }
+                    | RuntimeEvent::GitCommitCreated { .. } => SessionEventType::RunProgress,
                 };
 
                 let (action, actor_id) = match &event_clone {
@@ -2530,6 +2941,17 @@ impl Orchestrator {
                         (RunActionType::CoderSessionCompleted, Some(node_id.as_str()))
                     }
                     RuntimeEvent::GraphCompleted => (RunActionType::GraphCompleted, Some("graph")),
+                    RuntimeEvent::ValidationCompleted { node_id, phase: _, passed } => {
+                        let action = if *passed {
+                            RunActionType::ValidationPassed
+                        } else {
+                            RunActionType::ValidationFailed
+                        };
+                        (action, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::GitCommitCreated { node_id, .. } => {
+                        (RunActionType::GitCommitCreated, Some(node_id.as_str()))
+                    }
                 };
 
                 let _ = memory
@@ -3285,7 +3707,11 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::ReplanTriggered
             | RunActionType::TerminalSuggested
             | RunActionType::CoderSessionStarted
-            | RunActionType::CoderSessionCompleted => {}
+            | RunActionType::CoderSessionCompleted
+            | RunActionType::ValidationPassed
+            | RunActionType::ValidationFailed
+            | RunActionType::GitCommitCreated
+            | RunActionType::GitPushCompleted => {}
         }
     }
 
@@ -3786,6 +4212,7 @@ mod tests {
             6,
             Arc::new(McpRegistry::new()),
             Arc::new(coder_mgr),
+            Arc::new(ValidationConfig::default()),
         );
 
         let no_servers: Vec<String> = vec![];

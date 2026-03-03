@@ -77,6 +77,10 @@ impl AgentRegistry {
             AgentRole::ConfigManager,
             Arc::new(BuiltinAgent::new(AgentRole::ConfigManager)),
         );
+        map.insert(
+            AgentRole::Validator,
+            Arc::new(BuiltinAgent::new(AgentRole::Validator)),
+        );
 
         Self {
             agents: Arc::new(map),
@@ -152,7 +156,8 @@ impl BuiltinAgent {
             | AgentRole::Fallback
             | AgentRole::ToolCaller
             | AgentRole::Scheduler
-            | AgentRole::ConfigManager => TaskProfile::General,
+            | AgentRole::ConfigManager
+            | AgentRole::Validator => TaskProfile::General,
         }
     }
 
@@ -188,6 +193,9 @@ impl BuiltinAgent {
             AgentRole::ConfigManager => {
                 "You are the config manager agent. Handle system settings changes including model toggles and preferences."
             }
+            AgentRole::Validator => {
+                "You are the validator agent. Run lint, build, test, and git commands to verify code correctness."
+            }
         }
     }
 }
@@ -202,7 +210,8 @@ fn agent_role_profile(role: AgentRole) -> TaskProfile {
         | AgentRole::Fallback
         | AgentRole::ToolCaller
         | AgentRole::Scheduler
-        | AgentRole::ConfigManager => TaskProfile::General,
+        | AgentRole::ConfigManager
+        | AgentRole::Validator => TaskProfile::General,
     }
 }
 
@@ -237,6 +246,9 @@ fn agent_role_prompt(role: AgentRole) -> &'static str {
         }
         AgentRole::ConfigManager => {
             "You are the config manager agent. Handle system settings changes including model toggles and preferences."
+        }
+        AgentRole::Validator => {
+            "You are the validator agent. Run lint, build, test, and git commands to verify code correctness."
         }
     }
 }

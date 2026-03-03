@@ -46,6 +46,7 @@ pub enum AgentRole {
     Reviewer,
     Scheduler,
     ConfigManager,
+    Validator,
 }
 
 impl Display for AgentRole {
@@ -61,6 +62,7 @@ impl Display for AgentRole {
             AgentRole::Reviewer => "reviewer",
             AgentRole::Scheduler => "scheduler",
             AgentRole::ConfigManager => "config_manager",
+            AgentRole::Validator => "validator",
         };
         write!(f, "{s}")
     }
@@ -294,6 +296,10 @@ pub enum RunActionType {
     TerminalSuggested,
     CoderSessionStarted,
     CoderSessionCompleted,
+    ValidationPassed,
+    ValidationFailed,
+    GitCommitCreated,
+    GitPushCompleted,
 }
 
 impl Display for RunActionType {
@@ -323,6 +329,10 @@ impl Display for RunActionType {
             RunActionType::TerminalSuggested => "terminal_suggested",
             RunActionType::CoderSessionStarted => "coder_session_started",
             RunActionType::CoderSessionCompleted => "coder_session_completed",
+            RunActionType::ValidationPassed => "validation_passed",
+            RunActionType::ValidationFailed => "validation_failed",
+            RunActionType::GitCommitCreated => "git_commit_created",
+            RunActionType::GitPushCompleted => "git_push_completed",
         };
         write!(f, "{s}")
     }
@@ -673,4 +683,67 @@ pub struct PromptLayers {
     pub memory_retrieval: String,
     pub failure_delta: Option<String>,
     pub output_schema: String,
+}
+
+// --- Validation Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationConfig {
+    pub lint_commands: Vec<String>,
+    pub build_commands: Vec<String>,
+    pub test_commands: Vec<String>,
+    pub working_dir: Option<String>,
+    pub max_fix_iterations: u8,
+    pub lint_timeout_ms: u64,
+    pub test_timeout_ms: u64,
+    pub git_auto_commit: bool,
+    pub git_auto_push: bool,
+    pub git_branch_prefix: Option<String>,
+    pub git_protect_dirty: bool,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            lint_commands: Vec::new(),
+            build_commands: Vec::new(),
+            test_commands: Vec::new(),
+            working_dir: None,
+            max_fix_iterations: 3,
+            lint_timeout_ms: 60_000,
+            test_timeout_ms: 120_000,
+            git_auto_commit: false,
+            git_auto_push: false,
+            git_branch_prefix: None,
+            git_protect_dirty: true,
+        }
+    }
+}
+
+impl ValidationConfig {
+    pub fn has_lint(&self) -> bool {
+        !self.lint_commands.is_empty() || !self.build_commands.is_empty()
+    }
+
+    pub fn has_test(&self) -> bool {
+        !self.test_commands.is_empty()
+    }
+
+    pub fn lint_and_build_commands(&self) -> Vec<String> {
+        self.lint_commands
+            .iter()
+            .chain(self.build_commands.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResult {
+    pub command: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u128,
+    pub passed: bool,
 }
