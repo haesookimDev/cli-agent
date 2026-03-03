@@ -103,6 +103,13 @@ pub enum RuntimeEvent {
         primary_language: String,
         file_count: usize,
     },
+    InteractiveStep {
+        node_id: String,
+        iteration: usize,
+        thought: String,
+        action_type: String,
+        observation_preview: String,
+    },
 }
 
 const NODE_OUTPUT_PREVIEW_CHARS: usize = 8_192;

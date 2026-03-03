@@ -1835,6 +1835,7 @@ fn parse_workflow_row(
         parameters: serde_json::from_str(&params_json)?,
         created_at: parse_rfc3339(&r.get::<String, _>("created_at"))?,
         updated_at: parse_rfc3339(&r.get::<String, _>("updated_at"))?,
+        source: Default::default(),
     })
 }
 

@@ -48,6 +48,8 @@ pub struct AppConfig {
     pub coder_timeout_ms: u64,
     pub validation: ValidationConfig,
     pub repo_analysis: RepoAnalysisConfig,
+    pub skills_dir: Option<String>,
+    pub interactive_max_iterations: usize,
 }
 
 impl AppConfig {
@@ -213,6 +215,12 @@ impl AppConfig {
                 .unwrap_or(4000),
         };
 
+        let skills_dir = env::var("SKILLS_DIR").ok();
+        let interactive_max_iterations = env::var("AGENT_INTERACTIVE_MAX_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
+
         let cfg = Self {
             data_dir,
             session_dir,
@@ -239,6 +247,8 @@ impl AppConfig {
             coder_timeout_ms,
             validation,
             repo_analysis,
+            skills_dir,
+            interactive_max_iterations,
         };
 
         cfg.ensure_dirs()?;

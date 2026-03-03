@@ -1,10 +1,14 @@
 pub mod coder_backend;
 pub mod git_manager;
+pub mod interactive;
 pub mod prompt_composer;
 pub mod repo_analyzer;
+pub mod skill_loader;
+pub mod tool_augment;
 pub mod validator;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -53,6 +57,7 @@ pub struct Orchestrator {
     validation_config: Arc<ValidationConfig>,
     repo_analysis_config: Arc<RepoAnalysisConfig>,
     repo_analyses: Arc<DashMap<Uuid, RepoAnalysis>>,
+    skills: Arc<DashMap<String, WorkflowTemplate>>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +79,10 @@ impl Orchestrator {
         coder_manager: Arc<coder_backend::CoderSessionManager>,
         validation_config: Arc<ValidationConfig>,
         repo_analysis_config: Arc<RepoAnalysisConfig>,
+        skills_dir: Option<PathBuf>,
     ) -> Self {
+        let skills = Arc::new(DashMap::new());
+        let _ = skills_dir; // loaded asynchronously later
         Self {
             runtime,
             agents,
@@ -91,11 +99,33 @@ impl Orchestrator {
             validation_config,
             repo_analysis_config,
             repo_analyses: Arc::new(DashMap::new()),
+            skills,
         }
     }
 
     pub fn router(&self) -> &Arc<ModelRouter> {
         &self.router
+    }
+
+    pub async fn load_skills_from_dir(&self, dir: &std::path::Path) {
+        let loaded = skill_loader::load_skills_from_dir(dir).await;
+        for skill in loaded {
+            self.skills.insert(skill.id.clone(), skill);
+        }
+        tracing::info!("Loaded {} skills", self.skills.len());
+    }
+
+    pub async fn reload_skills(&self, dir: &std::path::Path) {
+        self.skills.clear();
+        self.load_skills_from_dir(dir).await;
+    }
+
+    pub fn list_skills(&self) -> Vec<WorkflowTemplate> {
+        self.skills.iter().map(|e| e.value().clone()).collect()
+    }
+
+    pub fn get_skill(&self, id: &str) -> Option<WorkflowTemplate> {
+        self.skills.get(id).map(|e| e.value().clone())
     }
 
     pub async fn list_coder_sessions(
@@ -1343,6 +1373,7 @@ impl Orchestrator {
              - config_query: Tasks that ASK ABOUT current system state or settings without changing them (e.g. \"what backend is active?\", \"show current model\")\n\
              - tool_operation: Tasks requiring external tool calls (file I/O, API calls, MCP tools){tool_ctx}\n\
              - external_project: Tasks involving cloning, analyzing, or modifying an external repository given a URL or path\n\
+             - interactive: Open-ended tasks requiring multi-step reasoning, exploration, or iterative tool usage\n\
              - complex: Multi-step tasks spanning multiple categories\n\n\
              User task: \"{task}\"\n\n\
              Respond with ONLY the type name, nothing else.",
@@ -1376,6 +1407,7 @@ impl Orchestrator {
                     "config_query" => TaskType::ConfigQuery,
                     "tool_operation" => TaskType::ToolOperation,
                     "external_project" => TaskType::ExternalProject,
+                    "interactive" => TaskType::Interactive,
                     "complex" => TaskType::Complex,
                     _ => Self::classify_task_fallback(task, has_mcp),
                 }
@@ -1412,6 +1444,10 @@ impl Orchestrator {
         let analysis_kw = ["analyze", "analysis", "pattern", "compare", "evaluate"];
         if analysis_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::Analysis;
+        }
+        let interactive_kw = ["explore", "investigate", "figure out", "step by step", "iteratively"];
+        if interactive_kw.iter().any(|kw| lower.contains(kw)) {
+            return TaskType::Interactive;
         }
         if lower.split_whitespace().count() <= 8 {
             return TaskType::SimpleQuery;
@@ -1739,6 +1775,29 @@ impl Orchestrator {
                 graph.add_node(validate_lint)?;
 
                 // summarize omitted — dynamically injected by on_completed
+            }
+            TaskType::Interactive => {
+                let mut react_node = AgentNode::new(
+                    "interactive",
+                    AgentRole::ToolCaller,
+                    "Execute interactive ReAct loop to complete the task.",
+                );
+                react_node.dependencies = vec!["plan".to_string()];
+                react_node.policy = ExecutionPolicy {
+                    timeout_ms: 600_000,
+                    retry: 0,
+                    ..ExecutionPolicy::default()
+                };
+                graph.add_node(react_node)?;
+
+                let mut summarize = AgentNode::new(
+                    "summarize",
+                    AgentRole::Summarizer,
+                    "Summarize the interactive session results.",
+                );
+                summarize.dependencies = vec!["interactive".to_string()];
+                summarize.policy = ExecutionPolicy::default();
+                graph.add_node(summarize)?;
             }
             TaskType::CodeGeneration | TaskType::Complex => {
                 // Full graph: plan → extract + context_probe → code → fallback → summarize
@@ -2194,6 +2253,27 @@ impl Orchestrator {
                     });
                 }
 
+                // Interactive ReAct loop handler
+                if node.id == "interactive" {
+                    let react_result = interactive::execute_react_loop(
+                        &node,
+                        &deps,
+                        &req.task,
+                        run_id,
+                        session_id,
+                        15, // max iterations
+                        &agents,
+                        &router,
+                        &memory,
+                        &context,
+                        &mcp,
+                        &event_sink,
+                        &node.mcp_tools,
+                    )
+                    .await;
+                    return Ok(react_result);
+                }
+
                 // ToolCaller role: LLM-driven tool selection + MCP execution
                 if node.role == AgentRole::ToolCaller {
                     // Phase A: Collect dependency outputs and available tools
@@ -2631,6 +2711,33 @@ impl Orchestrator {
                     });
                 }
 
+                // Add MCP tool availability to context
+                let mcp_tools_for_node = if node.mcp_tools.is_empty() {
+                    mcp.list_all_tools().await
+                } else {
+                    skill_loader::filter_tools_for_node(&mcp.list_all_tools().await, &node.mcp_tools)
+                };
+                if !mcp_tools_for_node.is_empty() {
+                    let tool_summary = mcp_tools_for_node
+                        .iter()
+                        .take(20)
+                        .map(|t| format!("- {}: {}", t.name, t.description))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    chunks.push(ContextChunk {
+                        id: "tools-available".to_string(),
+                        scope: ContextScope::AgentPrivate,
+                        kind: ContextKind::ToolResults,
+                        content: format!(
+                            "You have access to MCP tools. To call a tool, include in your response:\n\
+                             <tool_call>{{\"tool_name\": \"server/tool\", \"arguments\": {{...}}}}</tool_call>\n\n\
+                             Available tools:\n{}",
+                            tool_summary
+                        ),
+                        priority: 0.85,
+                    });
+                }
+
                 let optimized = context.optimize(chunks);
                 let brief = context.build_structured_brief(
                     req.task.clone(),
@@ -2647,12 +2754,13 @@ impl Orchestrator {
                     vec![format!("session_id={session_id}"), format!("run_id={run_id}")],
                 );
 
+                let node_instructions = node.instructions.clone();
                 let input = AgentInput {
                     task: req.task.clone(),
                     instructions: node.instructions,
-                    context: optimized,
-                    dependency_outputs: dep_outputs,
-                    brief,
+                    context: optimized.clone(),
+                    dependency_outputs: dep_outputs.clone(),
+                    brief: brief.clone(),
                 };
 
                 let token_node_id = node.id.clone();
@@ -2671,13 +2779,63 @@ impl Orchestrator {
                 });
 
                 let run = agents
-                    .run_role_stream(node.role, input, router.clone(), on_token)
+                    .run_role_stream(node.role, input, router.clone(), on_token.clone())
                     .await;
                 match run {
                     Ok(output) => {
                         let node_id = node.id.clone();
                         let role = node.role;
-                        let model = output.model.clone();
+
+                        // Tool augmentation: if LLM output contains <tool_call> tags, execute and re-query
+                        let mut current_output = output.content.clone();
+                        let mut current_model = output.model.clone();
+                        for _tool_round in 0..tool_augment::MAX_TOOL_ROUNDS {
+                            let tool_calls = tool_augment::extract_tool_calls(&current_output);
+                            if tool_calls.is_empty() {
+                                break;
+                            }
+                            let tool_results =
+                                tool_augment::execute_tool_calls(&tool_calls, &mcp, &node.mcp_tools).await;
+                            for result in &tool_results {
+                                let _ = memory.append_run_action_event(
+                                    run_id, session_id,
+                                    RunActionType::McpToolCalled,
+                                    Some("node"), Some(&node_id), None,
+                                    serde_json::json!({
+                                        "tool_name": &result.tool_name,
+                                        "succeeded": result.succeeded,
+                                        "augment_round": _tool_round,
+                                    }),
+                                ).await;
+                            }
+                            let results_str = tool_augment::format_tool_results(&tool_results);
+                            let followup_instructions = format!(
+                                "{}\n\nTOOL RESULTS:\n{}\n\nContinue your response incorporating these tool results.",
+                                node_instructions, results_str,
+                            );
+                            let followup_input = AgentInput {
+                                task: req.task.clone(),
+                                instructions: followup_instructions,
+                                context: optimized.clone(),
+                                dependency_outputs: dep_outputs.clone(),
+                                brief: brief.clone(),
+                            };
+                            match agents.run_role_stream(
+                                node.role,
+                                followup_input,
+                                router.clone(),
+                                on_token.clone(),
+                            ).await {
+                                Ok(followup) => {
+                                    current_output = followup.content;
+                                    current_model = followup.model;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let current_output = tool_augment::strip_tool_call_tags(&current_output);
+
+                        let model = current_model.clone();
                         let _ = memory
                             .append_run_action_event(
                                 run_id,
@@ -2697,7 +2855,7 @@ impl Orchestrator {
                         memory
                             .remember_short(
                                 session_id,
-                                output.content.clone(),
+                                current_output.clone(),
                                 0.6,
                                 Duration::from_secs(20 * 60),
                             )
@@ -2707,7 +2865,7 @@ impl Orchestrator {
                             .remember_long(
                                 session_id,
                                 "agent_output",
-                                output.content.as_str(),
+                                current_output.as_str(),
                                 0.65,
                                 Some(node_id.as_str()),
                             )
@@ -2716,8 +2874,8 @@ impl Orchestrator {
                         Ok(NodeExecutionResult {
                             node_id,
                             role,
-                            model: output.model,
-                            output: output.content,
+                            model: current_model,
+                            output: current_output,
                             duration_ms: started.elapsed().as_millis(),
                             succeeded: true,
                             error: None,
@@ -3206,6 +3364,19 @@ impl Orchestrator {
                         "exit_code": exit_code,
                         "phase": "coder_session_completed",
                     }),
+                    RuntimeEvent::InteractiveStep {
+                        node_id,
+                        iteration,
+                        thought,
+                        action_type,
+                        observation_preview,
+                    } => serde_json::json!({
+                        "node_id": node_id,
+                        "iteration": iteration,
+                        "thought": thought,
+                        "action_type": action_type,
+                        "observation_preview": observation_preview,
+                    }),
                     RuntimeEvent::GraphCompleted => {
                         serde_json::json!({ "phase": "graph_completed" })
                     }
@@ -3245,7 +3416,8 @@ impl Orchestrator {
                     | RuntimeEvent::CoderSessionCompleted { .. }
                     | RuntimeEvent::GraphCompleted
                     | RuntimeEvent::ValidationCompleted { .. }
-                    | RuntimeEvent::GitCommitCreated { .. } => SessionEventType::RunProgress,
+                    | RuntimeEvent::GitCommitCreated { .. }
+                    | RuntimeEvent::InteractiveStep { .. } => SessionEventType::RunProgress,
                     RuntimeEvent::RepoCloned { .. } | RuntimeEvent::RepoAnalyzed { .. } => {
                         SessionEventType::AgentOutput
                     }
@@ -3297,6 +3469,9 @@ impl Orchestrator {
                     }
                     RuntimeEvent::RepoAnalyzed { node_id, .. } => {
                         (RunActionType::RepoAnalysisCompleted, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::InteractiveStep { node_id, .. } => {
+                        (RunActionType::InteractiveStep, Some(node_id.as_str()))
                     }
                 };
 
@@ -3571,6 +3746,7 @@ impl Orchestrator {
             source_run_id: Some(run_id),
             graph_template,
             parameters: Vec::new(),
+            source: Default::default(),
         };
 
         self.memory.save_workflow(&template).await?;
@@ -3669,11 +3845,24 @@ impl Orchestrator {
         params: Option<serde_json::Value>,
         session_id: Option<Uuid>,
     ) -> anyhow::Result<RunSubmission> {
-        let template = self
-            .memory
-            .get_workflow(workflow_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("workflow not found: {workflow_id}"))?;
+        let template = match self.skills.get(workflow_id) {
+            Some(t) => t.value().clone(),
+            None => self.memory
+                .get_workflow(workflow_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("workflow/skill not found: {workflow_id}"))?,
+        };
+
+        let param_map: std::collections::HashMap<String, String> = params
+            .as_ref()
+            .and_then(|p| p.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or(&v.to_string()).to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let template = skill_loader::interpolate_params(&template, &param_map);
 
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
         for wn in &template.graph_template.nodes {
@@ -3681,6 +3870,7 @@ impl Orchestrator {
             let instructions = wn.instructions.clone();
             let mut node = AgentNode::new(wn.id.clone(), role, instructions);
             node.dependencies = wn.dependencies.clone();
+            node.mcp_tools = wn.mcp_tools.clone();
             if !wn.policy.is_null() {
                 if let Ok(policy) = serde_json::from_value::<ExecutionPolicy>(wn.policy.clone()) {
                     node.policy = policy;
@@ -4060,7 +4250,8 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::GitCommitCreated
             | RunActionType::GitPushCompleted
             | RunActionType::RepoCloneCompleted
-            | RunActionType::RepoAnalysisCompleted => {}
+            | RunActionType::RepoAnalysisCompleted
+            | RunActionType::InteractiveStep => {}
         }
     }
 
@@ -4580,6 +4771,7 @@ mod tests {
             Arc::new(coder_mgr),
             Arc::new(ValidationConfig::default()),
             Arc::new(RepoAnalysisConfig::default()),
+            None,
         );
 
         let no_servers: Vec<String> = vec![];

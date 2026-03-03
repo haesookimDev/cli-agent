@@ -64,6 +64,8 @@ pub struct AgentNode {
     pub policy: ExecutionPolicy,
     pub depth: u8,
     pub retry_context: Option<String>,
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
 }
 
 impl AgentNode {
@@ -76,6 +78,7 @@ impl AgentNode {
             policy: ExecutionPolicy::default(),
             depth: 0,
             retry_context: None,
+            mcp_tools: Vec::new(),
         }
     }
 }

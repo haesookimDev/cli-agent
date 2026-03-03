@@ -80,6 +80,7 @@ pub enum TaskType {
     ConfigQuery,
     ToolOperation,
     ExternalProject,
+    Interactive,
     Complex,
 }
 
@@ -304,6 +305,7 @@ pub enum RunActionType {
     GitPushCompleted,
     RepoCloneCompleted,
     RepoAnalysisCompleted,
+    InteractiveStep,
 }
 
 impl Display for RunActionType {
@@ -339,6 +341,7 @@ impl Display for RunActionType {
             RunActionType::GitPushCompleted => "git_push_completed",
             RunActionType::RepoCloneCompleted => "repo_clone_completed",
             RunActionType::RepoAnalysisCompleted => "repo_analysis_completed",
+            RunActionType::InteractiveStep => "interactive_step",
         };
         write!(f, "{s}")
     }
@@ -594,6 +597,20 @@ pub struct SubtaskDefinition {
 
 // --- Workflow Types ---
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSource {
+    File,
+    Run,
+    Api,
+}
+
+impl Default for SkillSource {
+    fn default() -> Self {
+        Self::Api
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowTemplate {
     pub id: String,
@@ -604,6 +621,8 @@ pub struct WorkflowTemplate {
     pub source_run_id: Option<Uuid>,
     pub graph_template: WorkflowGraphTemplate,
     pub parameters: Vec<WorkflowParameter>,
+    #[serde(default)]
+    pub source: SkillSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -818,4 +837,29 @@ impl Default for RepoAnalysisConfig {
             repo_map_max_tokens: 4000,
         }
     }
+}
+
+// --- Interactive Agent Types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractiveStep {
+    pub iteration: usize,
+    pub thought: String,
+    pub action: InteractiveAction,
+    pub observation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum InteractiveAction {
+    McpToolCall {
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
+    LlmQuery {
+        prompt: String,
+    },
+    Done {
+        summary: String,
+    },
 }

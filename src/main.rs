@@ -168,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
 
     let validation_config = Arc::new(cfg.validation);
     let repo_analysis_config = Arc::new(cfg.repo_analysis);
+    let skills_dir = cfg.skills_dir.as_ref().map(PathBuf::from);
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
         AgentRegistry::builtin(),
@@ -180,8 +181,13 @@ async fn main() -> anyhow::Result<()> {
         coder_manager,
         validation_config,
         repo_analysis_config,
+        skills_dir.clone(),
     );
     orchestrator.load_persisted_settings().await;
+
+    if let Some(dir) = &skills_dir {
+        orchestrator.load_skills_from_dir(dir).await;
+    }
 
     match cli.command {
         Commands::Run {
