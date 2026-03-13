@@ -127,26 +127,37 @@ impl TerminalManager {
     }
 
     /// Resize a session's PTY.
-    pub fn resize(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+    pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
         let session = self
             .sessions
             .get(id)
+            .map(|entry| entry.value().clone())
             .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-        let master = session.master.blocking_lock();
-        master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let master = session.master.blocking_lock();
+            master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("terminal resize task failed: {err}"))??;
         Ok(())
     }
 
     /// Kill a session and remove it.
-    pub fn kill(&self, id: &str) -> anyhow::Result<()> {
+    pub async fn kill(&self, id: &str) -> anyhow::Result<()> {
         if let Some((_, session)) = self.sessions.remove(id) {
-            let mut child = session.child.blocking_lock();
-            child.kill()?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let mut child = session.child.blocking_lock();
+                child.kill()?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("terminal kill task failed: {err}"))??;
         }
         Ok(())
     }

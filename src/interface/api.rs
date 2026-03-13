@@ -2269,7 +2269,7 @@ async fn kill_terminal_handler(
         );
     }
 
-    match state.terminal.kill(&id) {
+    match state.terminal.kill(&id).await {
         Ok(_) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "killed"})),
@@ -2393,9 +2393,13 @@ async fn handle_terminal_ws(
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Binary(data) => {
-                    let mut w = writer.lock().await;
-                    let _ = w.write_all(&data);
-                    let _ = w.flush();
+                    let writer = writer.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mut w = writer.blocking_lock();
+                        let _ = w.write_all(&data);
+                        let _ = w.flush();
+                    })
+                    .await;
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -2404,13 +2408,17 @@ async fn handle_terminal_ws(
                                 ctrl.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
                             let rows =
                                 ctrl.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-                            let m = master_for_resize.lock().await;
-                            let _ = m.resize(portable_pty::PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
+                            let master = master_for_resize.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let m = master.blocking_lock();
+                                let _ = m.resize(portable_pty::PtySize {
+                                    rows,
+                                    cols,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                });
+                            })
+                            .await;
                         }
                     }
                 }
