@@ -20,11 +20,11 @@ use cli_agent::orchestrator::Orchestrator;
 use cli_agent::orchestrator::coder_backend::{
     ClaudeCodeBackend, CodexBackend, CoderSessionManager, LlmCoderBackend,
 };
-use cli_agent::router::{ModelRouter, ProviderKind};
+use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
 use cli_agent::scheduler::CronScheduler;
 use cli_agent::terminal::TerminalManager;
-use cli_agent::types::{CliModelBackendKind, CliModelConfig, CoderBackendKind, RunRequest, TaskProfile};
+use cli_agent::types::{CoderBackendKind, RunRequest, TaskProfile};
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
 
 #[derive(Debug, Parser)]
@@ -71,31 +71,6 @@ enum MemoryCommand {
         session: Uuid,
     },
     Vacuum,
-}
-
-fn apply_cli_model_bootstrap(router: &ModelRouter, cli_model: &CliModelConfig) {
-    let target_provider = match cli_model.backend {
-        CliModelBackendKind::ClaudeCode => ProviderKind::ClaudeCode,
-        CliModelBackendKind::Codex => ProviderKind::Codex,
-    };
-
-    router.set_preferred_model(Some(cli_model.backend.default_model_id().to_string()));
-
-    if cli_model.cli_only {
-        for provider in [
-            ProviderKind::OpenAi,
-            ProviderKind::Anthropic,
-            ProviderKind::Gemini,
-            ProviderKind::Vllm,
-            ProviderKind::ClaudeCode,
-            ProviderKind::Codex,
-            ProviderKind::Mock,
-        ] {
-            router.set_provider_disabled(provider, provider != target_provider);
-        }
-    } else {
-        router.set_provider_disabled(target_provider, false);
-    }
 }
 
 #[tokio::main]
@@ -211,9 +186,6 @@ async fn main() -> anyhow::Result<()> {
         skills_dir.clone(),
     );
     orchestrator.load_persisted_settings().await;
-    if let Some(cli_model) = &cli_model {
-        apply_cli_model_bootstrap(router.as_ref(), cli_model);
-    }
 
     if let Some(dir) = &skills_dir {
         orchestrator.load_skills_from_dir(dir).await;

@@ -31,12 +31,14 @@ use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
     ShouldCancelFn, ShouldPauseFn,
 };
+use crate::router::ProviderKind;
 use crate::types::{
-    AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, KnowledgeItem, McpToolDefinition,
-    NodeTraceState, RepoAnalysis, RepoAnalysisConfig, RunActionEvent, RunActionType,
-    RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView, RunRecord,
-    RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
-    SessionMemoryItem, SubtaskPlan, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
+    AgentExecutionRecord, AgentRole, AppSettings, ChatMessage, ChatRole, CliModelConfig,
+    KnowledgeItem, McpToolDefinition, NodeTraceState, RepoAnalysis,
+    RepoAnalysisConfig, RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane,
+    RunBehaviorSummary, RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission,
+    RunTrace, RunTraceGraph, SessionEvent, SessionEventType, SessionMemoryItem, SettingsPatch,
+    SubtaskPlan, TaskProfile, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
     WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
@@ -139,9 +141,29 @@ impl Orchestrator {
         self.coder_manager.list_sessions_for_run(run_id).await
     }
 
-    pub fn get_settings(&self) -> crate::types::AppSettings {
-        crate::types::AppSettings {
-            default_profile: crate::types::TaskProfile::General,
+    pub fn get_settings(&self) -> AppSettings {
+        let cli_model = self.router.cli_model_config();
+        let (
+            cli_model_enabled,
+            cli_model_backend,
+            cli_model_command,
+            cli_model_args,
+            cli_model_timeout_ms,
+            cli_model_only,
+        ) = match cli_model {
+            Some(config) => (
+                true,
+                Some(config.backend),
+                config.command,
+                config.args,
+                config.timeout_ms,
+                config.cli_only,
+            ),
+            None => (false, None, String::new(), Vec::new(), 300_000, false),
+        };
+
+        AppSettings {
+            default_profile: TaskProfile::General,
             preferred_model: self.router.preferred_model(),
             disabled_models: self.router.disabled_models(),
             disabled_providers: self
@@ -150,59 +172,88 @@ impl Orchestrator {
                 .iter()
                 .map(|p| p.to_string())
                 .collect(),
+            cli_model_enabled,
+            cli_model_backend,
+            cli_model_command,
+            cli_model_args,
+            cli_model_timeout_ms,
+            cli_model_only,
             terminal_command: "claude".to_string(),
             terminal_args: vec![],
             terminal_auto_spawn: false,
         }
     }
 
-    pub async fn update_settings(&self, patch: crate::types::SettingsPatch) {
-        if let Some(preferred) = patch.preferred_model {
-            self.router.set_preferred_model(preferred);
-        }
-        if let Some(disabled_models) = patch.disabled_models {
-            // Reset all, then disable specified
-            for spec in self.router.catalog() {
-                self.router.set_model_disabled(&spec.model_id, false);
-            }
-            for model_id in &disabled_models {
-                self.router.set_model_disabled(model_id, true);
-            }
-        }
-        if let Some(disabled_providers) = patch.disabled_providers {
-            use crate::router::ProviderKind;
-            let all_providers = [
-                ProviderKind::OpenAi,
-                ProviderKind::Anthropic,
-                ProviderKind::Gemini,
-                ProviderKind::Vllm,
-                ProviderKind::ClaudeCode,
-                ProviderKind::Codex,
-                ProviderKind::Mock,
-            ];
-            for p in &all_providers {
-                self.router.set_provider_disabled(*p, false);
-            }
-            for name in &disabled_providers {
-                if let Ok(pk) =
-                    serde_json::from_value::<ProviderKind>(serde_json::Value::String(name.clone()))
-                {
-                    self.router.set_provider_disabled(pk, true);
-                }
-            }
-        }
-
-        // Build settings: start from current state, then merge terminal fields from DB + patch
+    pub async fn current_settings(&self) -> AppSettings {
         let mut settings = self.get_settings();
-
-        // Load persisted terminal settings as baseline
         if let Ok(Some(persisted)) = self.memory.store().load_settings().await {
+            settings.default_profile = persisted.default_profile;
             settings.terminal_command = persisted.terminal_command;
             settings.terminal_args = persisted.terminal_args;
             settings.terminal_auto_spawn = persisted.terminal_auto_spawn;
-        }
 
-        // Apply terminal patch fields
+            if !settings.cli_model_enabled && persisted.cli_model_enabled {
+                settings.cli_model_enabled = true;
+                settings.cli_model_backend = persisted.cli_model_backend;
+                settings.cli_model_command = persisted.cli_model_command;
+                settings.cli_model_args = persisted.cli_model_args;
+                settings.cli_model_timeout_ms = persisted.cli_model_timeout_ms;
+                settings.cli_model_only = persisted.cli_model_only;
+            }
+        }
+        settings
+    }
+
+    pub async fn persist_current_settings(&self) {
+        let settings = self.current_settings().await;
+        if let Err(e) = self.memory.store().save_settings(&settings).await {
+            error!("failed to persist settings: {e}");
+        }
+    }
+
+    pub async fn update_settings(&self, patch: SettingsPatch) {
+        let cli_patch_applied = patch.cli_model_enabled.is_some()
+            || patch.cli_model_backend.is_some()
+            || patch.cli_model_command.is_some()
+            || patch.cli_model_args.is_some()
+            || patch.cli_model_timeout_ms.is_some()
+            || patch.cli_model_only.is_some();
+
+        let mut settings = self.current_settings().await;
+
+        if let Some(profile) = patch.default_profile {
+            settings.default_profile = profile;
+        }
+        if let Some(preferred) = patch.preferred_model {
+            settings.preferred_model = preferred;
+        }
+        if let Some(disabled_models) = patch.disabled_models {
+            settings.disabled_models = disabled_models;
+        }
+        if let Some(disabled_providers) = patch.disabled_providers {
+            settings.disabled_providers = disabled_providers;
+        }
+        if let Some(enabled) = patch.cli_model_enabled {
+            settings.cli_model_enabled = enabled;
+            if !enabled {
+                settings.cli_model_backend = None;
+            }
+        }
+        if let Some(backend) = patch.cli_model_backend {
+            settings.cli_model_backend = backend;
+        }
+        if let Some(command) = patch.cli_model_command {
+            settings.cli_model_command = command;
+        }
+        if let Some(args) = patch.cli_model_args {
+            settings.cli_model_args = args;
+        }
+        if let Some(timeout_ms) = patch.cli_model_timeout_ms {
+            settings.cli_model_timeout_ms = timeout_ms;
+        }
+        if let Some(cli_only) = patch.cli_model_only {
+            settings.cli_model_only = cli_only;
+        }
         if let Some(cmd) = patch.terminal_command {
             settings.terminal_command = cmd;
         }
@@ -213,6 +264,25 @@ impl Orchestrator {
             settings.terminal_auto_spawn = auto;
         }
 
+        if cli_patch_applied {
+            match Self::normalize_cli_model_config(&settings) {
+                Some(cli_model) => {
+                    settings.preferred_model = Some(cli_model.backend.default_model_id().to_string());
+                }
+                None => {
+                    if settings
+                        .preferred_model
+                        .as_deref()
+                        .is_some_and(Self::is_cli_model_id)
+                    {
+                        settings.preferred_model = None;
+                    }
+                }
+            }
+        }
+
+        self.apply_settings_to_runtime(&settings);
+
         if let Err(e) = self.memory.store().save_settings(&settings).await {
             error!("failed to persist settings: {e}");
         }
@@ -221,19 +291,7 @@ impl Orchestrator {
     pub async fn load_persisted_settings(&self) {
         match self.memory.store().load_settings().await {
             Ok(Some(settings)) => {
-                if let Some(preferred) = settings.preferred_model {
-                    self.router.set_preferred_model(Some(preferred));
-                }
-                for model_id in &settings.disabled_models {
-                    self.router.set_model_disabled(model_id, true);
-                }
-                for name in &settings.disabled_providers {
-                    if let Ok(pk) = serde_json::from_value::<crate::router::ProviderKind>(
-                        serde_json::Value::String(name.clone()),
-                    ) {
-                        self.router.set_provider_disabled(pk, true);
-                    }
-                }
+                self.apply_settings_to_runtime(&settings);
                 info!("restored persisted settings");
             }
             Ok(None) => {}
@@ -241,6 +299,82 @@ impl Orchestrator {
                 error!("failed to load persisted settings: {e}");
             }
         }
+    }
+
+    fn apply_settings_to_runtime(&self, settings: &AppSettings) {
+        self.router
+            .set_preferred_model(settings.preferred_model.clone());
+
+        for spec in self.router.catalog() {
+            self.router.set_model_disabled(&spec.model_id, false);
+        }
+        for provider in Self::all_providers() {
+            self.router.set_provider_disabled(provider, false);
+        }
+
+        let cli_model = Self::normalize_cli_model_config(settings);
+        self.router.set_cli_model_config(cli_model.clone());
+        if let Some(cli_model) = cli_model.as_ref() {
+            self.router.apply_cli_model_bootstrap(cli_model);
+            self.router
+                .set_preferred_model(settings.preferred_model.clone().or_else(|| {
+                    Some(cli_model.backend.default_model_id().to_string())
+                }));
+        }
+
+        for model_id in &settings.disabled_models {
+            self.router.set_model_disabled(model_id, true);
+        }
+
+        if !(settings.cli_model_enabled && settings.cli_model_only) {
+            for name in &settings.disabled_providers {
+                if let Ok(pk) =
+                    serde_json::from_value::<ProviderKind>(serde_json::Value::String(name.clone()))
+                {
+                    self.router.set_provider_disabled(pk, true);
+                }
+            }
+        }
+    }
+
+    fn normalize_cli_model_config(settings: &AppSettings) -> Option<CliModelConfig> {
+        if !settings.cli_model_enabled {
+            return None;
+        }
+
+        let backend = settings.cli_model_backend?;
+        let command = if settings.cli_model_command.trim().is_empty() {
+            backend.default_command().to_string()
+        } else {
+            settings.cli_model_command.clone()
+        };
+
+        Some(CliModelConfig {
+            backend,
+            command,
+            args: settings.cli_model_args.clone(),
+            timeout_ms: settings.cli_model_timeout_ms.max(1_000),
+            cli_only: settings.cli_model_only,
+        })
+    }
+
+    fn all_providers() -> [ProviderKind; 7] {
+        [
+            ProviderKind::OpenAi,
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+            ProviderKind::Vllm,
+            ProviderKind::ClaudeCode,
+            ProviderKind::Codex,
+            ProviderKind::Mock,
+        ]
+    }
+
+    fn is_cli_model_id(model_id: &str) -> bool {
+        matches!(
+            model_id,
+            "claude-code-cli" | "codex-cli"
+        )
     }
 
     pub fn memory(&self) -> &Arc<MemoryManager> {
@@ -1630,15 +1764,9 @@ impl Orchestrator {
     }
 
     async fn build_system_state_snapshot(&self) -> String {
-        let settings = self.get_settings();
+        let settings = self.current_settings().await;
         let coder_backend = self.coder_manager.default_backend_kind();
         let mcp_servers = self.mcp.server_descriptions();
-
-        let persisted = self.memory.store().load_settings().await.ok().flatten();
-        let (term_cmd, term_args, term_auto) = match persisted {
-            Some(ref s) => (s.terminal_command.as_str(), &s.terminal_args, s.terminal_auto_spawn),
-            None => (settings.terminal_command.as_str(), &settings.terminal_args, settings.terminal_auto_spawn),
-        };
 
         let mcp_section = if mcp_servers.is_empty() {
             "  MCP servers: (none)".to_string()
@@ -1662,9 +1790,9 @@ impl Orchestrator {
             settings.disabled_models.join(", "),
             settings.disabled_providers.join(", "),
             coder_backend,
-            term_cmd,
-            term_args.join(" "),
-            term_auto,
+            settings.terminal_command,
+            settings.terminal_args.join(" "),
+            settings.terminal_auto_spawn,
             mcp_section,
         )
     }

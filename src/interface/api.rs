@@ -1648,13 +1648,7 @@ async fn get_settings_handler(
             Json(serde_json::json!({"error": err.to_string()})),
         );
     }
-    let mut settings = state.orchestrator.get_settings();
-    // Merge persisted terminal settings
-    if let Ok(Some(persisted)) = state.orchestrator.memory().store().load_settings().await {
-        settings.terminal_command = persisted.terminal_command;
-        settings.terminal_args = persisted.terminal_args;
-        settings.terminal_auto_spawn = persisted.terminal_auto_spawn;
-    }
+    let settings = state.orchestrator.current_settings().await;
     (
         StatusCode::OK,
         Json(serde_json::to_value(settings).unwrap()),
@@ -1684,7 +1678,7 @@ async fn update_settings_handler(
     };
 
     state.orchestrator.update_settings(patch).await;
-    let settings = state.orchestrator.get_settings();
+    let settings = state.orchestrator.current_settings().await;
     (
         StatusCode::OK,
         Json(serde_json::to_value(settings).unwrap()),
@@ -1704,13 +1698,15 @@ async fn list_models_handler(
 
     let router = state.orchestrator.router();
     let preferred = router.preferred_model();
+    let disabled_providers = router.disabled_providers();
     let models: Vec<serde_json::Value> = router
         .catalog()
         .iter()
         .map(|spec| {
             serde_json::json!({
                 "spec": spec,
-                "enabled": !router.is_model_disabled(&spec.model_id),
+                "enabled": !router.is_model_disabled(&spec.model_id)
+                    && !disabled_providers.contains(&spec.provider),
                 "is_preferred": preferred.as_deref() == Some(spec.model_id.as_str()),
             })
         })
@@ -1734,6 +1730,7 @@ async fn toggle_model_handler(
     let router = state.orchestrator.router();
     let currently_disabled = router.is_model_disabled(&model_id);
     router.set_model_disabled(&model_id, !currently_disabled);
+    state.orchestrator.persist_current_settings().await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1770,6 +1767,7 @@ async fn toggle_provider_handler(
     let router = state.orchestrator.router();
     let currently_disabled = router.disabled_providers().contains(&pk);
     router.set_provider_disabled(pk, !currently_disabled);
+    state.orchestrator.persist_current_settings().await;
     (
         StatusCode::OK,
         Json(serde_json::json!({

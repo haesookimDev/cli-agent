@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -135,6 +135,7 @@ pub struct ModelRouter {
     catalog: Arc<Vec<ModelSpec>>,
     client: ProviderClient,
     preferred_model: Arc<Mutex<Option<String>>>,
+    cli_model: Arc<Mutex<Option<CliModelConfig>>>,
     cache: Arc<DashMap<u64, CacheEntry>>,
 }
 
@@ -146,18 +147,23 @@ impl ModelRouter {
         gemini_api_key: Option<String>,
         cli_model: Option<CliModelConfig>,
     ) -> Self {
-        Self {
+        let router = Self {
             catalog: Arc::new(default_catalog(cli_model.as_ref())),
             client: ProviderClient::new(
                 vllm_base_url.into(),
                 openai_api_key,
                 anthropic_api_key,
                 gemini_api_key,
-                cli_model,
+                cli_model.clone(),
             ),
             preferred_model: Arc::new(Mutex::new(None)),
+            cli_model: Arc::new(Mutex::new(cli_model)),
             cache: Arc::new(DashMap::new()),
+        };
+        if let Some(config) = router.cli_model_config() {
+            router.apply_cli_model_bootstrap(&config);
         }
+        router
     }
 
     pub fn with_catalog(
@@ -168,18 +174,23 @@ impl ModelRouter {
         cli_model: Option<CliModelConfig>,
         catalog: Vec<ModelSpec>,
     ) -> Self {
-        Self {
+        let router = Self {
             catalog: Arc::new(catalog),
             client: ProviderClient::new(
                 vllm_base_url.into(),
                 openai_api_key,
                 anthropic_api_key,
                 gemini_api_key,
-                cli_model,
+                cli_model.clone(),
             ),
             preferred_model: Arc::new(Mutex::new(None)),
+            cli_model: Arc::new(Mutex::new(cli_model)),
             cache: Arc::new(DashMap::new()),
+        };
+        if let Some(config) = router.cli_model_config() {
+            router.apply_cli_model_bootstrap(&config);
         }
+        router
     }
 
     pub fn catalog(&self) -> &[ModelSpec] {
@@ -216,6 +227,37 @@ impl ModelRouter {
 
     pub fn preferred_model(&self) -> Option<String> {
         self.preferred_model.lock().unwrap().clone()
+    }
+
+    pub fn set_cli_model_config(&self, cli_model: Option<CliModelConfig>) {
+        *self.cli_model.lock().unwrap() = cli_model.clone();
+        self.client.set_cli_model_config(cli_model);
+    }
+
+    pub fn cli_model_config(&self) -> Option<CliModelConfig> {
+        self.cli_model.lock().unwrap().clone()
+    }
+
+    pub fn apply_cli_model_bootstrap(&self, cli_model: &CliModelConfig) {
+        let target_provider = provider_for_cli_backend(cli_model.backend);
+
+        self.set_preferred_model(Some(cli_model.backend.default_model_id().to_string()));
+
+        if cli_model.cli_only {
+            for provider in [
+                ProviderKind::OpenAi,
+                ProviderKind::Anthropic,
+                ProviderKind::Gemini,
+                ProviderKind::Vllm,
+                ProviderKind::ClaudeCode,
+                ProviderKind::Codex,
+                ProviderKind::Mock,
+            ] {
+                self.set_provider_disabled(provider, provider != target_provider);
+            }
+        } else {
+            self.set_provider_disabled(target_provider, false);
+        }
     }
 
     pub fn select_model(
@@ -438,7 +480,7 @@ pub struct ProviderClient {
     openai_api_key: Option<String>,
     anthropic_api_key: Option<String>,
     gemini_api_key: Option<String>,
-    cli_providers: Arc<HashMap<ProviderKind, CliProviderConfig>>,
+    cli_providers: Arc<DashMap<ProviderKind, CliProviderConfig>>,
     disabled: Arc<DashSet<ProviderKind>>,
     disabled_models: Arc<DashSet<String>>,
 }
@@ -451,19 +493,7 @@ impl ProviderClient {
         gemini_api_key: Option<String>,
         cli_model: Option<CliModelConfig>,
     ) -> Self {
-        let mut cli_providers = HashMap::new();
-        if let Some(cli_model) = cli_model {
-            let provider = provider_for_cli_backend(cli_model.backend);
-            cli_providers.insert(
-                provider,
-                CliProviderConfig {
-                    command: cli_model.command,
-                    args: cli_model.args,
-                    timeout: Duration::from_millis(cli_model.timeout_ms),
-                },
-            );
-        }
-        Self {
+        let client = Self {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -472,9 +502,43 @@ impl ProviderClient {
             openai_api_key,
             anthropic_api_key,
             gemini_api_key,
-            cli_providers: Arc::new(cli_providers),
+            cli_providers: Arc::new(DashMap::new()),
             disabled: Arc::new(DashSet::new()),
             disabled_models: Arc::new(DashSet::new()),
+        };
+        client.set_cli_model_config(cli_model);
+        client
+    }
+
+    pub fn set_cli_model_config(&self, cli_model: Option<CliModelConfig>) {
+        self.cli_providers.remove(&ProviderKind::ClaudeCode);
+        self.cli_providers.remove(&ProviderKind::Codex);
+
+        match cli_model {
+            Some(cli_model) => {
+                let provider = provider_for_cli_backend(cli_model.backend);
+                self.cli_providers.insert(
+                    provider,
+                    CliProviderConfig {
+                        command: cli_model.command,
+                        args: cli_model.args,
+                        timeout: Duration::from_millis(cli_model.timeout_ms),
+                    },
+                );
+                self.set_provider_disabled(provider, false);
+                let other = match provider {
+                    ProviderKind::ClaudeCode => Some(ProviderKind::Codex),
+                    ProviderKind::Codex => Some(ProviderKind::ClaudeCode),
+                    _ => None,
+                };
+                if let Some(other) = other {
+                    self.set_provider_disabled(other, true);
+                }
+            }
+            None => {
+                self.set_provider_disabled(ProviderKind::ClaudeCode, true);
+                self.set_provider_disabled(ProviderKind::Codex, true);
+            }
         }
     }
 
@@ -643,9 +707,10 @@ impl ProviderClient {
             .ok_or_else(|| anyhow::anyhow!("unexpected vLLM response format"))
     }
 
-    fn cli_provider(&self, provider: ProviderKind) -> anyhow::Result<&CliProviderConfig> {
+    fn cli_provider(&self, provider: ProviderKind) -> anyhow::Result<CliProviderConfig> {
         self.cli_providers
             .get(&provider)
+            .map(|entry| entry.value().clone())
             .ok_or_else(|| anyhow::anyhow!("CLI provider {} is not configured", provider))
     }
 
@@ -1036,15 +1101,15 @@ fn provider_for_cli_backend(backend: CliModelBackendKind) -> ProviderKind {
     }
 }
 
-fn cli_model_spec(config: &CliModelConfig) -> ModelSpec {
-    let (quality, latency, tool_call_accuracy) = match config.backend {
+fn cli_model_spec(backend: CliModelBackendKind) -> ModelSpec {
+    let (quality, latency, tool_call_accuracy) = match backend {
         CliModelBackendKind::ClaudeCode => (0.94, 2600.0, 0.90),
         CliModelBackendKind::Codex => (0.93, 2400.0, 0.88),
     };
 
     ModelSpec {
-        provider: provider_for_cli_backend(config.backend),
-        model_id: config.backend.default_model_id().to_string(),
+        provider: provider_for_cli_backend(backend),
+        model_id: backend.default_model_id().to_string(),
         quality,
         latency,
         cost: 0.001,
@@ -1054,7 +1119,7 @@ fn cli_model_spec(config: &CliModelConfig) -> ModelSpec {
     }
 }
 
-fn default_catalog(cli_model: Option<&CliModelConfig>) -> Vec<ModelSpec> {
+fn default_catalog(_cli_model: Option<&CliModelConfig>) -> Vec<ModelSpec> {
     let mut catalog = vec![
         // --- OpenAI ---
         ModelSpec {
@@ -1163,9 +1228,8 @@ fn default_catalog(cli_model: Option<&CliModelConfig>) -> Vec<ModelSpec> {
         },
     ];
 
-    if let Some(config) = cli_model {
-        catalog.push(cli_model_spec(config));
-    }
+    catalog.push(cli_model_spec(CliModelBackendKind::ClaudeCode));
+    catalog.push(cli_model_spec(CliModelBackendKind::Codex));
 
     catalog
 }

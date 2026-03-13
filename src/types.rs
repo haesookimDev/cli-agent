@@ -489,6 +489,18 @@ pub struct AppSettings {
     pub preferred_model: Option<String>,
     pub disabled_models: Vec<String>,
     pub disabled_providers: Vec<String>,
+    #[serde(default)]
+    pub cli_model_enabled: bool,
+    #[serde(default)]
+    pub cli_model_backend: Option<CliModelBackendKind>,
+    #[serde(default = "default_cli_model_command")]
+    pub cli_model_command: String,
+    #[serde(default)]
+    pub cli_model_args: Vec<String>,
+    #[serde(default = "default_cli_model_timeout_ms")]
+    pub cli_model_timeout_ms: u64,
+    #[serde(default)]
+    pub cli_model_only: bool,
     #[serde(default = "default_terminal_command")]
     pub terminal_command: String,
     #[serde(default)]
@@ -501,12 +513,26 @@ fn default_terminal_command() -> String {
     "claude".to_string()
 }
 
+fn default_cli_model_command() -> String {
+    String::new()
+}
+
+fn default_cli_model_timeout_ms() -> u64 {
+    300_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsPatch {
     pub default_profile: Option<TaskProfile>,
     pub preferred_model: Option<Option<String>>,
     pub disabled_models: Option<Vec<String>>,
     pub disabled_providers: Option<Vec<String>>,
+    pub cli_model_enabled: Option<bool>,
+    pub cli_model_backend: Option<Option<CliModelBackendKind>>,
+    pub cli_model_command: Option<String>,
+    pub cli_model_args: Option<Vec<String>>,
+    pub cli_model_timeout_ms: Option<u64>,
+    pub cli_model_only: Option<bool>,
     pub terminal_command: Option<String>,
     pub terminal_args: Option<Vec<String>>,
     pub terminal_auto_spawn: Option<bool>,
