@@ -2328,68 +2328,39 @@ async fn handle_terminal_ws(
     socket: WebSocket,
     session: Arc<crate::terminal::TerminalSession>,
 ) {
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Take the PTY reader (only one WS connection per session)
-    let pty_reader = {
-        let mut guard = session.reader.lock().await;
-        match guard.take() {
-            Some(r) => r,
-            None => {
-                let _ = ws_sender
-                    .send(Message::Text(
-                        serde_json::json!({"type": "error", "message": "already connected"})
-                            .to_string(),
-                    ))
-                    .await;
-                return;
-            }
-        }
-    };
-
     let writer = session.writer.clone();
-    let reader_slot = session.reader.clone();
+    let mut events = session.events.subscribe();
 
-    // Bridge blocking PTY read to async via mpsc channel
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-
-    let read_handle = tokio::task::spawn_blocking(move || {
-        let mut reader = pty_reader;
-        let mut buf = [0u8; 4096];
+    // Session events → WS frames
+    let mut send_handle = tokio::spawn(async move {
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+            match events.recv().await {
+                Ok(crate::terminal::TerminalEvent::Output(data)) => {
+                    if ws_sender.send(Message::Binary(data)).await.is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
+                Ok(crate::terminal::TerminalEvent::Exit(code)) => {
+                    let _ = ws_sender
+                        .send(Message::Text(
+                            serde_json::json!({"type": "exit", "code": code}).to_string(),
+                        ))
+                        .await;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-        // Return reader so it can be restored for reconnection
-        reader
-    });
-
-    // Async task: mpsc → WS binary frames
-    let send_handle = tokio::spawn(async move {
-        while let Some(data) = rx.recv().await {
-            if ws_sender.send(Message::Binary(data)).await.is_err() {
-                break;
-            }
-        }
-        let _ = ws_sender
-            .send(Message::Text(
-                serde_json::json!({"type": "exit", "code": 0}).to_string(),
-            ))
-            .await;
     });
 
     // Receive loop: WS → PTY stdin
     let master_for_resize = session.master.clone();
-    let recv_handle = tokio::spawn(async move {
+    let mut recv_handle = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Binary(data) => {
@@ -2428,16 +2399,13 @@ async fn handle_terminal_ws(
         }
     });
 
-    // Wait for either direction to finish
+    // Keep the WS alive until either side ends.
     tokio::select! {
-        result = read_handle => {
-            // Restore reader for potential reconnection
-            if let Ok(reader) = result {
-                let mut guard = reader_slot.lock().await;
-                *guard = Some(reader);
-            }
+        _ = &mut send_handle => {
+            recv_handle.abort();
         }
-        _ = recv_handle => {}
+        _ = &mut recv_handle => {
+            send_handle.abort();
+        }
     }
-    send_handle.abort();
 }

@@ -5,8 +5,14 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub enum TerminalEvent {
+    Output(Vec<u8>),
+    Exit(i32),
+}
 
 /// One live terminal session backed by a PTY.
 pub struct TerminalSession {
@@ -18,9 +24,8 @@ pub struct TerminalSession {
     pub rows: u16,
     /// Write end: send bytes into the PTY (keyboard input from browser).
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    /// Read end: receive bytes from the PTY (output to browser).
-    /// Wrapped in Option so it can be taken once when the WS reader loop starts.
-    pub reader: Arc<Mutex<Option<Box<dyn Read + Send>>>>,
+    /// Broadcasts PTY output and lifecycle events to any attached web terminals.
+    pub events: broadcast::Sender<TerminalEvent>,
     /// PTY master handle for resize operations.
     pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     /// Child process handle.
@@ -80,6 +85,7 @@ impl TerminalManager {
         let child = pair.slave.spawn_command(cmd)?;
         let writer = pair.master.take_writer()?;
         let reader = pair.master.try_clone_reader()?;
+        let (events, _) = broadcast::channel(256);
 
         let id = Uuid::new_v4().to_string();
         let session = Arc::new(TerminalSession {
@@ -90,12 +96,31 @@ impl TerminalManager {
             cols,
             rows,
             writer: Arc::new(Mutex::new(writer)),
-            reader: Arc::new(Mutex::new(Some(reader))),
+            events: events.clone(),
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
             run_id,
             session_id,
         });
+
+        let thread_name = format!("terminal-reader-{}", &id[..8]);
+        std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let mut reader = reader;
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let _ = events.send(TerminalEvent::Output(buf[..n].to_vec()));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = events.send(TerminalEvent::Exit(0));
+            })
+            .map_err(|err| anyhow::anyhow!("failed to spawn terminal reader thread: {err}"))?;
 
         self.sessions.insert(id.clone(), session);
         Ok(id)
