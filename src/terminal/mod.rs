@@ -112,6 +112,10 @@ impl TerminalManager {
             scrollback: scrollback.clone(),
         });
 
+        let child_for_reader = session.child.clone();
+        let sessions_for_cleanup = self.sessions.clone();
+        let id_for_cleanup = id.clone();
+
         let thread_name = format!("terminal-reader-{}", &id[..8]);
         std::thread::Builder::new()
             .name(thread_name)
@@ -137,7 +141,14 @@ impl TerminalManager {
                         Err(_) => break,
                     }
                 }
-                let _ = events.send(TerminalEvent::Exit(0));
+                // Collect real exit code from the child process.
+                let code = match child_for_reader.blocking_lock().wait() {
+                    Ok(status) => if status.success() { 0 } else { 1 },
+                    Err(_) => -1,
+                };
+                let _ = events.send(TerminalEvent::Exit(code));
+                // Auto-remove dead session from the manager.
+                sessions_for_cleanup.remove(&id_for_cleanup);
             })
             .map_err(|err| anyhow::anyhow!("failed to spawn terminal reader thread: {err}"))?;
 

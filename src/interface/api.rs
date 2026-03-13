@@ -2354,33 +2354,49 @@ async fn handle_terminal_ws(
         }
     }
 
-    // Session events → WS frames
+    // Session events → WS frames (with periodic pings for liveness).
     let mut send_handle = tokio::spawn(async move {
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        ping_interval.tick().await; // first tick is immediate, skip it
         loop {
-            match events.recv().await {
-                Ok(crate::terminal::TerminalEvent::Output(data)) => {
-                    if ws_sender.send(Message::Binary(data)).await.is_err() {
+            tokio::select! {
+                event = events.recv() => {
+                    match event {
+                        Ok(crate::terminal::TerminalEvent::Output(data)) => {
+                            if ws_sender.send(Message::Binary(data)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(crate::terminal::TerminalEvent::Exit(code)) => {
+                            let _ = ws_sender
+                                .send(Message::Text(
+                                    serde_json::json!({"type": "exit", "code": code}).to_string(),
+                                ))
+                                .await;
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if ws_sender.send(Message::Ping(vec![])).await.is_err() {
                         break;
                     }
                 }
-                Ok(crate::terminal::TerminalEvent::Exit(code)) => {
-                    let _ = ws_sender
-                        .send(Message::Text(
-                            serde_json::json!({"type": "exit", "code": code}).to_string(),
-                        ))
-                        .await;
-                    break;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
-    // Receive loop: WS → PTY stdin
+    // Receive loop: WS → PTY stdin (with 90s timeout to detect dead connections).
     let master_for_resize = session.master.clone();
+    let recv_timeout = std::time::Duration::from_secs(90);
     let mut recv_handle = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_receiver.next().await {
+        loop {
+            let msg = match tokio::time::timeout(recv_timeout, ws_receiver.next()).await {
+                Ok(Some(Ok(msg))) => msg,
+                _ => break, // WS error, stream ended, or timeout
+            };
             match msg {
                 Message::Binary(data) => {
                     let writer = writer.clone();
@@ -2413,7 +2429,7 @@ async fn handle_terminal_ws(
                     }
                 }
                 Message::Close(_) => break,
-                _ => {}
+                _ => {} // Pong and other frames
             }
         }
     });
