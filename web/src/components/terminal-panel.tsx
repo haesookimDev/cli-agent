@@ -2,28 +2,87 @@
 
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useTerminalWs } from "@/hooks/use-terminal-ws";
-import { apiPost, apiDelete } from "@/lib/api-client";
+import { apiDelete, apiGet, apiPost } from "@/lib/api-client";
+import type { AppSettings, TerminalSessionInfo } from "@/lib/types";
 
 interface TerminalPanelProps {
   terminalId?: string;
+  runId?: string | null;
+  sessionId?: string | null;
   defaultCommand?: string;
   defaultArgs?: string[];
   compact?: boolean;
   onSessionChange?: (id: string | null) => void;
 }
 
+function sortSessions(sessions: TerminalSessionInfo[]): TerminalSessionInfo[] {
+  return [...sessions].sort(
+    (left, right) =>
+      new Date(right.created_at).getTime() - new Date(left.created_at).getTime(),
+  );
+}
+
+function pickSessionId(
+  sessions: TerminalSessionInfo[],
+  preferredId?: string,
+  runId?: string | null,
+  sessionId?: string | null,
+): string | null {
+  if (preferredId && sessions.some((session) => session.id === preferredId)) {
+    return preferredId;
+  }
+  if (runId) {
+    const match = sessions.find((session) => session.run_id === runId);
+    if (match) return match.id;
+  }
+  if (sessionId) {
+    const match = sessions.find((session) => session.session_id === sessionId);
+    if (match) return match.id;
+  }
+  return null;
+}
+
+function formatSessionLabel(session: TerminalSessionInfo): string {
+  const command = [session.command, ...session.args].join(" ").trim();
+  const scope = session.run_id
+    ? `run ${session.run_id.slice(0, 8)}`
+    : session.session_id
+      ? `session ${session.session_id.slice(0, 8)}`
+      : "manual";
+  return `${scope} • ${command || session.id.slice(0, 8)}`;
+}
+
 export function TerminalPanel({
   terminalId: initialId,
-  defaultCommand = "claude",
-  defaultArgs = [],
+  runId,
+  sessionId,
+  defaultCommand,
+  defaultArgs,
   compact = false,
   onSessionChange,
 }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<any>(null);
-  const fitRef = useRef<any>(null);
-  const [activeId, setActiveId] = useState<string | null>(initialId ?? null);
   const initRef = useRef(false);
+
+  const [activeId, setActiveId] = useState<string | null>(initialId ?? null);
+  const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
+  const [terminalCommand, setTerminalCommand] = useState(defaultCommand ?? "claude");
+  const [terminalArgs, setTerminalArgs] = useState<string[]>(defaultArgs ?? []);
+
+  const setActiveSession = useCallback(
+    (nextId: string | null) => {
+      setActiveId((current) => {
+        if (current === nextId) {
+          return current;
+        }
+        onSessionChange?.(nextId);
+        termRef.current?.reset?.();
+        return nextId;
+      });
+    },
+    [onSessionChange],
+  );
 
   const onData = useCallback((data: Uint8Array) => {
     termRef.current?.write(data);
@@ -32,7 +91,76 @@ export function TerminalPanel({
   const { sendInput, sendResize, connected, exitInfo, disconnect } =
     useTerminalWs(activeId, onData);
 
-  // Initialize xterm.js (dynamic import to avoid SSR)
+  const refreshSessions = useCallback(async () => {
+    try {
+      const list = sortSessions(
+        await apiGet<TerminalSessionInfo[]>("/v1/terminal/sessions"),
+      );
+      setSessions(list);
+      setActiveId((current) => {
+        if (current && list.some((session) => session.id === current)) {
+          return current;
+        }
+        const nextId = pickSessionId(list, initialId, runId, sessionId);
+        if (current !== nextId) {
+          onSessionChange?.(nextId);
+        }
+        return nextId;
+      });
+    } catch (err) {
+      console.error("refresh terminal sessions:", err);
+    }
+  }, [initialId, onSessionChange, runId, sessionId]);
+
+  useEffect(() => {
+    if (initialId) {
+      setActiveSession(initialId);
+    }
+  }, [initialId, setActiveSession]);
+
+  useEffect(() => {
+    void refreshSessions();
+    const interval = window.setInterval(() => {
+      void refreshSessions();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [refreshSessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const settings = await apiGet<AppSettings>("/v1/settings");
+        if (cancelled) return;
+        if (!defaultCommand) {
+          setTerminalCommand(settings.terminal_command ?? "claude");
+        }
+        if (!defaultArgs) {
+          setTerminalArgs(settings.terminal_args ?? []);
+        }
+      } catch (err) {
+        console.error("load terminal defaults:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultArgs, defaultCommand]);
+
+  useEffect(() => {
+    if (defaultCommand) {
+      setTerminalCommand(defaultCommand);
+    }
+  }, [defaultCommand]);
+
+  useEffect(() => {
+    if (defaultArgs) {
+      setTerminalArgs(defaultArgs);
+    }
+  }, [defaultArgs]);
+
   useEffect(() => {
     if (!containerRef.current || initRef.current) return;
     initRef.current = true;
@@ -73,20 +201,17 @@ export function TerminalPanel({
       });
 
       termRef.current = term;
-      fitRef.current = fitAddon;
 
       const ro = new ResizeObserver(() => {
         if (!disposed) fitAddon.fit();
       });
       ro.observe(containerRef.current);
 
-      // Store cleanup
       (containerRef.current as any).__cleanup = () => {
         disposed = true;
         ro.disconnect();
         term.dispose();
         termRef.current = null;
-        fitRef.current = null;
         initRef.current = false;
       };
     })();
@@ -99,14 +224,16 @@ export function TerminalPanel({
 
   async function spawnSession() {
     try {
-      const resp = await apiPost<{ id: string }>("/v1/terminal/sessions", {
-        command: defaultCommand,
-        args: defaultArgs,
+      const response = await apiPost<{ id: string }>("/v1/terminal/sessions", {
+        command: terminalCommand,
+        args: terminalArgs,
         cols: termRef.current?.cols ?? 80,
         rows: termRef.current?.rows ?? 24,
+        run_id: runId ?? undefined,
+        session_id: sessionId ?? undefined,
       });
-      setActiveId(resp.id);
-      onSessionChange?.(resp.id);
+      setActiveSession(response.id);
+      await refreshSessions();
     } catch (err) {
       termRef.current?.write(`\r\nFailed to spawn terminal: ${err}\r\n`);
     }
@@ -120,27 +247,47 @@ export function TerminalPanel({
       // ignore kill errors
     }
     disconnect();
-    setActiveId(null);
-    onSessionChange?.(null);
+    setActiveSession(null);
     termRef.current?.write("\r\n[Session ended]\r\n");
+    await refreshSessions();
   }
 
   return (
     <div
       className={`flex flex-col ${compact ? "h-80" : "h-[calc(100vh-12rem)]"}`}
     >
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 border-b border-slate-700 bg-slate-800 px-3 py-1.5">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-700 bg-slate-800 px-3 py-1.5">
         <span
           className={`h-2 w-2 rounded-full ${connected ? "bg-green-400" : "bg-slate-500"}`}
         />
         <span className="text-xs text-slate-300">
           {connected ? `Connected: ${activeId?.slice(0, 8)}` : "Disconnected"}
         </span>
-        <div className="flex-1" />
+        <div className="min-w-[14rem] flex-1">
+          <select
+            value={activeId ?? ""}
+            onChange={(event) =>
+              setActiveSession(event.target.value || null)
+            }
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200"
+          >
+            <option value="">Select active terminal</option>
+            {sessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {formatSessionLabel(session)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={() => void refreshSessions()}
+          className="rounded border border-slate-600 px-3 py-1 text-xs text-slate-200 hover:bg-slate-700"
+        >
+          Refresh
+        </button>
         {!activeId && (
           <button
-            onClick={spawnSession}
+            onClick={() => void spawnSession()}
             className="rounded bg-teal-600 px-3 py-1 text-xs text-white hover:bg-teal-700"
           >
             New Terminal
@@ -148,14 +295,13 @@ export function TerminalPanel({
         )}
         {activeId && (
           <button
-            onClick={killSession}
+            onClick={() => void killSession()}
             className="rounded bg-red-600 px-3 py-1 text-xs text-white hover:bg-red-700"
           >
             Kill
           </button>
         )}
       </div>
-      {/* Terminal container */}
       <div ref={containerRef} className="flex-1 bg-[#1e1e2e]" />
       {exitInfo && (
         <div className="bg-slate-800 px-3 py-1 text-xs text-slate-400">

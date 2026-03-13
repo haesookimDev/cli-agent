@@ -717,7 +717,11 @@ function ChatContent() {
         {/* Terminal panel (collapsible) */}
         {showTerminal && (
           <div className="shrink-0 border-t border-slate-200">
-            <TerminalPanel compact={true} />
+            <TerminalPanel
+              compact={true}
+              runId={currentRun?.run_id ?? null}
+              sessionId={activeSessionId}
+            />
           </div>
         )}
 

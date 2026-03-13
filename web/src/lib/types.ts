@@ -197,6 +197,17 @@ export interface AppSettings {
   terminal_auto_spawn: boolean;
 }
 
+export interface TerminalSessionInfo {
+  id: string;
+  command: string;
+  args: string[];
+  created_at: string;
+  cols: number;
+  rows: number;
+  run_id: string | null;
+  session_id: string | null;
+}
+
 export interface ModelWithStatus {
   spec: {
     provider: string;

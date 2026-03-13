@@ -2320,15 +2320,13 @@ async fn terminal_ws_handler(
         }
     };
 
-    let terminal_mgr = state.terminal.clone();
-    ws.on_upgrade(move |socket| handle_terminal_ws(socket, session, terminal_mgr))
+    ws.on_upgrade(move |socket| handle_terminal_ws(socket, session))
         .into_response()
 }
 
 async fn handle_terminal_ws(
     socket: WebSocket,
     session: Arc<crate::terminal::TerminalSession>,
-    manager: crate::terminal::TerminalManager,
 ) {
     use std::io::{Read, Write};
 
@@ -2352,7 +2350,6 @@ async fn handle_terminal_ws(
     };
 
     let writer = session.writer.clone();
-    let session_id_for_cleanup = session.id.clone();
     let reader_slot = session.reader.clone();
 
     // Bridge blocking PTY read to async via mpsc channel
@@ -2435,7 +2432,4 @@ async fn handle_terminal_ws(
         _ = recv_handle => {}
     }
     send_handle.abort();
-
-    // Remove session if child exited
-    manager.remove(&session_id_for_cleanup);
 }
