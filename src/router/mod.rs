@@ -1,15 +1,18 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dashmap::DashSet;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
+use uuid::Uuid;
 
-use crate::types::TaskProfile;
+use crate::types::{CliModelBackendKind, CliModelConfig, TaskProfile};
 
 pub type TokenCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -35,6 +38,8 @@ pub enum ProviderKind {
     Anthropic,
     Gemini,
     Vllm,
+    ClaudeCode,
+    Codex,
     Mock,
 }
 
@@ -45,6 +50,8 @@ impl std::fmt::Display for ProviderKind {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
             ProviderKind::Vllm => "vllm",
+            ProviderKind::ClaudeCode => "claude_code",
+            ProviderKind::Codex => "codex",
             ProviderKind::Mock => "mock",
         };
         write!(f, "{s}")
@@ -137,14 +144,16 @@ impl ModelRouter {
         openai_api_key: Option<String>,
         anthropic_api_key: Option<String>,
         gemini_api_key: Option<String>,
+        cli_model: Option<CliModelConfig>,
     ) -> Self {
         Self {
-            catalog: Arc::new(default_catalog()),
+            catalog: Arc::new(default_catalog(cli_model.as_ref())),
             client: ProviderClient::new(
                 vllm_base_url.into(),
                 openai_api_key,
                 anthropic_api_key,
                 gemini_api_key,
+                cli_model,
             ),
             preferred_model: Arc::new(Mutex::new(None)),
             cache: Arc::new(DashMap::new()),
@@ -156,6 +165,7 @@ impl ModelRouter {
         openai_api_key: Option<String>,
         anthropic_api_key: Option<String>,
         gemini_api_key: Option<String>,
+        cli_model: Option<CliModelConfig>,
         catalog: Vec<ModelSpec>,
     ) -> Self {
         Self {
@@ -165,6 +175,7 @@ impl ModelRouter {
                 openai_api_key,
                 anthropic_api_key,
                 gemini_api_key,
+                cli_model,
             ),
             preferred_model: Arc::new(Mutex::new(None)),
             cache: Arc::new(DashMap::new()),
@@ -414,12 +425,20 @@ impl ModelRouter {
 }
 
 #[derive(Debug, Clone)]
+struct CliProviderConfig {
+    command: String,
+    args: Vec<String>,
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProviderClient {
     http: reqwest::Client,
     vllm_base_url: String,
     openai_api_key: Option<String>,
     anthropic_api_key: Option<String>,
     gemini_api_key: Option<String>,
+    cli_providers: Arc<HashMap<ProviderKind, CliProviderConfig>>,
     disabled: Arc<DashSet<ProviderKind>>,
     disabled_models: Arc<DashSet<String>>,
 }
@@ -430,7 +449,20 @@ impl ProviderClient {
         openai_api_key: Option<String>,
         anthropic_api_key: Option<String>,
         gemini_api_key: Option<String>,
+        cli_model: Option<CliModelConfig>,
     ) -> Self {
+        let mut cli_providers = HashMap::new();
+        if let Some(cli_model) = cli_model {
+            let provider = provider_for_cli_backend(cli_model.backend);
+            cli_providers.insert(
+                provider,
+                CliProviderConfig {
+                    command: cli_model.command,
+                    args: cli_model.args,
+                    timeout: Duration::from_millis(cli_model.timeout_ms),
+                },
+            );
+        }
         Self {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
@@ -440,6 +472,7 @@ impl ProviderClient {
             openai_api_key,
             anthropic_api_key,
             gemini_api_key,
+            cli_providers: Arc::new(cli_providers),
             disabled: Arc::new(DashSet::new()),
             disabled_models: Arc::new(DashSet::new()),
         }
@@ -478,6 +511,8 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.generate_anthropic(model, prompt).await,
             ProviderKind::Gemini => self.generate_gemini(model, prompt).await,
             ProviderKind::Vllm => self.generate_vllm(model, prompt).await,
+            ProviderKind::ClaudeCode => self.generate_claude_code(prompt).await,
+            ProviderKind::Codex => self.generate_codex(prompt).await,
             ProviderKind::Mock => Ok(mock_inference(model, prompt)),
         }
     }
@@ -608,6 +643,111 @@ impl ProviderClient {
             .ok_or_else(|| anyhow::anyhow!("unexpected vLLM response format"))
     }
 
+    fn cli_provider(&self, provider: ProviderKind) -> anyhow::Result<&CliProviderConfig> {
+        self.cli_providers
+            .get(&provider)
+            .ok_or_else(|| anyhow::anyhow!("CLI provider {} is not configured", provider))
+    }
+
+    fn cli_working_dir(&self) -> PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
+    async fn run_cli_command(
+        &self,
+        mut cmd: Command,
+        timeout: Duration,
+        label: &str,
+    ) -> anyhow::Result<std::process::Output> {
+        tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| anyhow::anyhow!("{label} timed out after {:?}", timeout))?
+            .map_err(|err| anyhow::anyhow!("{label} failed to spawn: {err}"))
+    }
+
+    fn decode_cli_text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).trim().to_string()
+    }
+
+    fn ensure_cli_success(label: &str, output: &std::process::Output) -> anyhow::Result<()> {
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = Self::decode_cli_text(&output.stderr);
+        let stdout = Self::decode_cli_text(&output.stdout);
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "no output".to_string()
+        };
+
+        Err(anyhow::anyhow!(
+            "{} exited with code {}: {}",
+            label,
+            output.status.code().unwrap_or(-1),
+            detail
+        ))
+    }
+
+    async fn generate_claude_code(&self, prompt: &str) -> anyhow::Result<String> {
+        let config = self.cli_provider(ProviderKind::ClaudeCode)?;
+        let mut cmd = Command::new(&config.command);
+        cmd.arg("-p")
+            .arg(prompt)
+            .args(&config.args)
+            .current_dir(self.cli_working_dir());
+
+        let output = self
+            .run_cli_command(cmd, config.timeout, "Claude Code CLI")
+            .await?;
+        Self::ensure_cli_success("Claude Code CLI", &output)?;
+
+        Ok(Self::decode_cli_text(&output.stdout))
+    }
+
+    async fn generate_codex(&self, prompt: &str) -> anyhow::Result<String> {
+        let config = self.cli_provider(ProviderKind::Codex)?;
+        let output_path = std::env::temp_dir().join(format!("codex-last-message-{}.txt", Uuid::new_v4()));
+        let mut cmd = Command::new(&config.command);
+        cmd.arg("exec")
+            .arg("--skip-git-repo-check")
+            .arg("--full-auto")
+            .arg("--ephemeral")
+            .arg("--output-last-message")
+            .arg(&output_path)
+            .args(&config.args)
+            .arg(prompt)
+            .current_dir(self.cli_working_dir());
+
+        let output = self.run_cli_command(cmd, config.timeout, "Codex CLI").await?;
+        let file_output = tokio::fs::read_to_string(&output_path).await.ok();
+        let _ = tokio::fs::remove_file(&output_path).await;
+
+        Self::ensure_cli_success("Codex CLI", &output)?;
+
+        if let Some(text) = file_output {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+
+        let stdout = Self::decode_cli_text(&output.stdout);
+        if !stdout.is_empty() {
+            return Ok(stdout);
+        }
+
+        let stderr = Self::decode_cli_text(&output.stderr);
+        if !stderr.is_empty() {
+            return Ok(stderr);
+        }
+
+        Ok(String::new())
+    }
+
     /// Streaming generate: sends token chunks via callback, returns full output.
     pub async fn generate_stream(
         &self,
@@ -628,6 +768,13 @@ impl ProviderClient {
             }
             ProviderKind::Anthropic => self.stream_anthropic(model, prompt, on_token).await,
             ProviderKind::Gemini => self.stream_gemini(model, prompt, on_token).await,
+            ProviderKind::ClaudeCode | ProviderKind::Codex => {
+                let output = self.generate(model, prompt).await?;
+                if !output.is_empty() {
+                    on_token(&output);
+                }
+                Ok(output)
+            }
             ProviderKind::Mock => {
                 let output = mock_inference(model, prompt);
                 on_token(&output);
@@ -882,8 +1029,33 @@ fn mock_inference(model: &ModelSpec, prompt: &str) -> String {
     )
 }
 
-fn default_catalog() -> Vec<ModelSpec> {
-    vec![
+fn provider_for_cli_backend(backend: CliModelBackendKind) -> ProviderKind {
+    match backend {
+        CliModelBackendKind::ClaudeCode => ProviderKind::ClaudeCode,
+        CliModelBackendKind::Codex => ProviderKind::Codex,
+    }
+}
+
+fn cli_model_spec(config: &CliModelConfig) -> ModelSpec {
+    let (quality, latency, tool_call_accuracy) = match config.backend {
+        CliModelBackendKind::ClaudeCode => (0.94, 2600.0, 0.90),
+        CliModelBackendKind::Codex => (0.93, 2400.0, 0.88),
+    };
+
+    ModelSpec {
+        provider: provider_for_cli_backend(config.backend),
+        model_id: config.backend.default_model_id().to_string(),
+        quality,
+        latency,
+        cost: 0.001,
+        context_window: 200_000,
+        tool_call_accuracy,
+        local_only: true,
+    }
+}
+
+fn default_catalog(cli_model: Option<&CliModelConfig>) -> Vec<ModelSpec> {
+    let mut catalog = vec![
         // --- OpenAI ---
         ModelSpec {
             provider: ProviderKind::OpenAi,
@@ -989,7 +1161,13 @@ fn default_catalog() -> Vec<ModelSpec> {
             tool_call_accuracy: 0.40,
             local_only: false,
         },
-    ]
+    ];
+
+    if let Some(config) = cli_model {
+        catalog.push(cli_model_spec(config));
+    }
+
+    catalog
 }
 
 pub fn providers(catalog: &[ModelSpec]) -> HashSet<ProviderKind> {
@@ -1002,7 +1180,7 @@ mod tests {
 
     #[tokio::test]
     async fn planning_prefers_quality_models() {
-        let router = ModelRouter::new("http://127.0.0.1:8000", None, None, None);
+        let router = ModelRouter::new("http://127.0.0.1:8000", None, None, None, None);
         let constraints = RoutingConstraints::for_profile(TaskProfile::Planning);
         let decision = router
             .select_model(TaskProfile::Planning, &constraints)
@@ -1020,7 +1198,7 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_chain_works_when_primary_disabled() {
-        let router = ModelRouter::new("http://127.0.0.1:8000", None, None, None);
+        let router = ModelRouter::new("http://127.0.0.1:8000", None, None, None, None);
         let constraints = RoutingConstraints::for_profile(TaskProfile::General);
         let primary = router
             .select_model(TaskProfile::General, &constraints)
@@ -1043,5 +1221,22 @@ mod tests {
             .unwrap();
 
         assert!(result.used_fallback);
+    }
+
+    #[test]
+    fn cli_model_is_added_to_catalog_when_configured() {
+        let config = CliModelConfig {
+            backend: CliModelBackendKind::Codex,
+            command: "codex".to_string(),
+            args: vec!["--full-auto".to_string()],
+            timeout_ms: 60_000,
+            cli_only: true,
+        };
+
+        let catalog = default_catalog(Some(&config));
+
+        assert!(catalog.iter().any(|spec| {
+            spec.provider == ProviderKind::Codex && spec.model_id == "codex-cli" && spec.local_only
+        }));
     }
 }

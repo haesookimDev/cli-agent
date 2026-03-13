@@ -3,7 +3,10 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::types::{CoderBackendKind, McpServerConfig, RepoAnalysisConfig, ValidationConfig};
+use crate::types::{
+    CliModelBackendKind, CliModelConfig, CoderBackendKind, McpServerConfig, RepoAnalysisConfig,
+    ValidationConfig,
+};
 
 /// Substitutes `${VAR_NAME}` patterns with environment variable values.
 /// Unset variables are replaced with an empty string.
@@ -46,6 +49,7 @@ pub struct AppConfig {
     pub coder_args: Vec<String>,
     pub coder_working_dir: Option<String>,
     pub coder_timeout_ms: u64,
+    pub cli_model: Option<CliModelConfig>,
     pub validation: ValidationConfig,
     pub repo_analysis: RepoAnalysisConfig,
     pub skills_dir: Option<String>,
@@ -154,6 +158,65 @@ impl AppConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(300_000);
 
+        let cli_model = env::var("MODEL_CLI_BACKEND")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|raw| -> anyhow::Result<CliModelConfig> {
+                let backend = match raw.to_lowercase().as_str() {
+                    "claude_code" => CliModelBackendKind::ClaudeCode,
+                    "codex" => CliModelBackendKind::Codex,
+                    other => {
+                        anyhow::bail!(
+                            "MODEL_CLI_BACKEND must be one of claude_code|codex, got {}",
+                            other
+                        )
+                    }
+                };
+                let reuse_coder_cli = matches!(
+                    (backend, coder_backend),
+                    (CliModelBackendKind::ClaudeCode, CoderBackendKind::ClaudeCode)
+                        | (CliModelBackendKind::Codex, CoderBackendKind::Codex)
+                );
+                let command = env::var("MODEL_CLI_COMMAND")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| {
+                        if reuse_coder_cli {
+                            Some(coder_command.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| backend.default_command().to_string());
+                let args = env::var("MODEL_CLI_ARGS")
+                    .ok()
+                    .map(|v| shell_words::split(&v).unwrap_or_else(|_| vec![v]))
+                    .or_else(|| {
+                        if reuse_coder_cli {
+                            Some(coder_args.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let timeout_ms = env::var("MODEL_CLI_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(coder_timeout_ms);
+                let cli_only = env::var("MODEL_CLI_ONLY")
+                    .map(|v| v != "false" && v != "0")
+                    .unwrap_or(true);
+
+                Ok(CliModelConfig {
+                    backend,
+                    command,
+                    args,
+                    timeout_ms,
+                    cli_only,
+                })
+            })
+            .transpose()?;
+
         let parse_commands = |var: &str| -> Vec<String> {
             env::var(var)
                 .ok()
@@ -245,6 +308,7 @@ impl AppConfig {
             coder_args,
             coder_working_dir,
             coder_timeout_ms,
+            cli_model,
             validation,
             repo_analysis,
             skills_dir,

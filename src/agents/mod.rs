@@ -164,7 +164,7 @@ impl BuiltinAgent {
     fn role_prompt(&self) -> &'static str {
         match self.role {
             AgentRole::Planner => {
-                "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps."
+                "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps. For non-trivial work, return a JSON SubtaskPlan and split independent work into separate subtasks so they can run in parallel."
             }
             AgentRole::Extractor => {
                 "You are the extraction agent. Pull key facts and structured data with precision and low latency."
@@ -218,7 +218,7 @@ fn agent_role_profile(role: AgentRole) -> TaskProfile {
 fn agent_role_prompt(role: AgentRole) -> &'static str {
     match role {
         AgentRole::Planner => {
-            "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps."
+            "You are the planning agent. Build execution strategy, constraints, and dependency-safe steps. For non-trivial work, return a JSON SubtaskPlan and split independent work into separate subtasks so they can run in parallel."
         }
         AgentRole::Extractor => {
             "You are the extraction agent. Pull key facts and structured data with precision and low latency."

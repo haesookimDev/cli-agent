@@ -29,6 +29,7 @@ use crate::router::ModelRouter;
 use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
 use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
+    ShouldCancelFn, ShouldPauseFn,
 };
 use crate::types::{
     AgentExecutionRecord, AgentRole, ChatMessage, ChatRole, KnowledgeItem, McpToolDefinition,
@@ -65,6 +66,9 @@ struct RunControl {
     cancel_requested: Arc<AtomicBool>,
     pause_requested: Arc<AtomicBool>,
 }
+
+const MAX_COMPLETION_CONTINUATIONS: u8 = 2;
+const DYNAMIC_SUBTASK_MAX_PARALLELISM: usize = 4;
 
 impl Orchestrator {
     pub fn new(
@@ -172,6 +176,8 @@ impl Orchestrator {
                 ProviderKind::Anthropic,
                 ProviderKind::Gemini,
                 ProviderKind::Vllm,
+                ProviderKind::ClaudeCode,
+                ProviderKind::Codex,
                 ProviderKind::Mock,
             ];
             for p in &all_providers {
@@ -800,6 +806,110 @@ impl Orchestrator {
             .await;
     }
 
+    async fn record_graph_initialized(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        graph: &ExecutionGraph,
+        stage: &str,
+    ) {
+        let graph_nodes = graph.nodes();
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::GraphInitialized,
+            Some("orchestrator"),
+            Some("graph"),
+            None,
+            serde_json::json!({
+                "stage": stage,
+                "nodes": graph_nodes.iter().map(|n| {
+                    serde_json::json!({
+                        "id": n.id.clone(),
+                        "role": n.role,
+                        "dependencies": n.dependencies.clone(),
+                        "depth": n.depth,
+                        "policy": {
+                            "retry": n.policy.retry,
+                            "timeout_ms": n.policy.timeout_ms,
+                            "max_parallelism": n.policy.max_parallelism,
+                            "on_dependency_failure": n.policy.on_dependency_failure,
+                            "fallback_node": n.policy.fallback_node.clone(),
+                        }
+                    })
+                }).collect::<Vec<_>>()
+            }),
+        )
+        .await;
+    }
+
+    fn summarize_results_for_followup(results: &[NodeExecutionResult]) -> String {
+        results
+            .iter()
+            .filter(|r| r.succeeded && !r.output.trim().is_empty())
+            .map(|r| {
+                format!(
+                    "[{}:{}]\n{}",
+                    r.node_id,
+                    r.role,
+                    Self::trim_for_context(r.output.as_str(), 700)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n")
+    }
+
+    fn build_completion_followup_graph(
+        &self,
+        original_task: &str,
+        incomplete_reason: &str,
+        results: &[NodeExecutionResult],
+        attempt: u8,
+    ) -> anyhow::Result<ExecutionGraph> {
+        let mut graph = ExecutionGraph::new(self.max_graph_depth);
+        let prior_summary = Self::summarize_results_for_followup(results);
+        let local_first_hint = if Self::is_local_workspace_task(original_task) {
+            "\n- The remaining work must stay local-first and CLI-compatible.\n- Prefer filesystem and local workspace actions; do not require UI-only steps."
+        } else {
+            ""
+        };
+        let planner_id = format!("replan_plan_{attempt}");
+        let mut planner = AgentNode::new(
+            planner_id,
+            AgentRole::Planner,
+            format!(
+                "Reviewer marked the run incomplete.\n\n\
+                 ORIGINAL TASK:\n{}\n\n\
+                 REMAINING GAP:\n{}\n\n\
+                 PREVIOUS SUCCESSFUL OUTPUTS:\n{}\n\n\
+                 Return a JSON object matching exactly this schema:\n\
+                 {{\"subtasks\":[{{\"id\":\"string\",\"description\":\"string\",\"agent_role\":\"planner|extractor|coder|summarizer|fallback|tool_caller|analyzer|reviewer|scheduler|config_manager|validator\",\"dependencies\":[\"node_id\"],\"instructions\":\"string\",\"mcp_tools\":[\"server/tool\"]}}]}}\n\n\
+                 Rules:\n\
+                 - Cover only the remaining requirements.\n\
+                 - Split independent remaining work into separate subtasks so they can run in parallel.\n\
+                 - Use dependencies only when sequencing is truly required.\n\
+                 - Reuse the smallest set of sub-agents needed to fully complete the request.\n\
+                 - If only one focused step remains, still return a single-item subtasks array.\n\
+                 - Do not wrap the JSON in markdown fences.{}",
+                Self::trim_for_context(original_task, 1000),
+                Self::trim_for_context(incomplete_reason, 600),
+                Self::trim_for_context(prior_summary.as_str(), 4000),
+                local_first_hint,
+            ),
+        );
+        planner.policy = ExecutionPolicy {
+            timeout_ms: 120_000,
+            retry: 1,
+            max_parallelism: 1,
+            circuit_breaker: 2,
+            on_dependency_failure: DependencyFailurePolicy::FailFast,
+            fallback_node: None,
+        };
+        graph.add_node(planner)?;
+
+        Ok(graph)
+    }
+
     async fn execute_run(&self, run_id: Uuid, req: RunRequest) -> anyhow::Result<()> {
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
         let cancel_flag = self
@@ -891,33 +1001,8 @@ impl Orchestrator {
                 )
                 .await?,
         };
-        let graph_nodes = graph.nodes();
-        self.record_action_event(
-            run_id,
-            session_id,
-            RunActionType::GraphInitialized,
-            Some("orchestrator"),
-            Some("graph"),
-            None,
-            serde_json::json!({
-                "nodes": graph_nodes.iter().map(|n| {
-                    serde_json::json!({
-                        "id": n.id.clone(),
-                        "role": n.role,
-                        "dependencies": n.dependencies.clone(),
-                        "depth": n.depth,
-                        "policy": {
-                            "retry": n.policy.retry,
-                            "timeout_ms": n.policy.timeout_ms,
-                            "max_parallelism": n.policy.max_parallelism,
-                            "on_dependency_failure": n.policy.on_dependency_failure,
-                            "fallback_node": n.policy.fallback_node.clone(),
-                        }
-                    })
-                }).collect::<Vec<_>>()
-            }),
-        )
-        .await;
+        self.record_graph_initialized(run_id, session_id, &graph, "initial")
+            .await;
         self.record_action_event(
             run_id,
             session_id,
@@ -933,48 +1018,127 @@ impl Orchestrator {
         let run_node = self.build_run_node_fn(run_id, session_id, req.clone(), event_sink.clone());
         let on_complete = self.build_on_completed_fn(run_id, session_id, req.task.clone());
 
-        let outputs = self
-            .runtime
-            .execute_graph(
-                graph,
-                run_node,
-                on_complete,
-                Some(event_sink),
-                Some(Arc::new({
-                    let cancel_flag = cancel_flag.clone();
-                    move || cancel_flag.load(Ordering::Relaxed)
-                })),
-                Some(Arc::new({
-                    let pause_flag = pause_flag.clone();
-                    move || pause_flag.load(Ordering::Relaxed)
-                })),
-            )
-            .await;
+        let should_cancel: ShouldCancelFn = Arc::new({
+            let cancel_flag = cancel_flag.clone();
+            move || cancel_flag.load(Ordering::Relaxed)
+        });
+        let should_pause: ShouldPauseFn = Arc::new({
+            let pause_flag = pause_flag.clone();
+            move || pause_flag.load(Ordering::Relaxed)
+        });
 
-        match outputs {
-            Ok(node_results) => {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    self.finish_run(run_id, RunStatus::Cancelled, node_results, None)
-                        .await?;
-                } else if node_results.iter().all(|r| r.succeeded) {
+        let mut current_graph = graph;
+        let mut accumulated_results = Vec::<NodeExecutionResult>::new();
+        let mut continuation_attempts = 0u8;
+
+        loop {
+            let outputs = self
+                .runtime
+                .execute_graph(
+                    current_graph,
+                    run_node.clone(),
+                    on_complete.clone(),
+                    Some(event_sink.clone()),
+                    Some(should_cancel.clone()),
+                    Some(should_pause.clone()),
+                )
+                .await;
+
+            match outputs {
+                Ok(node_results) => {
+                    let stage_succeeded = node_results.iter().all(|r| r.succeeded);
+                    accumulated_results.extend(node_results);
+
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        self.finish_run(run_id, RunStatus::Cancelled, accumulated_results, None)
+                            .await?;
+                        break;
+                    }
+
+                    if !stage_succeeded {
+                        self.finish_run(run_id, RunStatus::Failed, accumulated_results, None)
+                            .await?;
+                        break;
+                    }
+
                     let (verified, reason) = self
-                        .verify_completion(run_id, session_id, &req.task, &node_results)
+                        .verify_completion(run_id, session_id, &req.task, &accumulated_results)
                         .await;
-                    let error_message = if verified {
-                        None
-                    } else {
-                        Some(format!("Verification incomplete: {}", reason))
+                    if verified {
+                        self.finish_run(run_id, RunStatus::Succeeded, accumulated_results, None)
+                            .await?;
+                        break;
+                    }
+
+                    if continuation_attempts >= MAX_COMPLETION_CONTINUATIONS {
+                        self.finish_run(
+                            run_id,
+                            RunStatus::Failed,
+                            accumulated_results,
+                            Some(format!(
+                                "Verification incomplete after {} continuation attempts: {}",
+                                MAX_COMPLETION_CONTINUATIONS, reason
+                            )),
+                        )
+                        .await?;
+                        break;
+                    }
+
+                    continuation_attempts += 1;
+                    let continuation_reason = reason.clone();
+                    self.record_action_event(
+                        run_id,
+                        session_id,
+                        RunActionType::ReplanTriggered,
+                        Some("reviewer"),
+                        Some("continuation"),
+                        None,
+                        serde_json::json!({
+                            "attempt": continuation_attempts,
+                            "reason": continuation_reason,
+                            "mode": "completion_continuation",
+                            "max_attempts": MAX_COMPLETION_CONTINUATIONS,
+                        }),
+                    )
+                    .await;
+
+                    current_graph = match self.build_completion_followup_graph(
+                        req.task.as_str(),
+                        reason.as_str(),
+                        &accumulated_results,
+                        continuation_attempts,
+                    ) {
+                        Ok(graph) => graph,
+                        Err(err) => {
+                            self.finish_run(
+                                run_id,
+                                RunStatus::Failed,
+                                accumulated_results,
+                                Some(err.to_string()),
+                            )
+                            .await?;
+                            break;
+                        }
                     };
-                    self.finish_run(run_id, RunStatus::Succeeded, node_results, error_message)
-                        .await?;
-                } else {
-                    self.finish_run(run_id, RunStatus::Failed, node_results, None)
-                        .await?;
+                    let stage_label = format!("continuation_{continuation_attempts}");
+                    self.record_graph_initialized(
+                        run_id,
+                        session_id,
+                        &current_graph,
+                        stage_label.as_str(),
+                    )
+                    .await;
                 }
-            }
-            Err(err) => {
-                self.finish_run(run_id, RunStatus::Failed, vec![], Some(err.to_string()))
+                Err(err) => {
+                    self.finish_run(
+                        run_id,
+                        RunStatus::Failed,
+                        accumulated_results,
+                        Some(err.to_string()),
+                    )
                     .await?;
+                    break;
+                }
             }
         }
 
@@ -1049,13 +1213,12 @@ impl Orchestrator {
                         .to_string();
                     (false, reason)
                 } else {
-                    // Default to complete if output is ambiguous
-                    (true, "Assumed complete (ambiguous review)".to_string())
+                    (false, format!("Ambiguous reviewer response: {}", Self::trim_for_context(content, 240)))
                 }
             }
             Err(e) => {
-                // If reviewer fails, don't block — assume complete
-                (true, format!("Reviewer unavailable: {e}"))
+                // Completion must be explicit; reviewer failure is not success.
+                (false, format!("Reviewer unavailable: {e}"))
             }
         };
 
@@ -1549,11 +1712,12 @@ impl Orchestrator {
             };
             format!(
                 "Plan work and constraints. Available MCP tools: [{}]. \
-                 If the task requires external data or operations, plan to use these tools via the tool_call node.{}{}",
+                 If the task requires external data or operations, plan to use these tools via the tool_call node. \
+                 For non-trivial work, output a JSON SubtaskPlan so sub-agents can execute independent work in parallel and continue until the request is fully completed.{}{}",
                 tool_summary, guide, local_first_hint
             )
         } else {
-            "Plan work and constraints.".to_string()
+            "Plan work and constraints. For non-trivial work, output a JSON SubtaskPlan so sub-agents can execute independent work in parallel and continue until the request is fully completed.".to_string()
         };
 
         // Inject previous plan context for continuation commands
@@ -2994,7 +3158,7 @@ impl Orchestrator {
                                 }
                                 sub_node.depth = node.depth + 1;
                                 sub_node.policy = ExecutionPolicy {
-                                    max_parallelism: 2,
+                                    max_parallelism: DYNAMIC_SUBTASK_MAX_PARALLELISM,
                                     retry: 1,
                                     timeout_ms: 120_000,
                                     circuit_breaker: 3,
@@ -4752,7 +4916,7 @@ mod tests {
             Duration::from_secs(1),
         ));
 
-        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None));
+        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
         let mut coder_mgr = coder_backend::CoderSessionManager::new(
             memory.clone(),
             std::env::temp_dir(),
@@ -4816,6 +4980,71 @@ mod tests {
             .unwrap();
         assert!(analysis.node("plan").is_some());
         assert!(analysis.node("analyze").is_some());
+    }
+
+    #[tokio::test]
+    async fn completion_followup_graph_uses_planner_recovery_node() {
+        let tmp = std::env::temp_dir().join(format!("agent-followup-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let memory = Arc::new(
+            MemoryManager::new(
+                tmp.join("sessions"),
+                format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
+            )
+            .await
+            .unwrap(),
+        );
+        let auth = Arc::new(crate::webhook::AuthManager::new("k", "s", 300));
+        let webhook = Arc::new(crate::webhook::WebhookDispatcher::new(
+            memory.clone(),
+            auth,
+            Duration::from_secs(1),
+        ));
+
+        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
+        let mut coder_mgr = coder_backend::CoderSessionManager::new(
+            memory.clone(),
+            std::env::temp_dir(),
+            crate::types::CoderBackendKind::Llm,
+        );
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
+        let orchestrator = Orchestrator::new(
+            AgentRuntime::new(4),
+            AgentRegistry::builtin(),
+            router,
+            memory,
+            Arc::new(ContextManager::new(8_000)),
+            webhook,
+            6,
+            Arc::new(McpRegistry::new()),
+            Arc::new(coder_mgr),
+            Arc::new(ValidationConfig::default()),
+            Arc::new(RepoAnalysisConfig::default()),
+            None,
+        );
+
+        let graph = orchestrator
+            .build_completion_followup_graph(
+                "Implement the remaining CLI orchestration pieces",
+                "parallel subtask execution was not completed",
+                &[NodeExecutionResult {
+                    node_id: "code".to_string(),
+                    role: AgentRole::Coder,
+                    model: "mock:model".to_string(),
+                    output: "Partial implementation".to_string(),
+                    duration_ms: 10,
+                    succeeded: true,
+                    error: None,
+                }],
+                1,
+            )
+            .unwrap();
+
+        let node = graph.node("replan_plan_1").unwrap();
+        assert_eq!(node.role, AgentRole::Planner);
+        assert!(node.instructions.contains("SubtaskPlan"));
+        assert!(node.instructions.contains("parallel"));
     }
 
     #[test]

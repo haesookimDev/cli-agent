@@ -675,6 +675,48 @@ impl Display for CoderBackendKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliModelBackendKind {
+    ClaudeCode,
+    Codex,
+}
+
+impl CliModelBackendKind {
+    pub fn default_command(self) -> &'static str {
+        match self {
+            CliModelBackendKind::ClaudeCode => "claude",
+            CliModelBackendKind::Codex => "codex",
+        }
+    }
+
+    pub fn default_model_id(self) -> &'static str {
+        match self {
+            CliModelBackendKind::ClaudeCode => "claude-code-cli",
+            CliModelBackendKind::Codex => "codex-cli",
+        }
+    }
+}
+
+impl Display for CliModelBackendKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            CliModelBackendKind::ClaudeCode => "claude_code",
+            CliModelBackendKind::Codex => "codex",
+        };
+        write!(f, "{s}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliModelConfig {
+    pub backend: CliModelBackendKind,
+    pub command: String,
+    pub args: Vec<String>,
+    pub timeout_ms: u64,
+    pub cli_only: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoderOutputChunk {
     pub session_id: String,

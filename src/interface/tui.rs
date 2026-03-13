@@ -252,6 +252,8 @@ pub async fn run_tui(orchestrator: Orchestrator, settings_path: PathBuf) -> anyh
                 ProviderKind::Anthropic => "Anthropic",
                 ProviderKind::Gemini => "Gemini",
                 ProviderKind::Vllm => "vLLM",
+                ProviderKind::ClaudeCode => "Claude Code",
+                ProviderKind::Codex => "Codex CLI",
                 ProviderKind::Mock => "Mock",
             };
             ModelInfo {
@@ -2183,6 +2185,8 @@ fn parse_provider_kind(s: &str) -> Option<ProviderKind> {
         "anthropic" => Some(ProviderKind::Anthropic),
         "gemini" => Some(ProviderKind::Gemini),
         "vllm" => Some(ProviderKind::Vllm),
+        "claude_code" => Some(ProviderKind::ClaudeCode),
+        "codex" => Some(ProviderKind::Codex),
         "mock" => Some(ProviderKind::Mock),
         _ => None,
     }

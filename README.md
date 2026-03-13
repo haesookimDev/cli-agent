@@ -5,7 +5,8 @@ Rust 기반 멀티 에이전트 CLI/TUI 플랫폼입니다.
 ## 주요 기능
 - 메인 오케스트레이터 + 역할 기반 서브 에이전트
 - DAG 기반 의존성 실행(직렬/병렬), 실패 정책, 폴백 노드
-- 멀티 모델 라우팅(OpenAI/Anthropic/Gemini/Ollama/Mock)
+- 멀티 모델 라우팅(OpenAI/Anthropic/Gemini/vLLM/Claude Code CLI/Codex CLI/Mock)
+- reviewer 기반 후속 planner/sub-agent continuation loop로 미완료 요구사항 재실행
 - 세션 이벤트 JSONL 저장(`data/sessions/{session_id}.jsonl`)
 - SQLite 기반 장기 메모리 + TTL 단기 메모리
 - 컨텍스트 계층화 및 토큰 예산 최적화
@@ -147,4 +148,19 @@ TUI의 `Details` 패널에는 선택한 런의 동작 기반 시각화가 표시
 - `AGENT_MAX_GRAPH_DEPTH` (default: `6`)
 - `AGENT_MAX_CONTEXT_TOKENS` (default: `16000`)
 - `AGENT_WEBHOOK_TIMEOUT_SECS` (default: `5`)
-- `OLLAMA_BASE_URL` (default: `http://127.0.0.1:11434`)
+- `VLLM_BASE_URL` (default: `http://127.0.0.1:8000`)
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GEMINI_API_KEY`
+- `MODEL_CLI_BACKEND` (`claude_code` | `codex`)
+- `MODEL_CLI_COMMAND` (default: backend별 `claude` 또는 `codex`)
+- `MODEL_CLI_ARGS`
+- `MODEL_CLI_TIMEOUT_MS` (default: `300000`)
+- `MODEL_CLI_ONLY` (default: `true`, 설정 시 planner/reviewer/tool-caller 포함 전체 AI 라우팅을 CLI provider로 고정)
+- `CODER_BACKEND` (`llm` | `claude_code` | `codex`)
+- `CODER_COMMAND`
+- `CODER_ARGS`
+- `CODER_WORKING_DIR`
+- `CODER_TIMEOUT_MS`
+
+`MODEL_CLI_BACKEND`를 설정하면 coder 노드뿐 아니라 planner/analyzer/reviewer/tool-caller 같은 일반 에이전트 노드도 CLI provider를 통해 실행됩니다. 규정상 OAuth/API key를 직접 쓰기 어려운 환경에서는 `MODEL_CLI_ONLY=true`로 두고 로컬에 로그인된 `claude` 또는 `codex` CLI를 사용하면 됩니다.

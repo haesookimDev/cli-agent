@@ -20,11 +20,11 @@ use cli_agent::orchestrator::Orchestrator;
 use cli_agent::orchestrator::coder_backend::{
     ClaudeCodeBackend, CodexBackend, CoderSessionManager, LlmCoderBackend,
 };
-use cli_agent::router::ModelRouter;
+use cli_agent::router::{ModelRouter, ProviderKind};
 use cli_agent::runtime::AgentRuntime;
 use cli_agent::scheduler::CronScheduler;
 use cli_agent::terminal::TerminalManager;
-use cli_agent::types::{CoderBackendKind, RunRequest, TaskProfile};
+use cli_agent::types::{CliModelBackendKind, CliModelConfig, CoderBackendKind, RunRequest, TaskProfile};
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
 
 #[derive(Debug, Parser)]
@@ -73,6 +73,31 @@ enum MemoryCommand {
     Vacuum,
 }
 
+fn apply_cli_model_bootstrap(router: &ModelRouter, cli_model: &CliModelConfig) {
+    let target_provider = match cli_model.backend {
+        CliModelBackendKind::ClaudeCode => ProviderKind::ClaudeCode,
+        CliModelBackendKind::Codex => ProviderKind::Codex,
+    };
+
+    router.set_preferred_model(Some(cli_model.backend.default_model_id().to_string()));
+
+    if cli_model.cli_only {
+        for provider in [
+            ProviderKind::OpenAi,
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+            ProviderKind::Vllm,
+            ProviderKind::ClaudeCode,
+            ProviderKind::Codex,
+            ProviderKind::Mock,
+        ] {
+            router.set_provider_disabled(provider, provider != target_provider);
+        }
+    } else {
+        router.set_provider_disabled(target_provider, false);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -83,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let cfg = AppConfig::from_env()?;
+    let cli_model = cfg.cli_model.clone();
 
     let memory =
         Arc::new(MemoryManager::new(cfg.session_dir.clone(), cfg.database_url.as_str()).await?);
@@ -91,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.openai_api_key.clone(),
         cfg.anthropic_api_key.clone(),
         cfg.gemini_api_key.clone(),
+        cli_model.clone(),
     ));
     let context = Arc::new(ContextManager::new(cfg.max_context_tokens));
     let auth = Arc::new(AuthManager::new(
@@ -172,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
         AgentRegistry::builtin(),
-        router,
+        router.clone(),
         memory,
         context,
         webhook,
@@ -184,6 +211,9 @@ async fn main() -> anyhow::Result<()> {
         skills_dir.clone(),
     );
     orchestrator.load_persisted_settings().await;
+    if let Some(cli_model) = &cli_model {
+        apply_cli_model_bootstrap(router.as_ref(), cli_model);
+    }
 
     if let Some(dir) = &skills_dir {
         orchestrator.load_skills_from_dir(dir).await;

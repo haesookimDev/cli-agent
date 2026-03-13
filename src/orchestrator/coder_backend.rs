@@ -213,12 +213,18 @@ impl CoderBackend for CodexBackend {
     ) -> anyhow::Result<CoderSessionResult> {
         let session_id = Uuid::new_v4().to_string();
         let started = Instant::now();
+        let output_path = std::env::temp_dir().join(format!("codex-coder-{}.txt", session_id));
 
         let mut cmd = Command::new(&self.command);
-        cmd.arg("--approval-mode")
-            .arg("full-auto")
-            .arg(task)
+        cmd.arg("exec")
+            .arg("--skip-git-repo-check")
+            .arg("--full-auto")
+            .arg("--ephemeral")
+            .arg("--json")
+            .arg("--output-last-message")
+            .arg(&output_path)
             .args(&self.args)
+            .arg(task)
             .current_dir(working_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -274,9 +280,15 @@ impl CoderBackend for CodexBackend {
 
         let stdout_output = stdout_handle.await.unwrap_or_default();
         let _ = stderr_handle.await;
+        let file_output = tokio::fs::read_to_string(&output_path).await.ok();
+        let _ = tokio::fs::remove_file(&output_path).await;
+        let final_output = file_output
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or(stdout_output);
 
         Ok(CoderSessionResult {
-            output: stdout_output,
+            output: final_output,
             exit_code: status.code().unwrap_or(-1),
             files_changed: vec![],
             duration_ms: started.elapsed().as_millis(),

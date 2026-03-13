@@ -80,6 +80,19 @@
 - 로컬 파일/폴더/워크스페이스 의도에서는 `filesystem/*` 도구를 우선 선택하고, `github/*` 등 원격 저장소 도구는 사용자가 명시적으로 원격 작업을 요청한 경우에만 사용한다.
 - planner/tool-caller 프롬프트에 로컬 우선 정책을 명시해 도구 선택 편향을 줄인다.
 
+### CLI Model Routing
+- `MODEL_CLI_BACKEND`가 설정되면 coder 전용 경로만이 아니라 planner/reviewer/tool-caller 등 일반 LLM 노드도 동일한 CLI provider를 통해 실행되어야 한다.
+- `MODEL_CLI_ONLY=true`일 때는 부팅 시 대상 CLI provider만 활성화하고 나머지 provider는 비활성화해 API/OAuth 우회 목적이 fallback 경로에서 깨지지 않도록 보장해야 한다.
+
+### CLI Feature Parity
+- 웹/API에서 가능한 핵심 기능은 CLI/TUI 경로에서도 동일하게 수행 가능해야 하며, UI 전용 플로우에 의존하면 안 된다.
+- 새 기능을 추가할 때는 로컬 CLI 기반 실행 경로(오케스트레이션, 서브에이전트, 후속 실행, 검증)가 함께 동작하는지 먼저 검토해야 한다.
+
+### Workflow Continuation
+- 워크플로우/그래프 실행은 첫 번째 패스가 끝났다고 바로 성공으로 끝내지 말고, reviewer가 `INCOMPLETE`를 반환하면 남은 요구사항을 기준으로 후속 planner/sub-agent 그래프를 재구성해 이어서 실행해야 한다.
+- 후속 planner는 남은 작업을 독립 서브태스크로 분해하고, 병렬 가능한 항목은 별도 노드로 분리해 실행되도록 JSON `SubtaskPlan`을 우선 출력해야 한다.
+- reviewer가 실패하거나 응답이 모호한 경우도 자동 성공으로 간주하면 안 되며, 미검증 상태로 처리해 후속 실행 또는 실패로 이어져야 한다.
+
 ### Streaming Event Ordering
 - `node_token_chunk` 이벤트는 저장 순서가 응답 텍스트 순서와 동일해야 한다.
 - 토큰마다 `tokio::spawn`으로 DB insert를 분기하면 순서가 뒤섞일 수 있으므로 직렬 큐(worker)로 저장한다.
