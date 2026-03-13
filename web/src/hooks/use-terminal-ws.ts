@@ -41,6 +41,7 @@ export function useTerminalWs(
     setSessionError(null);
     pendingInputRef.current = [];
 
+    let cancelled = false;
     let ws: WebSocket | null = null;
 
     (async () => {
@@ -50,6 +51,9 @@ export function useTerminalWs(
         API_SECRET,
         `${timestamp}.${nonce}.`,
       );
+
+      // Effect was cleaned up while we were computing the signature.
+      if (cancelled) return;
 
       const wsBase = API_URL.replace(/^http/, "ws");
       const params = new URLSearchParams({
@@ -65,19 +69,30 @@ export function useTerminalWs(
       wsRef.current = ws;
 
       ws.onopen = () => {
+        // Guard: effect may have been cleaned up between WS creation and open.
+        if (cancelled) {
+          ws?.close();
+          return;
+        }
         setConnected(true);
         setSessionError(null);
         for (const chunk of pendingInputRef.current) {
-          ws.send(chunk);
+          ws!.send(chunk);
         }
         pendingInputRef.current = [];
       };
       ws.onclose = () => {
-        setConnected(false);
-        wsRef.current = null;
+        // Only update state if this is still the active connection.
+        // Prevents a stale onclose from nullifying a newer WS reference.
+        if (wsRef.current === ws) {
+          setConnected(false);
+          wsRef.current = null;
+        }
       };
       ws.onerror = () => {
-        setSessionError("terminal websocket connection failed");
+        if (wsRef.current === ws) {
+          setSessionError("terminal websocket connection failed");
+        }
       };
       ws.onmessage = (ev) => {
         if (ev.data instanceof ArrayBuffer) {
@@ -100,6 +115,7 @@ export function useTerminalWs(
     })();
 
     return () => {
+      cancelled = true;
       ws?.close();
       wsRef.current = null;
       pendingInputRef.current = [];

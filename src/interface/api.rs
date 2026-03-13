@@ -2333,7 +2333,26 @@ async fn handle_terminal_ws(
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     let writer = session.writer.clone();
-    let mut events = session.events.subscribe();
+
+    // Atomically subscribe AND snapshot scrollback under the same lock so
+    // that no output is duplicated or lost between the snapshot and the live
+    // event stream.
+    let (scrollback_snapshot, mut events) = {
+        let sb = session.scrollback.lock().unwrap();
+        let rx = session.events.subscribe();
+        (sb.clone(), rx)
+    };
+
+    // Replay buffered output so the client sees the prompt / prior output.
+    if !scrollback_snapshot.is_empty() {
+        if ws_sender
+            .send(Message::Binary(scrollback_snapshot))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
 
     // Session events → WS frames
     let mut send_handle = tokio::spawn(async move {

@@ -14,6 +14,9 @@ pub enum TerminalEvent {
     Exit(i32),
 }
 
+/// Max scrollback buffer size (64 KB). Older output is trimmed from the front.
+const MAX_SCROLLBACK: usize = 64 * 1024;
+
 /// One live terminal session backed by a PTY.
 pub struct TerminalSession {
     pub id: String,
@@ -33,6 +36,9 @@ pub struct TerminalSession {
     /// Optional link to an orchestrator run.
     pub run_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
+    /// Scrollback buffer so new WS connections can replay missed output.
+    /// Uses std::sync::Mutex because the reader thread is a plain OS thread.
+    pub scrollback: Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 /// Lightweight serializable info for REST list endpoint.
@@ -86,6 +92,8 @@ impl TerminalManager {
         let writer = pair.master.take_writer()?;
         let reader = pair.master.try_clone_reader()?;
         let (events, _) = broadcast::channel(256);
+        let scrollback: Arc<std::sync::Mutex<Vec<u8>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let id = Uuid::new_v4().to_string();
         let session = Arc::new(TerminalSession {
@@ -101,6 +109,7 @@ impl TerminalManager {
             child: Arc::new(Mutex::new(child)),
             run_id,
             session_id,
+            scrollback: scrollback.clone(),
         });
 
         let thread_name = format!("terminal-reader-{}", &id[..8]);
@@ -113,7 +122,17 @@ impl TerminalManager {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            let _ = events.send(TerminalEvent::Output(buf[..n].to_vec()));
+                            let data = buf[..n].to_vec();
+                            // Hold scrollback lock while appending AND broadcasting
+                            // so that a new WS subscriber cannot slip in between.
+                            let mut sb = scrollback.lock().unwrap();
+                            sb.extend_from_slice(&data);
+                            if sb.len() > MAX_SCROLLBACK {
+                                let excess = sb.len() - MAX_SCROLLBACK;
+                                sb.drain(..excess);
+                            }
+                            let _ = events.send(TerminalEvent::Output(data));
+                            drop(sb);
                         }
                         Err(_) => break,
                     }

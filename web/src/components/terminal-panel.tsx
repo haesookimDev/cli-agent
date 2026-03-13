@@ -270,6 +270,10 @@ export function TerminalPanel({
 
   useEffect(() => {
     if (!connected) return;
+    // Sync terminal dimensions with the PTY on every (re)connection.
+    if (termRef.current) {
+      sendResize(termRef.current.cols, termRef.current.rows);
+    }
     if (pendingInputRef.current) {
       sendInput(pendingInputRef.current);
       pendingInputRef.current = "";
@@ -277,7 +281,7 @@ export function TerminalPanel({
     requestAnimationFrame(() => {
       focusTerminal();
     });
-  }, [connected, focusTerminal, sendInput]);
+  }, [connected, focusTerminal, sendInput, sendResize]);
 
   useEffect(() => {
     if (!sessionError) {
