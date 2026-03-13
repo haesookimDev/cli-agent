@@ -258,3 +258,10 @@ export interface WorkflowTemplate {
   graph_template: WorkflowGraphTemplate;
   parameters: WorkflowParameter[];
 }
+export type CliModelBackend = "claude_code" | "codex";
+  cli_model_enabled: boolean;
+  cli_model_backend: CliModelBackend | null;
+  cli_model_command: string;
+  cli_model_args: string[];
+  cli_model_timeout_ms: number;
+  cli_model_only: boolean;
