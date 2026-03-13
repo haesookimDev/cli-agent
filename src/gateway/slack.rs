@@ -415,6 +415,25 @@ fn format_slack_response(payload: &GatewayResponsePayload) -> String {
                 lines.join("\n")
             )
         }
+        GatewayResponsePayload::WorkflowList(workflows) => {
+            let lines: Vec<String> = workflows
+                .iter()
+                .take(10)
+                .map(|w| {
+                    format!(
+                        "  - *{}* \u{2014} {} ({} nodes)",
+                        w.name,
+                        w.description,
+                        w.graph_template.nodes.len()
+                    )
+                })
+                .collect();
+            format!(
+                ":gear: *Workflows* ({})\n{}",
+                workflows.len(),
+                lines.join("\n")
+            )
+        }
         GatewayResponsePayload::HelpText(text) => format!("```\n{}\n```", text),
         GatewayResponsePayload::Error(err) => format!(":warning: Error: {}", err),
     }

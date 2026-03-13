@@ -12,7 +12,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::orchestrator::Orchestrator;
-use crate::types::{RunRecord, RunSubmission, SessionSummary, TaskProfile};
+use crate::types::{RunRecord, RunSubmission, SessionSummary, TaskProfile, WorkflowTemplate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +65,13 @@ pub enum GatewayAction {
     ListSessions {
         limit: usize,
     },
+    ListWorkflows {
+        limit: usize,
+    },
+    ExecuteWorkflow {
+        workflow_id: String,
+        params: Option<serde_json::Value>,
+    },
     Help,
 }
 
@@ -95,6 +102,7 @@ pub enum GatewayResponsePayload {
     },
     RunList(Vec<RunRecord>),
     SessionList(Vec<SessionSummary>),
+    WorkflowList(Vec<WorkflowTemplate>),
     HelpText(String),
     Error(String),
 }
@@ -232,6 +240,23 @@ impl GatewayManager {
                 let sessions = self.orchestrator.list_sessions(limit).await?;
                 Ok(GatewayResponsePayload::SessionList(sessions))
             }
+            GatewayAction::ListWorkflows { limit } => {
+                let workflows = self.orchestrator.list_workflows(limit).await?;
+                Ok(GatewayResponsePayload::WorkflowList(workflows))
+            }
+            GatewayAction::ExecuteWorkflow {
+                workflow_id,
+                params,
+            } => {
+                let session_id = self
+                    .resolve_session(cmd.origin.platform, &cmd.origin.channel_id, cmd.session_id)
+                    .await?;
+                let sub = self
+                    .orchestrator
+                    .execute_workflow(&workflow_id, params, Some(session_id))
+                    .await?;
+                Ok(GatewayResponsePayload::RunSubmitted(sub))
+            }
             GatewayAction::Help => Ok(GatewayResponsePayload::HelpText(Self::help_text())),
         }
     }
@@ -248,6 +273,9 @@ impl GatewayManager {
             "  status <run_id>",
             "  runs [--session <session_id>] [--limit N]",
             "  sessions [--limit N]",
+            "  workflows [--limit N]",
+            "  workflow-run <workflow_id> [--params JSON]",
+            "  results <run_id>",
             "  help",
         ]
         .join("\n")
@@ -357,6 +385,20 @@ pub fn parse_gateway_text(text: &str, origin: MessageOrigin) -> GatewayCommand {
             let limit = parse_limit_arg(rest);
             GatewayAction::ListSessions { limit }
         }
+        "workflows" => {
+            let limit = parse_limit_arg(rest);
+            GatewayAction::ListWorkflows { limit }
+        }
+        "workflow-run" => {
+            let (workflow_id, params) = parse_workflow_args(rest);
+            GatewayAction::ExecuteWorkflow {
+                workflow_id,
+                params,
+            }
+        }
+        "results" => GatewayAction::GetRun {
+            run_id: parse_uuid_arg(rest),
+        },
         "help" => GatewayAction::Help,
         _ => GatewayAction::SubmitRun {
             task: trimmed.to_string(),
@@ -439,6 +481,29 @@ fn parse_list_args(text: &str) -> (Option<Uuid>, usize) {
     }
 
     (session_id, limit)
+}
+
+fn parse_workflow_args(text: &str) -> (String, Option<serde_json::Value>) {
+    let mut workflow_id = String::new();
+    let mut params = None;
+    let mut tokens = text.split_whitespace().peekable();
+
+    if let Some(tok) = tokens.next() {
+        workflow_id = tok.to_string();
+    }
+
+    while let Some(tok) = tokens.next() {
+        if tok == "--params" {
+            let rest: Vec<&str> = tokens.collect();
+            if !rest.is_empty() {
+                let json_str = rest.join(" ");
+                params = serde_json::from_str(&json_str).ok();
+            }
+            break;
+        }
+    }
+
+    (workflow_id, params)
 }
 
 fn parse_limit_arg(text: &str) -> usize {
