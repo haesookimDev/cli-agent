@@ -503,14 +503,22 @@ pub struct AppSettings {
     pub cli_model_only: bool,
     #[serde(default = "default_terminal_command")]
     pub terminal_command: String,
-    #[serde(default)]
+    #[serde(default = "default_terminal_args")]
     pub terminal_args: Vec<String>,
     #[serde(default)]
     pub terminal_auto_spawn: bool,
 }
 
-fn default_terminal_command() -> String {
-    "claude".to_string()
+pub fn default_terminal_command() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "bash".to_string())
+}
+
+pub fn default_terminal_args() -> Vec<String> {
+    Vec::new()
 }
 
 fn default_cli_model_command() -> String {

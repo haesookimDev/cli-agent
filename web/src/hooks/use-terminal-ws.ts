@@ -12,6 +12,7 @@ export interface TerminalWsHandle {
   sendResize: (cols: number, rows: number) => void;
   connected: boolean;
   exitInfo: { code: number } | null;
+  sessionError: string | null;
   disconnect: () => void;
 }
 
@@ -20,20 +21,25 @@ export function useTerminalWs(
   onData: (data: Uint8Array) => void,
 ): TerminalWsHandle {
   const wsRef = useRef<WebSocket | null>(null);
+  const pendingInputRef = useRef<Uint8Array[]>([]);
   const [connected, setConnected] = useState(false);
   const [exitInfo, setExitInfo] = useState<{ code: number } | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
 
   const disconnect = useCallback(() => {
     wsRef.current?.close();
     wsRef.current = null;
+    pendingInputRef.current = [];
     setConnected(false);
   }, []);
 
   useEffect(() => {
     if (!terminalId) return;
     setExitInfo(null);
+    setSessionError(null);
+    pendingInputRef.current = [];
 
     let ws: WebSocket | null = null;
 
@@ -58,10 +64,20 @@ export function useTerminalWs(
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        setSessionError(null);
+        for (const chunk of pendingInputRef.current) {
+          ws.send(chunk);
+        }
+        pendingInputRef.current = [];
+      };
       ws.onclose = () => {
         setConnected(false);
         wsRef.current = null;
+      };
+      ws.onerror = () => {
+        setSessionError("terminal websocket connection failed");
       };
       ws.onmessage = (ev) => {
         if (ev.data instanceof ArrayBuffer) {
@@ -71,6 +87,10 @@ export function useTerminalWs(
             const ctrl = JSON.parse(ev.data);
             if (ctrl.type === "exit") {
               setExitInfo({ code: ctrl.code ?? -1 });
+            } else if (ctrl.type === "error") {
+              setSessionError(
+                typeof ctrl.message === "string" ? ctrl.message : "terminal error",
+              );
             }
           } catch {
             // ignore non-JSON text
@@ -82,18 +102,20 @@ export function useTerminalWs(
     return () => {
       ws?.close();
       wsRef.current = null;
+      pendingInputRef.current = [];
       setConnected(false);
     };
   }, [terminalId]);
 
   const sendInput = useCallback((data: string | Uint8Array) => {
+    const chunk =
+      typeof data === "string" ? new TextEncoder().encode(data) : data;
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (typeof data === "string") {
-      ws.send(new TextEncoder().encode(data));
-    } else {
-      ws.send(data);
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      pendingInputRef.current.push(chunk);
+      return;
     }
+    ws.send(chunk);
   }, []);
 
   const sendResize = useCallback((cols: number, rows: number) => {
@@ -102,5 +124,5 @@ export function useTerminalWs(
     ws.send(JSON.stringify({ type: "resize", cols, rows }));
   }, []);
 
-  return { sendInput, sendResize, connected, exitInfo, disconnect };
+  return { sendInput, sendResize, connected, exitInfo, sessionError, disconnect };
 }

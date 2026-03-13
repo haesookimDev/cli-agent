@@ -37,7 +37,7 @@ export default function SettingsPage() {
   const [cliModelOnly, setCliModelOnly] = useState(true);
   const [cliSaving, setCliSaving] = useState(false);
 
-  const [terminalCommand, setTerminalCommand] = useState("claude");
+  const [terminalCommand, setTerminalCommand] = useState("bash");
   const [terminalArgs, setTerminalArgs] = useState("");
   const [terminalAutoSpawn, setTerminalAutoSpawn] = useState(false);
   const [terminalSaving, setTerminalSaving] = useState(false);
@@ -60,7 +60,7 @@ export default function SettingsPage() {
         String(settings.cli_model_timeout_ms ?? 300_000),
       );
       setCliModelOnly(settings.cli_model_only ?? true);
-      setTerminalCommand(settings.terminal_command ?? "claude");
+      setTerminalCommand(settings.terminal_command ?? "bash");
       setTerminalArgs((settings.terminal_args ?? []).join(" "));
       setTerminalAutoSpawn(settings.terminal_auto_spawn ?? false);
     } catch (err) {
@@ -402,7 +402,7 @@ export default function SettingsPage() {
               value={terminalCommand}
               onChange={(event) => setTerminalCommand(event.target.value)}
               className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none"
-              placeholder="claude"
+              placeholder="bash"
             />
           </div>
           <div>

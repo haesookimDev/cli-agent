@@ -178,8 +178,8 @@ impl Orchestrator {
             cli_model_args,
             cli_model_timeout_ms,
             cli_model_only,
-            terminal_command: "claude".to_string(),
-            terminal_args: vec![],
+            terminal_command: crate::types::default_terminal_command(),
+            terminal_args: crate::types::default_terminal_args(),
             terminal_auto_spawn: false,
         }
     }
