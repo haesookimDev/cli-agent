@@ -1,6 +1,7 @@
 export type TaskProfile = "planning" | "extraction" | "coding" | "general";
 export type AgentRole = "planner" | "extractor" | "coder" | "summarizer" | "fallback" | "tool_caller" | "analyzer" | "reviewer" | "scheduler" | "config_manager";
 export type RunStatus = "queued" | "cancelling" | "cancelled" | "paused" | "running" | "succeeded" | "failed";
+export type CliModelBackend = "claude_code" | "codex";
 
 export type RunActionType =
   | "run_queued" | "run_started" | "run_cancel_requested" | "run_pause_requested"
@@ -185,6 +186,12 @@ export interface AppSettings {
   preferred_model: string | null;
   disabled_models: string[];
   disabled_providers: string[];
+  cli_model_enabled: boolean;
+  cli_model_backend: CliModelBackend | null;
+  cli_model_command: string;
+  cli_model_args: string[];
+  cli_model_timeout_ms: number;
+  cli_model_only: boolean;
   terminal_command: string;
   terminal_args: string[];
   terminal_auto_spawn: boolean;
@@ -258,10 +265,3 @@ export interface WorkflowTemplate {
   graph_template: WorkflowGraphTemplate;
   parameters: WorkflowParameter[];
 }
-export type CliModelBackend = "claude_code" | "codex";
-  cli_model_enabled: boolean;
-  cli_model_backend: CliModelBackend | null;
-  cli_model_command: string;
-  cli_model_args: string[];
-  cli_model_timeout_ms: number;
-  cli_model_only: boolean;
