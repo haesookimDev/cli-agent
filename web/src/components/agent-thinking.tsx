@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolCallCard } from "./tool-call-card";
@@ -19,6 +19,8 @@ interface NodeTimeline {
   tokens: string;
   toolCalls: ToolCallInfo[];
   startedAt: string | null;
+  coderOutput: string;
+  coderBackend: string | null;
 }
 
 const roleLabels: Record<string, string> = {
@@ -67,6 +69,8 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
         tokens: "",
         toolCalls: [],
         startedAt: null,
+        coderOutput: "",
+        coderBackend: null,
       };
       nodes.set(id, node);
       order.push(id);
@@ -91,10 +95,26 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
 
     if (ev.action === "node_token_chunk") {
       const nodeId = (p.node_id as string) ?? ev.actor_id ?? "";
-      const token = (p.token as string) ?? (p.content as string) ?? "";
+      const phase = (p.phase as string) ?? "";
       const role = (p.role as string) ?? null;
       const node = ensureNode(nodeId, role);
-      if (node) node.tokens += token;
+      if (node) {
+        if (phase === "coder_output_chunk") {
+          // CLI backend output — accumulate separately for terminal-style display
+          const line = (p.content as string) ?? "";
+          node.coderOutput += line + "\n";
+        } else {
+          const token = (p.token as string) ?? (p.content as string) ?? "";
+          node.tokens += token;
+        }
+      }
+    }
+
+    if (ev.action === "coder_session_started") {
+      const nodeId = (p.node_id as string) ?? ev.actor_id ?? "";
+      const backend = (p.backend as string) ?? null;
+      const node = ensureNode(nodeId);
+      if (node) node.coderBackend = backend;
     }
 
     if (ev.action === "model_selected") {
@@ -174,9 +194,14 @@ export function AgentThinking({ events, isRunning }: Props) {
     );
   }
 
-  // Separate summarizer (final answer) from other nodes
-  const stepNodes = timeline.filter((n) => n.role !== "summarizer");
-  const summarizerNode = timeline.find((n) => n.role === "summarizer");
+  // The last summarizer node is the final answer; earlier ones are intermediate steps
+  const summarizerNodes = timeline.filter((n) => n.role === "summarizer");
+  const summarizerNode = summarizerNodes.length > 0 ? summarizerNodes[summarizerNodes.length - 1] : null;
+  const intermediateSummarizers = summarizerNodes.slice(0, -1);
+  const stepNodes = [
+    ...timeline.filter((n) => n.role !== "summarizer"),
+    ...intermediateSummarizers,
+  ];
 
   const completedSteps = stepNodes.filter((n) => n.status !== "active");
   const activeSteps = stepNodes.filter((n) => n.status === "active");
@@ -229,15 +254,18 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
   const label = roleLabels[role] ?? role;
   const dotColor = isFailed ? "bg-red-500" : (roleColors[role] ?? "bg-slate-500");
   const tokenText = node.tokens.trim();
-  const showEmptyState = node.toolCalls.length === 0 && tokenText.length === 0;
+  const coderText = node.coderOutput.trim();
+  const showEmptyState = node.toolCalls.length === 0 && tokenText.length === 0 && coderText.length === 0;
   const toolCallerNoExec =
     role === "tool_caller" &&
     node.toolCalls.length === 0 &&
     (node.model?.startsWith("mcp:none") ?? false);
 
-  const preview = node.tokens
-    ? node.tokens.split("\n").find((l) => l.trim().length > 0)?.trim().slice(0, 80) ?? ""
-    : "";
+  const preview = coderText
+    ? coderText.split("\n").filter((l) => l.trim().length > 0).pop()?.trim().slice(0, 80) ?? ""
+    : node.tokens
+      ? node.tokens.split("\n").find((l) => l.trim().length > 0)?.trim().slice(0, 80) ?? ""
+      : "";
 
   return (
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -272,6 +300,12 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
           </svg>
         )}
 
+        {node.coderBackend && (
+          <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] text-slate-200">
+            {node.coderBackend}
+          </span>
+        )}
+
         {node.toolCalls.length > 0 && (
           <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-500">
             {node.toolCalls.length} tool{node.toolCalls.length > 1 ? "s" : ""}
@@ -293,6 +327,10 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
                 <ToolCallCard key={i} call={tc} />
               ))}
             </div>
+          )}
+
+          {coderText && (
+            <CoderOutputPanel output={coderText} backend={node.coderBackend} />
           )}
 
           {tokenText && (
@@ -341,6 +379,11 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
             {node.model}
           </span>
         )}
+        {node.coderBackend && (
+          <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] text-slate-200">
+            {node.coderBackend}
+          </span>
+        )}
         <BouncingDots />
       </div>
 
@@ -352,6 +395,10 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
         </div>
       )}
 
+      {node.coderOutput.trim() && (
+        <CoderOutputPanel output={node.coderOutput.trim()} backend={node.coderBackend} streaming />
+      )}
+
       {node.tokens ? (
         <div className={`max-h-48 overflow-y-auto text-sm ${mdClasses}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -359,7 +406,7 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
           </ReactMarkdown>
           <span className="animate-pulse text-teal-500">|</span>
         </div>
-      ) : node.toolCalls.length === 0 ? (
+      ) : !node.coderOutput.trim() && node.toolCalls.length === 0 ? (
         <span className="text-[10px] text-slate-400">Working...</span>
       ) : null}
     </div>
@@ -406,6 +453,68 @@ function SummarizerPanel({ node }: { node: NodeTimeline }) {
           <span className="text-xs text-slate-400">Generating answer...</span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coder output → terminal-style panel                                */
+/* ------------------------------------------------------------------ */
+
+function CoderOutputPanel({
+  output,
+  backend,
+  streaming,
+}: {
+  output: string;
+  backend: string | null;
+  streaming?: boolean;
+}) {
+  const scrollRef = useRef<HTMLPreElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const lines = output.split("\n");
+  const isLong = lines.length > 20;
+  const displayText = isLong && !expanded ? lines.slice(-20).join("\n") : output;
+
+  useEffect(() => {
+    if (streaming && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [output, streaming]);
+
+  return (
+    <div className="mb-2 overflow-hidden rounded-lg border border-slate-700 bg-[#1e1e2e]">
+      <div className="flex items-center gap-2 border-b border-slate-700 px-3 py-1.5">
+        <span className="text-[10px] font-medium text-slate-400">Terminal</span>
+        {backend && (
+          <span className="rounded bg-slate-600 px-1.5 py-0.5 text-[10px] text-slate-300">
+            {backend}
+          </span>
+        )}
+        {streaming && (
+          <span className="ml-auto flex items-center gap-1 text-[10px] text-emerald-400">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            live
+          </span>
+        )}
+        {isLong && (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="ml-auto text-[10px] text-slate-400 hover:text-slate-200"
+          >
+            {expanded ? "Collapse" : `Show all ${lines.length} lines`}
+          </button>
+        )}
+      </div>
+      <pre
+        ref={scrollRef}
+        className={`overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-relaxed text-slate-200 ${
+          expanded ? "max-h-96" : "max-h-48"
+        }`}
+      >
+        {displayText}
+        {streaming && <span className="animate-pulse text-emerald-400">_</span>}
+      </pre>
     </div>
   );
 }

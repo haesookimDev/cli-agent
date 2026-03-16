@@ -10,7 +10,9 @@ export type RunActionType =
   | "model_selected" | "run_finished" | "webhook_dispatched"
   | "mcp_tool_called" | "node_token_chunk" | "subtask_planned"
   | "verification_started" | "verification_complete" | "replan_triggered"
-  | "terminal_suggested";
+  | "terminal_suggested"
+  | "coder_session_started" | "coder_session_completed"
+  | "validation_passed" | "validation_failed" | "git_commit_created";
 
 export interface RunRequest {
   task: string;
