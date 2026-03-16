@@ -91,7 +91,7 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
 
     if (ev.action === "node_token_chunk") {
       const nodeId = (p.node_id as string) ?? ev.actor_id ?? "";
-      const token = (p.token as string) ?? "";
+      const token = (p.token as string) ?? (p.content as string) ?? "";
       const role = (p.role as string) ?? null;
       const node = ensureNode(nodeId, role);
       if (node) node.tokens += token;
