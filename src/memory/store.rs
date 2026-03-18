@@ -1874,6 +1874,7 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "run_pause_requested" => RunActionType::RunPauseRequested,
         "run_resumed" => RunActionType::RunResumed,
         "graph_initialized" => RunActionType::GraphInitialized,
+        "node_progress" => RunActionType::NodeProgress,
         "node_started" => RunActionType::NodeStarted,
         "node_completed" => RunActionType::NodeCompleted,
         "node_failed" => RunActionType::NodeFailed,
@@ -1892,6 +1893,13 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "terminal_suggested" => RunActionType::TerminalSuggested,
         "coder_session_started" => RunActionType::CoderSessionStarted,
         "coder_session_completed" => RunActionType::CoderSessionCompleted,
+        "validation_passed" => RunActionType::ValidationPassed,
+        "validation_failed" => RunActionType::ValidationFailed,
+        "git_commit_created" => RunActionType::GitCommitCreated,
+        "git_push_completed" => RunActionType::GitPushCompleted,
+        "repo_clone_completed" => RunActionType::RepoCloneCompleted,
+        "repo_analysis_completed" => RunActionType::RepoAnalysisCompleted,
+        "interactive_step" => RunActionType::InteractiveStep,
         _ => {
             return Err(anyhow::anyhow!("unknown run action event type: {value}"));
         }
@@ -1902,6 +1910,26 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_run_action_accepts_extended_action_set() {
+        assert!(matches!(
+            parse_run_action("node_progress").unwrap(),
+            RunActionType::NodeProgress
+        ));
+        assert!(matches!(
+            parse_run_action("repo_clone_completed").unwrap(),
+            RunActionType::RepoCloneCompleted
+        ));
+        assert!(matches!(
+            parse_run_action("repo_analysis_completed").unwrap(),
+            RunActionType::RepoAnalysisCompleted
+        ));
+        assert!(matches!(
+            parse_run_action("interactive_step").unwrap(),
+            RunActionType::InteractiveStep
+        ));
+    }
 
     fn temp_db_url() -> String {
         let path =

@@ -21,6 +21,7 @@ interface NodeTimeline {
   startedAt: string | null;
   coderOutput: string;
   coderBackend: string | null;
+  progress: Array<{ stage: string | null; message: string }>;
 }
 
 const roleLabels: Record<string, string> = {
@@ -34,6 +35,7 @@ const roleLabels: Record<string, string> = {
   reviewer: "Reviewer",
   scheduler: "Scheduler",
   config_manager: "Config",
+  validator: "Validator",
 };
 
 const roleColors: Record<string, string> = {
@@ -47,6 +49,7 @@ const roleColors: Record<string, string> = {
   reviewer: "bg-pink-500",
   scheduler: "bg-indigo-500",
   config_manager: "bg-lime-500",
+  validator: "bg-rose-500",
 };
 
 const mdClasses =
@@ -71,6 +74,7 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
         startedAt: null,
         coderOutput: "",
         coderBackend: null,
+        progress: [],
       };
       nodes.set(id, node);
       order.push(id);
@@ -139,6 +143,20 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
           node_id: nodeId,
           timestamp: ev.timestamp,
         });
+      }
+    }
+
+    if (ev.action === "node_progress") {
+      const nodeId = ((p.node_id as string) ?? ev.actor_id ?? "").trim();
+      const role = (p.role as string) ?? null;
+      const node = ensureNode(nodeId, role);
+      const message = ((p.message as string) ?? "").trim();
+      if (node && message) {
+        const stage = ((p.stage as string) ?? "").trim() || null;
+        const prev = node.progress[node.progress.length - 1];
+        if (!prev || prev.message !== message || prev.stage !== stage) {
+          node.progress.push({ stage, message });
+        }
       }
     }
 
@@ -255,7 +273,12 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
   const dotColor = isFailed ? "bg-red-500" : (roleColors[role] ?? "bg-slate-500");
   const tokenText = node.tokens.trim();
   const coderText = node.coderOutput.trim();
-  const showEmptyState = node.toolCalls.length === 0 && tokenText.length === 0 && coderText.length === 0;
+  const progressLines = node.progress.slice(-4);
+  const showEmptyState =
+    node.toolCalls.length === 0 &&
+    tokenText.length === 0 &&
+    coderText.length === 0 &&
+    progressLines.length === 0;
   const toolCallerNoExec =
     role === "tool_caller" &&
     node.toolCalls.length === 0 &&
@@ -265,6 +288,8 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
     ? coderText.split("\n").filter((l) => l.trim().length > 0).pop()?.trim().slice(0, 80) ?? ""
     : node.tokens
       ? node.tokens.split("\n").find((l) => l.trim().length > 0)?.trim().slice(0, 80) ?? ""
+      : progressLines.length > 0
+        ? progressLines[progressLines.length - 1]?.message.slice(0, 80) ?? ""
       : "";
 
   return (
@@ -329,6 +354,21 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
             </div>
           )}
 
+          {progressLines.length > 0 && (
+            <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                Progress
+              </div>
+              <div className="space-y-1 text-xs text-slate-600">
+                {progressLines.map((item, idx) => (
+                  <div key={`${item.stage ?? "progress"}-${idx}`}>
+                    {item.stage ? `${item.stage}: ` : ""}{item.message}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {coderText && (
             <CoderOutputPanel output={coderText} backend={node.coderBackend} />
           )}
@@ -368,6 +408,8 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
   const role = node.role ?? node.nodeId;
   const label = roleLabels[role] ?? role;
   const dotColor = roleColors[role] ?? "bg-slate-500";
+  const progressLines = node.progress.slice(-4);
+  const latestProgress = progressLines[progressLines.length - 1];
 
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -395,6 +437,21 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
         </div>
       )}
 
+      {progressLines.length > 0 && (
+        <div className="mb-2 rounded-md border border-slate-200 bg-white px-3 py-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Current Activity
+          </div>
+          <div className="space-y-1 text-xs text-slate-600">
+            {progressLines.map((item, idx) => (
+              <div key={`${item.stage ?? "progress"}-${idx}`}>
+                {item.stage ? `${item.stage}: ` : ""}{item.message}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {node.coderOutput.trim() && (
         <CoderOutputPanel output={node.coderOutput.trim()} backend={node.coderBackend} streaming />
       )}
@@ -407,7 +464,9 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
           <span className="animate-pulse text-teal-500">|</span>
         </div>
       ) : !node.coderOutput.trim() && node.toolCalls.length === 0 ? (
-        <span className="text-[10px] text-slate-400">Working...</span>
+        <span className="text-[10px] text-slate-400">
+          {latestProgress?.message ?? "Working..."}
+        </span>
       ) : null}
     </div>
   );

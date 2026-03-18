@@ -11,6 +11,7 @@ const actionColors: Record<string, string> = {
   graph_initialized: "text-blue-600",
   graph_completed: "text-blue-600",
   // Node events
+  node_progress: "text-indigo-600",
   node_started: "text-sky-600",
   node_completed: "text-emerald-600",
   node_failed: "text-red-600",
@@ -28,6 +29,10 @@ const actionColors: Record<string, string> = {
   // MCP & Subtask
   mcp_tool_called: "text-violet-600",
   subtask_planned: "text-amber-600",
+  repo_clone_completed: "text-emerald-600",
+  repo_analysis_completed: "text-emerald-600",
+  validation_passed: "text-emerald-600",
+  validation_failed: "text-red-600",
 };
 
 type DisplayRow = {

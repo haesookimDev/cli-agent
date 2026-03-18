@@ -85,6 +85,11 @@
 - 로컬 파일/폴더/워크스페이스 의도에서는 `filesystem/*` 도구를 우선 선택하고, `github/*` 등 원격 저장소 도구는 사용자가 명시적으로 원격 작업을 요청한 경우에만 사용한다.
 - planner/tool-caller 프롬프트에 로컬 우선 정책을 명시해 도구 선택 편향을 줄인다.
 
+### Remote Repo Analysis Routing
+- 원격 저장소 URL에 대한 일반적인 "분석/구조 파악/아키텍처 요약" 요청은 기본적으로 세션 workspace로 clone 또는 pull 한 뒤 로컬 기준으로 분석해야 한다.
+- `github/*` 기반 원격 overview 경로는 "remote only", "clone 없이", PR/issue/commit 메타데이터처럼 원격 맥락이 명시적으로 필요한 경우에만 기본 경로로 선택한다.
+- 원격 repo 분석용 skill을 둘 경우, clone/pull 단계와 이후 로컬 inspection 단계(`filesystem/*`)를 분리해 현재 진행 상황이 세션 로그와 실행 trace에 드러나도록 구성한다.
+
 ### Tool Caller Output Contract
 - `tool_caller` 노드 프롬프트는 응답 형식을 엄격히 고정해야 하며, 첫 토큰이 `[` 또는 `DONE`가 되도록 요구해야 한다.
 - `tool_caller`는 prose, markdown fence, wrapper object(예: `{"tool_calls":[...]}`)를 금지해야 한다.

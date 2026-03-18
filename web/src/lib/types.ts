@@ -5,14 +5,16 @@ export type CliModelBackend = "claude_code" | "codex";
 
 export type RunActionType =
   | "run_queued" | "run_started" | "run_cancel_requested" | "run_pause_requested"
-  | "run_resumed" | "graph_initialized" | "node_started" | "node_completed"
+  | "run_resumed" | "graph_initialized" | "node_progress" | "node_started" | "node_completed"
   | "node_failed" | "node_skipped" | "dynamic_node_added" | "graph_completed"
   | "model_selected" | "run_finished" | "webhook_dispatched"
   | "mcp_tool_called" | "node_token_chunk" | "subtask_planned"
   | "verification_started" | "verification_complete" | "replan_triggered"
   | "terminal_suggested"
   | "coder_session_started" | "coder_session_completed"
-  | "validation_passed" | "validation_failed" | "git_commit_created";
+  | "validation_passed" | "validation_failed" | "git_commit_created"
+  | "git_push_completed" | "repo_clone_completed" | "repo_analysis_completed"
+  | "interactive_step";
 
 export interface RunRequest {
   task: string;

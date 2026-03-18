@@ -1,0 +1,46 @@
+name: Local Repo Overview
+description: Clone or refresh a remote repository into the session workspace, inspect the local checkout with filesystem MCP tools, and summarize the project structure. Use when the user asks to analyze or summarize a repository URL and local source-grounded inspection is preferred.
+parameters:
+  - name: repo_url
+    description: Remote repository URL to inspect locally.
+    default_value:
+nodes:
+  - id: repo_analyze
+    role: analyzer
+    instructions: |
+      Clone or refresh the repository {{repo_url}} into the session workspace and produce a structured repo analysis.
+
+      Requirements:
+      - Use the session-scoped workspace only.
+      - If the repository already exists for this session, refresh it instead of creating a second clone.
+      - Capture the resolved local repo_path so downstream nodes can inspect the checkout.
+  - id: inspect_local_repo
+    role: tool_caller
+    instructions: |
+      Use only the allowed local MCP tools to inspect the cloned repository from the repo_analyze output.
+
+      Goals:
+      - Work from the repo_path reported by repo_analyze.
+      - Confirm the top-level structure of the cloned checkout.
+      - Read high-signal files from key_files first, then inspect important source entry points and configs.
+      - Prefer manifests, configs, entry points, and architecture-significant directories over low-signal files.
+
+      Rules:
+      - Do not use github/* tools, web search, or remote repository APIs.
+      - Start with filesystem/list_allowed_directories, then inspect repo_path with filesystem/list_directory.
+      - Use filesystem/read_text_file for README, manifests, configs, and entry points mentioned in repo_analyze.
+      - Stop once the overview is well supported by local repository evidence.
+      - On each iteration, respond with ONLY a JSON array of tool calls or DONE.
+      - Do not return prose, markdown fences, wrapper objects, or analysis text.
+    dependencies:
+      - repo_analyze
+    mcp_tools:
+      - filesystem/list_allowed_directories
+      - filesystem/list_directory
+      - filesystem/read_text_file
+  - id: summarize_local_repo
+    role: summarizer
+    instructions: Summarize the local repository analysis from dependency outputs. Cover project purpose, structure, stack, likely entry points, build or run workflow, and notable risks or documentation gaps. Prefer evidence from the cloned checkout over assumptions.
+    dependencies:
+      - repo_analyze
+      - inspect_local_repo

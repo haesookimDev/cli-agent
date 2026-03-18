@@ -149,6 +149,38 @@ impl Orchestrator {
         self.skills.get(id).map(|e| e.value().clone())
     }
 
+    fn normalize_node_policy_for_runtime(&self, node: &mut AgentNode) {
+        if node.role == AgentRole::Validator {
+            return;
+        }
+
+        if let Some(cli_model) = self.router.cli_model_config() {
+            let extra_ms = match node.role {
+                AgentRole::ToolCaller | AgentRole::Coder => 120_000,
+                AgentRole::Planner
+                | AgentRole::Extractor
+                | AgentRole::Analyzer
+                | AgentRole::Reviewer
+                | AgentRole::Summarizer
+                | AgentRole::Fallback
+                | AgentRole::Scheduler
+                | AgentRole::ConfigManager => 30_000,
+                AgentRole::Validator => 0,
+            };
+            let minimum = cli_model.timeout_ms.saturating_add(extra_ms);
+            node.policy.timeout_ms = node.policy.timeout_ms.max(minimum);
+        }
+    }
+
+    fn add_graph_node(
+        &self,
+        graph: &mut ExecutionGraph,
+        mut node: AgentNode,
+    ) -> anyhow::Result<()> {
+        self.normalize_node_policy_for_runtime(&mut node);
+        graph.add_node(node)
+    }
+
     fn build_workflow_graph_from_template(
         &self,
         template: &WorkflowTemplate,
@@ -156,7 +188,7 @@ impl Orchestrator {
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
         for wn in &template.graph_template.nodes {
             let node = workflow_node_to_agent_node(wn)?;
-            graph.add_node(node)?;
+            self.add_graph_node(&mut graph, node)?;
         }
         Ok(graph)
     }
@@ -215,6 +247,11 @@ impl Orchestrator {
                         "target_dir": infer_clone_target_dir(url),
                     })
                 }),
+                "local_repo_overview" => detected_repo_url.as_ref().map(|url| {
+                    serde_json::json!({
+                        "repo_url": url,
+                    })
+                }),
                 "github_repo_overview" => detected_repo_url
                     .as_ref()
                     .map(|url| serde_json::json!({ "repo_url": url })),
@@ -261,8 +298,31 @@ impl Orchestrator {
             });
         }
 
-        if self.skills.contains_key("github_repo_overview")
+        let wants_remote_only = contains_any_keyword(
+            lower.as_str(),
+            &[
+                "remote only",
+                "without cloning",
+                "without clone",
+                "no clone",
+                "clone 없이",
+                "원격으로만",
+                "원격만",
+                "readme only",
+                "metadata",
+                "issues",
+                "issue",
+                "pull request",
+                "pr ",
+                "commits",
+                "commit history",
+                "release notes",
+            ],
+        );
+
+        if self.skills.contains_key("local_repo_overview")
             && detected_repo_url.is_some()
+            && !wants_remote_only
             && !contains_any_keyword(
                 lower.as_str(),
                 &[
@@ -290,6 +350,18 @@ impl Orchestrator {
                     "구조",
                 ],
             )
+        {
+            let url = detected_repo_url?;
+            return Some(AutoSkillRoute {
+                workflow_id: "local_repo_overview".to_string(),
+                params: Some(serde_json::json!({ "repo_url": url })),
+                reason: "local_repo_overview_auto_route".to_string(),
+            });
+        }
+
+        if self.skills.contains_key("github_repo_overview")
+            && detected_repo_url.is_some()
+            && wants_remote_only
         {
             let url = detected_repo_url?;
             return Some(AutoSkillRoute {
@@ -625,6 +697,9 @@ impl Orchestrator {
         let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
         let mut req = req;
         req.session_id = Some(session_id);
+        if req.repo_url.is_none() {
+            req.repo_url = extract_repo_url_from_text(req.task.as_str());
+        }
 
         let auto_route = if req.workflow_id.is_none() {
             self.auto_skill_route(req.task.as_str(), req.repo_url.as_deref())
@@ -1186,6 +1261,48 @@ impl Orchestrator {
         .await;
     }
 
+    async fn record_node_progress(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        node_id: &str,
+        role: AgentRole,
+        stage: &str,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) {
+        let message = message.into();
+        let payload = serde_json::json!({
+            "node_id": node_id,
+            "role": role,
+            "stage": stage,
+            "message": message,
+            "details": details,
+        });
+
+        let _ = self
+            .memory
+            .append_event(SessionEvent {
+                session_id,
+                run_id: Some(run_id),
+                event_type: SessionEventType::RunProgress,
+                timestamp: Utc::now(),
+                payload: payload.clone(),
+            })
+            .await;
+
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::NodeProgress,
+            Some("node"),
+            Some(node_id),
+            None,
+            payload,
+        )
+        .await;
+    }
+
     fn summarize_results_for_followup(results: &[NodeExecutionResult]) -> String {
         results
             .iter()
@@ -1248,7 +1365,7 @@ impl Orchestrator {
             on_dependency_failure: DependencyFailurePolicy::FailFast,
             fallback_node: None,
         };
-        graph.add_node(planner)?;
+        self.add_graph_node(&mut graph, planner)?;
 
         Ok(graph)
     }
@@ -2109,7 +2226,7 @@ impl Orchestrator {
             on_dependency_failure: DependencyFailurePolicy::FailFast,
             ..Self::default_policy()
         };
-        graph.add_node(plan)?;
+        self.add_graph_node(&mut graph, plan)?;
 
         match task_type {
             TaskType::SimpleQuery => {
@@ -2121,7 +2238,7 @@ impl Orchestrator {
                 );
                 summarize.dependencies = vec!["plan".to_string()];
                 summarize.policy = Self::default_policy();
-                graph.add_node(summarize)?;
+                self.add_graph_node(&mut graph, summarize)?;
             }
             TaskType::Analysis => {
                 // plan → extract → analyze → summarize
@@ -2132,7 +2249,7 @@ impl Orchestrator {
                 );
                 extract.dependencies = vec!["plan".to_string()];
                 extract.policy = Self::default_policy();
-                graph.add_node(extract)?;
+                self.add_graph_node(&mut graph, extract)?;
 
                 let mut analyze = AgentNode::new(
                     "analyze",
@@ -2144,7 +2261,7 @@ impl Orchestrator {
                     timeout_ms: 120_000,
                     ..Self::default_policy()
                 };
-                graph.add_node(analyze)?;
+                self.add_graph_node(&mut graph, analyze)?;
 
                 let mut summarize = AgentNode::new(
                     "summarize",
@@ -2153,7 +2270,7 @@ impl Orchestrator {
                 );
                 summarize.dependencies = vec!["analyze".to_string()];
                 summarize.policy = Self::default_policy();
-                graph.add_node(summarize)?;
+                self.add_graph_node(&mut graph, summarize)?;
             }
             TaskType::ConfigQuery => {
                 // Read-only config query: plan → summarize with system state
@@ -2170,7 +2287,7 @@ impl Orchestrator {
                 );
                 summarize.dependencies = vec!["plan".to_string()];
                 summarize.policy = Self::default_policy();
-                graph.add_node(summarize)?;
+                self.add_graph_node(&mut graph, summarize)?;
             }
             TaskType::Configuration => {
                 // Mutation: plan → config_manage → summarize with system state context
@@ -2189,7 +2306,7 @@ impl Orchestrator {
                     timeout_ms: 120_000,
                     ..Self::default_policy()
                 };
-                graph.add_node(config)?;
+                self.add_graph_node(&mut graph, config)?;
 
                 let mut summarize = AgentNode::new(
                     "summarize",
@@ -2198,7 +2315,7 @@ impl Orchestrator {
                 );
                 summarize.dependencies = vec!["config_manage".to_string()];
                 summarize.policy = Self::default_policy();
-                graph.add_node(summarize)?;
+                self.add_graph_node(&mut graph, summarize)?;
             }
             TaskType::ToolOperation => {
                 // plan → tool_call → summarize
@@ -2213,7 +2330,7 @@ impl Orchestrator {
                     retry: 2,
                     ..Self::default_policy()
                 };
-                graph.add_node(tool)?;
+                self.add_graph_node(&mut graph, tool)?;
 
                 let mut summarize = AgentNode::new(
                     "summarize",
@@ -2222,7 +2339,7 @@ impl Orchestrator {
                 );
                 summarize.dependencies = vec!["tool_call".to_string()];
                 summarize.policy = Self::default_policy();
-                graph.add_node(summarize)?;
+                self.add_graph_node(&mut graph, summarize)?;
             }
             TaskType::ExternalProject => {
                 let mut repo_analyze = AgentNode::new(
@@ -2237,7 +2354,7 @@ impl Orchestrator {
                     retry: 1,
                     ..Self::default_policy()
                 };
-                graph.add_node(repo_analyze)?;
+                self.add_graph_node(&mut graph, repo_analyze)?;
 
                 let mut extract = AgentNode::new(
                     "extract",
@@ -2250,7 +2367,7 @@ impl Orchestrator {
                     max_parallelism: 2,
                     ..Self::default_policy()
                 };
-                graph.add_node(extract)?;
+                self.add_graph_node(&mut graph, extract)?;
 
                 let mut context_probe = AgentNode::new(
                     "context_probe",
@@ -2264,7 +2381,7 @@ impl Orchestrator {
                     timeout_ms: 60_000,
                     ..Self::default_policy()
                 };
-                graph.add_node(context_probe)?;
+                self.add_graph_node(&mut graph, context_probe)?;
 
                 let mut code = AgentNode::new(
                     "code",
@@ -2281,7 +2398,7 @@ impl Orchestrator {
                     on_dependency_failure: DependencyFailurePolicy::FailFast,
                     fallback_node: Some("fallback_code".to_string()),
                 };
-                graph.add_node(code)?;
+                self.add_graph_node(&mut graph, code)?;
 
                 let mut fallback_code = AgentNode::new(
                     "fallback_code",
@@ -2291,7 +2408,7 @@ impl Orchestrator {
                 fallback_code.dependencies = vec!["code".to_string()];
                 fallback_code.depth = 4;
                 fallback_code.policy = Self::default_policy();
-                graph.add_node(fallback_code)?;
+                self.add_graph_node(&mut graph, fallback_code)?;
 
                 // Validation node: uses detected commands from repo analysis
                 let mut validate_lint =
@@ -2305,7 +2422,7 @@ impl Orchestrator {
                     fallback_node: Some("fallback_code".to_string()),
                     ..Self::default_policy()
                 };
-                graph.add_node(validate_lint)?;
+                self.add_graph_node(&mut graph, validate_lint)?;
 
                 // summarize omitted — dynamically injected by on_completed
             }
@@ -2321,7 +2438,7 @@ impl Orchestrator {
                     retry: 0,
                     ..ExecutionPolicy::default()
                 };
-                graph.add_node(react_node)?;
+                self.add_graph_node(&mut graph, react_node)?;
 
                 let mut summarize = AgentNode::new(
                     "summarize",
@@ -2330,7 +2447,7 @@ impl Orchestrator {
                 );
                 summarize.dependencies = vec!["interactive".to_string()];
                 summarize.policy = ExecutionPolicy::default();
-                graph.add_node(summarize)?;
+                self.add_graph_node(&mut graph, summarize)?;
             }
             TaskType::CodeGeneration | TaskType::Complex => {
                 // Full graph: plan → extract + context_probe → code → fallback → summarize
@@ -2344,7 +2461,7 @@ impl Orchestrator {
                     max_parallelism: 2,
                     ..Self::default_policy()
                 };
-                graph.add_node(extract)?;
+                self.add_graph_node(&mut graph, extract)?;
 
                 let mut context_probe = AgentNode::new(
                     "context_probe",
@@ -2357,7 +2474,7 @@ impl Orchestrator {
                     timeout_ms: 60_000,
                     ..Self::default_policy()
                 };
-                graph.add_node(context_probe)?;
+                self.add_graph_node(&mut graph, context_probe)?;
 
                 let mut code = AgentNode::new(
                     "code",
@@ -2373,7 +2490,7 @@ impl Orchestrator {
                     on_dependency_failure: DependencyFailurePolicy::FailFast,
                     fallback_node: Some("fallback_code".to_string()),
                 };
-                graph.add_node(code)?;
+                self.add_graph_node(&mut graph, code)?;
 
                 let mut fallback_code = AgentNode::new(
                     "fallback_code",
@@ -2382,7 +2499,7 @@ impl Orchestrator {
                 );
                 fallback_code.dependencies = vec!["code".to_string()];
                 fallback_code.policy = Self::default_policy();
-                graph.add_node(fallback_code)?;
+                self.add_graph_node(&mut graph, fallback_code)?;
 
                 // When validation is configured, insert validate_lint after code.
                 // Summarize is injected dynamically via on_completed.
@@ -2397,7 +2514,7 @@ impl Orchestrator {
                         fallback_node: Some("fallback_code".to_string()),
                         ..Self::default_policy()
                     };
-                    graph.add_node(validate_lint)?;
+                    self.add_graph_node(&mut graph, validate_lint)?;
                     // No static summarize — injected dynamically after validation chain
                 } else {
                     // No validation: keep original static summarize
@@ -2408,7 +2525,7 @@ impl Orchestrator {
                     );
                     summarize.dependencies = vec!["code".to_string(), "fallback_code".to_string()];
                     summarize.policy = Self::default_policy();
-                    graph.add_node(summarize)?;
+                    self.add_graph_node(&mut graph, summarize)?;
                 }
 
                 // Conditional webhook validation
@@ -2424,7 +2541,7 @@ impl Orchestrator {
                         timeout_ms: 60_000,
                         ..Self::default_policy()
                     };
-                    graph.add_node(webhook)?;
+                    self.add_graph_node(&mut graph, webhook)?;
                 }
             }
         }
@@ -2449,6 +2566,7 @@ impl Orchestrator {
         let repo_analysis_config = self.repo_analysis_config.clone();
         let repo_analyses = self.repo_analyses.clone();
         let session_workspace = self.session_workspace.clone();
+        let orchestrator = self.clone();
 
         Arc::new(move |node: AgentNode, deps: Vec<NodeExecutionResult>| {
             let agents = agents.clone();
@@ -2463,6 +2581,7 @@ impl Orchestrator {
             let repo_analysis_config = repo_analysis_config.clone();
             let repo_analyses = repo_analyses.clone();
             let session_workspace = session_workspace.clone();
+            let orchestrator = orchestrator.clone();
 
             async move {
                 let started = Instant::now();
@@ -2471,13 +2590,16 @@ impl Orchestrator {
                 if node.id == "repo_analyze" && node.role == AgentRole::Analyzer {
                     let repo_config = repo_analysis_config.clone();
 
-                    let repo_url = req.repo_url.clone().or_else(|| {
-                        extract_repo_url_from_text(&req.task)
-                    }).or_else(|| {
-                        deps.iter()
-                            .find(|d| d.node_id == "plan" && d.succeeded)
-                            .and_then(|d| extract_repo_url_from_text(&d.output))
-                    });
+                    let repo_url = req
+                        .repo_url
+                        .clone()
+                        .or_else(|| extract_repo_url_from_text(&req.task))
+                        .or_else(|| extract_repo_url_from_text(&node.instructions))
+                        .or_else(|| {
+                            deps.iter()
+                                .find(|d| d.node_id == "plan" && d.succeeded)
+                                .and_then(|d| extract_repo_url_from_text(&d.output))
+                        });
 
                     let Some(url) = repo_url else {
                         return Ok(NodeExecutionResult {
@@ -2490,6 +2612,20 @@ impl Orchestrator {
                             error: Some("missing repo_url".to_string()),
                         });
                     };
+
+                    orchestrator
+                        .record_node_progress(
+                            run_id,
+                            session_id,
+                            node.id.as_str(),
+                            node.role,
+                            "repo_url_resolved",
+                            format!("Resolved repository target: {url}"),
+                            serde_json::json!({
+                                "repo_url": url.clone(),
+                            }),
+                        )
+                        .await;
 
                     let clone_dir = match session_workspace
                         .ensure_scoped_dir(session_id, Some(&repo_config.clone_base_dir))
@@ -2508,7 +2644,30 @@ impl Orchestrator {
                             });
                         }
                     };
-                    let repo_path = match git_manager::GitManager::clone_repo(&url, &clone_dir, repo_config.shallow_clone).await {
+
+                    orchestrator
+                        .record_node_progress(
+                            run_id,
+                            session_id,
+                            node.id.as_str(),
+                            node.role,
+                            "repo_clone_started",
+                            "Cloning or refreshing repository in session workspace",
+                            serde_json::json!({
+                                "repo_url": url.clone(),
+                                "clone_dir": clone_dir.clone(),
+                                "shallow": repo_config.shallow_clone,
+                            }),
+                        )
+                        .await;
+
+                    let repo_path = match git_manager::GitManager::clone_repo(
+                        &url,
+                        &clone_dir,
+                        repo_config.shallow_clone,
+                    )
+                    .await
+                    {
                         Ok(path) => path,
                         Err(e) => {
                             return Ok(NodeExecutionResult {
@@ -2523,6 +2682,21 @@ impl Orchestrator {
                         }
                     };
 
+                    orchestrator
+                        .record_node_progress(
+                            run_id,
+                            session_id,
+                            node.id.as_str(),
+                            node.role,
+                            "repo_clone_completed",
+                            "Repository is ready in the session workspace",
+                            serde_json::json!({
+                                "repo_path": repo_path.clone(),
+                                "shallow": repo_config.shallow_clone,
+                            }),
+                        )
+                        .await;
+
                     event_sink(RuntimeEvent::RepoCloned {
                         node_id: node.id.clone(),
                         repo_path: repo_path.to_string_lossy().to_string(),
@@ -2530,8 +2704,41 @@ impl Orchestrator {
                     });
 
                     let analyzer = repo_analyzer::RepoAnalyzer::new((*repo_config).clone());
+                    orchestrator
+                        .record_node_progress(
+                            run_id,
+                            session_id,
+                            node.id.as_str(),
+                            node.role,
+                            "repo_analysis_started",
+                            "Scanning repository structure and key files",
+                            serde_json::json!({
+                                "repo_path": repo_path.clone(),
+                            }),
+                        )
+                        .await;
                     match analyzer.analyze(&repo_path, &router).await {
                         Ok(analysis) => {
+                            orchestrator
+                                .record_node_progress(
+                                    run_id,
+                                    session_id,
+                                    node.id.as_str(),
+                                    node.role,
+                                    "repo_analysis_completed",
+                                    format!(
+                                        "Repository scan completed: {} files, primary language {}",
+                                        analysis.file_count,
+                                        analysis.tech_stack.primary_language
+                                    ),
+                                    serde_json::json!({
+                                        "repo_path": analysis.repo_path.clone(),
+                                        "file_count": analysis.file_count,
+                                        "primary_language": analysis.tech_stack.primary_language.clone(),
+                                        "key_files": analysis.key_files.clone(),
+                                    }),
+                                )
+                                .await;
                             event_sink(RuntimeEvent::RepoAnalyzed {
                                 node_id: node.id.clone(),
                                 primary_language: analysis.tech_stack.primary_language.clone(),
@@ -2905,6 +3112,27 @@ impl Orchestrator {
                         });
                     }
 
+                    orchestrator
+                        .record_node_progress(
+                            run_id,
+                            session_id,
+                            node.id.as_str(),
+                            node.role,
+                            "tool_catalog_ready",
+                            format!(
+                                "Prepared {} allowed MCP tools for execution",
+                                available_tools.len()
+                            ),
+                            serde_json::json!({
+                                "tool_count": available_tools.len(),
+                                "tools": available_tools
+                                    .iter()
+                                    .map(|tool| tool.name.clone())
+                                    .collect::<Vec<_>>(),
+                            }),
+                        )
+                        .await;
+
                     let allowed_tool_names: HashSet<String> = available_tools
                         .iter()
                         .flat_map(|tool| {
@@ -2958,6 +3186,21 @@ impl Orchestrator {
                     let mut any_failure = false;
 
                     for iteration in 0..MAX_TOOL_ITERATIONS {
+                        orchestrator
+                            .record_node_progress(
+                                run_id,
+                                session_id,
+                                node.id.as_str(),
+                                node.role,
+                                "tool_selection_started",
+                                format!("Selecting tools for iteration {}", iteration + 1),
+                                serde_json::json!({
+                                    "iteration": iteration,
+                                    "prior_result_count": all_results.len(),
+                                }),
+                            )
+                            .await;
+
                         let iteration_context = if all_results.is_empty() {
                             String::new()
                         } else {
@@ -3021,8 +3264,27 @@ impl Orchestrator {
                             .run_role(AgentRole::ToolCaller, selection_input, router.clone())
                             .await;
 
-                        let llm_output = match selection_result {
-                            Ok(output) => output.content,
+                        let (selection_model, llm_output) = match selection_result {
+                            Ok(output) => {
+                                let model = output.model;
+                                orchestrator
+                                    .record_action_event(
+                                        run_id,
+                                        session_id,
+                                        RunActionType::ModelSelected,
+                                        Some("node"),
+                                        Some(node.id.as_str()),
+                                        None,
+                                        serde_json::json!({
+                                            "node_id": node.id.clone(),
+                                            "role": node.role,
+                                            "model": model.clone(),
+                                            "iteration": iteration,
+                                        }),
+                                    )
+                                    .await;
+                                (model, output.content)
+                            }
                             Err(err) => {
                                 return Ok(NodeExecutionResult {
                                     node_id: node.id,
@@ -3038,12 +3300,44 @@ impl Orchestrator {
                             }
                         };
 
+                        orchestrator
+                            .record_node_progress(
+                                run_id,
+                                session_id,
+                                node.id.as_str(),
+                                node.role,
+                                "tool_selection_completed",
+                                format!(
+                                    "Selector produced output for iteration {}",
+                                    iteration + 1
+                                ),
+                                serde_json::json!({
+                                    "iteration": iteration,
+                                    "model": selection_model.clone(),
+                                    "selector_output_preview": summarize_selector_output(&llm_output),
+                                }),
+                            )
+                            .await;
+
                         // Check for DONE signal
                         let trimmed_output = llm_output.trim();
                         if trimmed_output.eq_ignore_ascii_case("done")
                             || trimmed_output == "\"DONE\""
                             || trimmed_output == "\"done\""
                         {
+                            orchestrator
+                                .record_node_progress(
+                                    run_id,
+                                    session_id,
+                                    node.id.as_str(),
+                                    node.role,
+                                    "tool_selection_done",
+                                    "Tool selector indicated that no further tool calls are needed",
+                                    serde_json::json!({
+                                        "iteration": iteration,
+                                    }),
+                                )
+                                .await;
                             break;
                         }
 
@@ -3061,6 +3355,20 @@ impl Orchestrator {
                         if tool_calls.is_empty() {
                             // If we have prior results, treat as implicit completion
                             if !all_results.is_empty() {
+                                orchestrator
+                                    .record_node_progress(
+                                        run_id,
+                                        session_id,
+                                        node.id.as_str(),
+                                        node.role,
+                                        "tool_selection_implicit_done",
+                                        "Selector returned no executable calls after prior results; treating as completion",
+                                        serde_json::json!({
+                                            "iteration": iteration,
+                                            "selector_output_preview": summarize_selector_output(&llm_output),
+                                        }),
+                                    )
+                                    .await;
                                 break;
                             }
                             // No prior results — this is a failure
@@ -3102,6 +3410,26 @@ impl Orchestrator {
                                 .unwrap_or(serde_json::json!({}));
                             let arguments_snapshot = arguments.clone();
 
+                            orchestrator
+                                .record_node_progress(
+                                    run_id,
+                                    session_id,
+                                    node.id.as_str(),
+                                    node.role,
+                                    "mcp_tool_started",
+                                    format!(
+                                        "Calling {} (iteration {})",
+                                        tool_name,
+                                        iteration + 1
+                                    ),
+                                    serde_json::json!({
+                                        "iteration": iteration,
+                                        "tool_name": tool_name.clone(),
+                                        "arguments": arguments_snapshot.clone(),
+                                    }),
+                                )
+                                .await;
+
                             match mcp.call_tool(&tool_name, arguments).await {
                                 Ok(result) => {
                                     let _ = memory
@@ -3113,12 +3441,12 @@ impl Orchestrator {
                                             Some(node.id.as_str()),
                                             None,
                                             serde_json::json!({
-                                                "node_id": node.id,
-                                                "tool_name": tool_name,
-                                                "arguments": arguments_snapshot,
+                                                "node_id": node.id.clone(),
+                                                "tool_name": tool_name.clone(),
+                                                "arguments": arguments_snapshot.clone(),
                                                 "succeeded": result.succeeded,
-                                                "content": result.content,
-                                                "error": result.error,
+                                                "content": result.content.clone(),
+                                                "error": result.error.clone(),
                                                 "duration_ms": result.duration_ms,
                                                 "iteration": iteration,
                                             }),
@@ -3127,6 +3455,26 @@ impl Orchestrator {
                                     if !result.succeeded {
                                         any_failure = true;
                                     }
+                                    orchestrator
+                                        .record_node_progress(
+                                            run_id,
+                                            session_id,
+                                            node.id.as_str(),
+                                            node.role,
+                                            "mcp_tool_completed",
+                                            format!(
+                                                "{} finished with {}",
+                                                tool_name,
+                                                if result.succeeded { "success" } else { "failure" }
+                                            ),
+                                            serde_json::json!({
+                                                "iteration": iteration,
+                                                "tool_name": tool_name.clone(),
+                                                "succeeded": result.succeeded,
+                                                "duration_ms": result.duration_ms,
+                                            }),
+                                        )
+                                        .await;
                                     all_results.push(format!(
                                         "[iter={}] [{}] {}: {}",
                                         iteration,
@@ -3137,6 +3485,22 @@ impl Orchestrator {
                                 }
                                 Err(err) => {
                                     any_failure = true;
+                                    orchestrator
+                                        .record_node_progress(
+                                            run_id,
+                                            session_id,
+                                            node.id.as_str(),
+                                            node.role,
+                                            "mcp_tool_completed",
+                                            format!("{} failed to execute", tool_name),
+                                            serde_json::json!({
+                                                "iteration": iteration,
+                                                "tool_name": tool_name.clone(),
+                                                "succeeded": false,
+                                                "error": err.to_string(),
+                                            }),
+                                        )
+                                        .await;
                                     all_results.push(format!(
                                         "[iter={}] [ERR] {}: {}",
                                         iteration, tool_name, err
@@ -5789,9 +6153,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_skill_route_matches_remote_repo_overview() {
+    async fn auto_skill_route_prefers_local_repo_overview_for_analysis() {
         let (tmp, _memory, orchestrator) = make_test_orchestrator("auto-skill").await;
 
+        orchestrator.skills.insert(
+            "local_repo_overview".to_string(),
+            WorkflowTemplate {
+                id: "local_repo_overview".to_string(),
+                name: "Local Repo Overview".to_string(),
+                description: "Clone and inspect a repository locally.".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                source_run_id: None,
+                graph_template: crate::types::WorkflowGraphTemplate { nodes: vec![] },
+                parameters: vec![],
+                source: crate::types::SkillSource::File,
+            },
+        );
         orchestrator.skills.insert(
             "github_repo_overview".to_string(),
             WorkflowTemplate {
@@ -5814,7 +6192,7 @@ mod tests {
 
         assert_eq!(
             route.as_ref().map(|item| item.workflow_id.as_str()),
-            Some("github_repo_overview")
+            Some("local_repo_overview")
         );
         assert_eq!(
             route
@@ -5823,6 +6201,52 @@ mod tests {
                 .and_then(|value| value.get("repo_url"))
                 .and_then(|value| value.as_str()),
             Some("https://github.com/example/project")
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn auto_skill_route_uses_remote_overview_for_remote_only_requests() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("auto-skill-remote").await;
+
+        orchestrator.skills.insert(
+            "local_repo_overview".to_string(),
+            WorkflowTemplate {
+                id: "local_repo_overview".to_string(),
+                name: "Local Repo Overview".to_string(),
+                description: "Clone and inspect a repository locally.".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                source_run_id: None,
+                graph_template: crate::types::WorkflowGraphTemplate { nodes: vec![] },
+                parameters: vec![],
+                source: crate::types::SkillSource::File,
+            },
+        );
+        orchestrator.skills.insert(
+            "github_repo_overview".to_string(),
+            WorkflowTemplate {
+                id: "github_repo_overview".to_string(),
+                name: "GitHub Repo Overview".to_string(),
+                description: "Analyze a remote GitHub repository.".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                source_run_id: None,
+                graph_template: crate::types::WorkflowGraphTemplate { nodes: vec![] },
+                parameters: vec![],
+                source: crate::types::SkillSource::File,
+            },
+        );
+
+        let route = orchestrator.auto_skill_route(
+            "Analyze https://github.com/example/project without cloning and only use remote metadata",
+            None,
+        );
+
+        assert_eq!(
+            route.as_ref().map(|item| item.workflow_id.as_str()),
+            Some("github_repo_overview")
         );
 
         let _ = std::fs::remove_dir_all(tmp);

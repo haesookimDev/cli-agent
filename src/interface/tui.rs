@@ -1403,6 +1403,20 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, sta
             lines.push(Line::from(format!("{action}: {count}")));
         }
 
+        let progress_updates = build_progress_updates(trace, 6);
+        if !progress_updates.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Current Activity",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for item in progress_updates {
+                lines.push(Line::from(item));
+            }
+        }
+
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Recent Actions",
@@ -2086,6 +2100,47 @@ fn build_action_mix(trace: &RunTrace, top_n: usize) -> Vec<(String, usize)> {
     let mut items = counts.into_iter().collect::<Vec<_>>();
     items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     items.into_iter().take(top_n).collect()
+}
+
+fn build_progress_updates(trace: &RunTrace, max_items: usize) -> Vec<String> {
+    let mut items = trace
+        .events
+        .iter()
+        .rev()
+        .filter(|event| event.action.to_string() == "node_progress")
+        .filter_map(|event| {
+            let node_id = event
+                .payload
+                .get("node_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or(event.actor_id.as_deref().unwrap_or("-"));
+            let stage = event
+                .payload
+                .get("stage")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let message = event
+                .payload
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+
+            if message.is_empty() {
+                None
+            } else if stage.is_empty() {
+                Some(format!("{node_id}: {}", compact_json(message, 52)))
+            } else {
+                Some(format!(
+                    "{node_id} [{stage}]: {}",
+                    compact_json(message, 46)
+                ))
+            }
+        })
+        .take(max_items)
+        .collect::<Vec<_>>();
+    items.reverse();
+    items
 }
 
 fn lane_marker(status: &str) -> char {
