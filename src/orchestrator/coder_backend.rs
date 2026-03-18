@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -226,12 +226,16 @@ impl CoderBackend for CodexBackend {
             .arg("--output-last-message")
             .arg(&output_path)
             .args(&self.args)
-            .arg(task)
+            .arg("-")
             .current_dir(working_dir)
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(task.as_bytes()).await?;
+        }
         let stdout = child
             .stdout
             .take()

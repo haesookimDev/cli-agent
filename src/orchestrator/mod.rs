@@ -71,6 +71,13 @@ struct RunControl {
     pause_requested: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone)]
+struct AutoSkillRoute {
+    workflow_id: String,
+    params: Option<serde_json::Value>,
+    reason: String,
+}
+
 const MAX_COMPLETION_CONTINUATIONS: u8 = 2;
 const DYNAMIC_SUBTASK_MAX_PARALLELISM: usize = 4;
 
@@ -140,6 +147,154 @@ impl Orchestrator {
 
     pub fn get_skill(&self, id: &str) -> Option<WorkflowTemplate> {
         self.skills.get(id).map(|e| e.value().clone())
+    }
+
+    fn build_workflow_graph_from_template(
+        &self,
+        template: &WorkflowTemplate,
+    ) -> anyhow::Result<ExecutionGraph> {
+        let mut graph = ExecutionGraph::new(self.max_graph_depth);
+        for wn in &template.graph_template.nodes {
+            let node = workflow_node_to_agent_node(wn)?;
+            graph.add_node(node)?;
+        }
+        Ok(graph)
+    }
+
+    async fn materialize_workflow_template(
+        &self,
+        workflow_id: &str,
+        params: Option<&serde_json::Value>,
+    ) -> anyhow::Result<WorkflowTemplate> {
+        let template = match self.skills.get(workflow_id) {
+            Some(t) => t.value().clone(),
+            None => self
+                .memory
+                .get_workflow(workflow_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("workflow/skill not found: {workflow_id}"))?,
+        };
+
+        let param_map: HashMap<String, String> = params
+            .and_then(|value| value.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_str().unwrap_or(&v.to_string()).to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(skill_loader::interpolate_params(&template, &param_map))
+    }
+
+    fn auto_skill_route(&self, task: &str, repo_url: Option<&str>) -> Option<AutoSkillRoute> {
+        if self.skills.is_empty() {
+            return None;
+        }
+
+        let lower = task.to_lowercase();
+        let detected_repo_url = repo_url
+            .map(|value| value.to_string())
+            .or_else(|| extract_repo_url_from_text(task));
+
+        let explicit_skill_id = self
+            .skills
+            .iter()
+            .map(|entry| entry.value().clone())
+            .find(|skill| {
+                lower.contains(skill.id.to_lowercase().as_str())
+                    || lower.contains(skill.name.to_lowercase().as_str())
+            })
+            .map(|skill| skill.id);
+
+        if let Some(skill_id) = explicit_skill_id {
+            let params = match skill_id.as_str() {
+                "git_clone_repo" => detected_repo_url.as_ref().map(|url| {
+                    serde_json::json!({
+                        "repo_url": url,
+                        "target_dir": infer_clone_target_dir(url),
+                    })
+                }),
+                "github_repo_overview" => detected_repo_url
+                    .as_ref()
+                    .map(|url| serde_json::json!({ "repo_url": url })),
+                _ => Some(serde_json::json!({})),
+            };
+
+            if let Some(params) = params {
+                return Some(AutoSkillRoute {
+                    workflow_id: skill_id,
+                    params: if params == serde_json::json!({}) {
+                        None
+                    } else {
+                        Some(params)
+                    },
+                    reason: "explicit_skill_match".to_string(),
+                });
+            }
+        }
+
+        if self.skills.contains_key("git_clone_repo")
+            && detected_repo_url.is_some()
+            && contains_any_keyword(
+                lower.as_str(),
+                &["clone", "clon", "fetch", "checkout", "복제", "클론", "가져와"],
+            )
+        {
+            let url = detected_repo_url?;
+            let target_dir = infer_clone_target_dir(url.as_str());
+            return Some(AutoSkillRoute {
+                workflow_id: "git_clone_repo".to_string(),
+                params: Some(serde_json::json!({
+                    "repo_url": url,
+                    "target_dir": target_dir,
+                })),
+                reason: "clone_skill_auto_route".to_string(),
+            });
+        }
+
+        if self.skills.contains_key("github_repo_overview")
+            && detected_repo_url.is_some()
+            && !contains_any_keyword(
+                lower.as_str(),
+                &["clone", "checkout", "patch", "fix", "modify", "edit", "수정", "클론"],
+            )
+            && contains_any_keyword(
+                lower.as_str(),
+                &[
+                    "analyze",
+                    "analysis",
+                    "overview",
+                    "summary",
+                    "summarize",
+                    "architecture",
+                    "structure",
+                    "stack",
+                    "repo",
+                    "repository",
+                    "프로젝트",
+                    "리포지토리",
+                    "분석",
+                    "요약",
+                    "개요",
+                    "구조",
+                ],
+            )
+        {
+            let url = detected_repo_url?;
+            return Some(AutoSkillRoute {
+                workflow_id: "github_repo_overview".to_string(),
+                params: Some(serde_json::json!({ "repo_url": url })),
+                reason: "github_repo_overview_auto_route".to_string(),
+            });
+        }
+
+        None
     }
 
     pub async fn list_coder_sessions(
@@ -466,12 +621,39 @@ impl Orchestrator {
         let mut req = req;
         req.session_id = Some(session_id);
 
+        let auto_route = if req.workflow_id.is_none() {
+            self.auto_skill_route(req.task.as_str(), req.repo_url.as_deref())
+        } else {
+            None
+        };
+
+        if let Some(route) = auto_route.as_ref() {
+            req.workflow_id = Some(route.workflow_id.clone());
+            req.workflow_params = route.params.clone();
+        }
+
+        if let Some(workflow_id) = req.workflow_id.clone() {
+            let template = self
+                .materialize_workflow_template(&workflow_id, req.workflow_params.as_ref())
+                .await?;
+            let graph = self.build_workflow_graph_from_template(&template)?;
+            self.workflow_graphs.insert(run_id, graph);
+        }
+
         self.create_session(session_id).await?;
 
         let mut record = RunRecord::new_queued(run_id, session_id, req.task.clone(), req.profile);
         record
             .timeline
             .push(format!("{} run queued", Utc::now().to_rfc3339()));
+        if let Some(route) = auto_route.as_ref() {
+            record.timeline.push(format!(
+                "{} auto-routed to skill '{}' ({})",
+                Utc::now().to_rfc3339(),
+                route.workflow_id,
+                route.reason,
+            ));
+        }
 
         self.runs.insert(run_id, record.clone());
         self.memory.upsert_run(&record).await?;
@@ -492,7 +674,14 @@ impl Orchestrator {
             None,
             serde_json::json!({
                 "profile": req.profile,
-                "task": req.task,
+                "task": req.task.clone(),
+                "workflow_id": req.workflow_id.clone(),
+                "workflow_params": req.workflow_params.clone(),
+                "routing": auto_route.as_ref().map(|route| serde_json::json!({
+                    "type": "skill",
+                    "workflow_id": route.workflow_id.clone(),
+                    "reason": route.reason.clone(),
+                })),
             }),
         )
         .await;
@@ -1027,7 +1216,7 @@ impl Orchestrator {
                  ORIGINAL TASK:\n{}\n\n\
                  REMAINING GAP:\n{}\n\n\
                  PREVIOUS SUCCESSFUL OUTPUTS:\n{}\n\n\
-                 Return a JSON object matching exactly this schema:\n\
+                 Return a JSON SubtaskPlan object matching exactly this schema:\n\
                  {{\"subtasks\":[{{\"id\":\"string\",\"description\":\"string\",\"agent_role\":\"planner|extractor|coder|summarizer|fallback|tool_caller|analyzer|reviewer|scheduler|config_manager|validator\",\"dependencies\":[\"node_id\"],\"instructions\":\"string\",\"mcp_tools\":[\"server/tool\"]}}]}}\n\n\
                  Rules:\n\
                  - Cover only the remaining requirements.\n\
@@ -2661,27 +2850,57 @@ impl Orchestrator {
                         .map(|d| format!("{}: {}", d.node_id, d.output))
                         .collect();
 
-                    let available_tools = mcp.list_all_tools().await;
-                    let tool_list_str = available_tools
+                    let all_tools = mcp.list_all_tools().await;
+                    let available_tools = if node.mcp_tools.is_empty() {
+                        all_tools
+                    } else {
+                        skill_loader::filter_tools_for_node(&all_tools, &node.mcp_tools)
+                    };
+                    if available_tools.is_empty() {
+                        return Ok(NodeExecutionResult {
+                            node_id: node.id,
+                            role: node.role,
+                            model: "mcp:none".to_string(),
+                            output: "No MCP tools are available for this tool-caller node".to_string(),
+                            duration_ms: started.elapsed().as_millis(),
+                            succeeded: false,
+                            error: Some("No allowed MCP tools available".to_string()),
+                        });
+                    }
+
+                    let allowed_tool_names: HashSet<String> = available_tools
                         .iter()
-                        .map(|t| {
-                            format!(
-                                "- {} : {} | schema: {}",
-                                t.name,
-                                t.description,
-                                serde_json::to_string(&t.input_schema).unwrap_or_default()
-                            )
+                        .flat_map(|tool| {
+                            let bare = tool
+                                .name
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(tool.name.as_str())
+                                .to_string();
+                            [tool.name.clone(), bare]
                         })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                        .collect();
+                    let tool_list_str = format_tool_catalog(&available_tools);
 
                     let server_descs = mcp.server_descriptions();
                     let server_guide = if !server_descs.is_empty() {
+                        let allowed_servers: HashSet<&str> = available_tools
+                            .iter()
+                            .filter_map(|tool| tool.name.split('/').next())
+                            .collect();
                         let lines: Vec<String> = server_descs
                             .iter()
+                            .filter(|(name, _)| {
+                                allowed_servers.is_empty()
+                                    || allowed_servers.contains(name.as_str())
+                            })
                             .map(|(name, desc)| format!("- {}: {}", name, desc))
                             .collect();
-                        format!("\n\nSERVER SELECTION GUIDE:\n{}", lines.join("\n"))
+                        if lines.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n\nSERVER SELECTION GUIDE:\n{}", lines.join("\n"))
+                        }
                     } else {
                         String::new()
                     };
@@ -2715,10 +2934,12 @@ impl Orchestrator {
                         let selection_prompt = format!(
                             "You are the tool caller agent.\n\n\
                              USER TASK:\n{}\n\n\
-                             PLANNER OUTPUT:\n{}\n\n\
+                             NODE INSTRUCTIONS:\n{}\n\n\
+                             DEPENDENCY OUTPUTS:\n{}\n\n\
                              AVAILABLE MCP TOOLS:\n{}{}{}{}\n\n\
                              INSTRUCTIONS:\n\
                              - Select the NEXT tool call(s) needed to complete the task.\n\
+                             - You MUST obey the node instructions and stay within the allowed MCP tools.\n\
                              - You may use results from previous iterations to inform arguments.\n\
                              - If the task requires sequential steps (e.g., read a value, then use it), \
                                select only the NEXT step's tool(s) in this iteration.\n\
@@ -2726,7 +2947,12 @@ impl Orchestrator {
                              Respond ONLY with a JSON array of tool calls, OR the word DONE.\n\
                              Each element: {{\"tool_name\": \"server/tool_name\", \"arguments\": {{...}}}}",
                             req.task,
-                            dep_outputs.join("\n---\n"),
+                            node.instructions,
+                            if dep_outputs.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                dep_outputs.join("\n---\n")
+                            },
                             tool_list_str,
                             server_guide,
                             local_first_hint,
@@ -2817,6 +3043,14 @@ impl Orchestrator {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown")
                                 .to_string();
+                            if !allowed_tool_names.contains(&tool_name) {
+                                any_failure = true;
+                                all_results.push(format!(
+                                    "[iter={}] [ERR] {}: tool is not allowed for this node",
+                                    iteration, tool_name
+                                ));
+                                continue;
+                            }
                             let arguments = call
                                 .get("arguments")
                                 .cloned()
@@ -3387,6 +3621,7 @@ impl Orchestrator {
                                     sub_node.dependencies = vec![node.id.clone()];
                                 }
                                 sub_node.depth = node.depth + 1;
+                                sub_node.mcp_tools = subtask.mcp_tools.clone();
                                 sub_node.policy = ExecutionPolicy {
                                     max_parallelism: DYNAMIC_SUBTASK_MAX_PARALLELISM,
                                     retry: 1,
@@ -4239,30 +4474,10 @@ impl Orchestrator {
         params: Option<serde_json::Value>,
         session_id: Option<Uuid>,
     ) -> anyhow::Result<RunSubmission> {
-        let template = match self.skills.get(workflow_id) {
-            Some(t) => t.value().clone(),
-            None => self.memory
-                .get_workflow(workflow_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("workflow/skill not found: {workflow_id}"))?,
-        };
-
-        let param_map: std::collections::HashMap<String, String> = params
-            .as_ref()
-            .and_then(|p| p.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or(&v.to_string()).to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let template = skill_loader::interpolate_params(&template, &param_map);
-
-        let mut graph = ExecutionGraph::new(self.max_graph_depth);
-        for wn in &template.graph_template.nodes {
-            let node = workflow_node_to_agent_node(wn)?;
-            graph.add_node(node)?;
-        }
+        let template = self
+            .materialize_workflow_template(workflow_id, params.as_ref())
+            .await?;
+        let graph = self.build_workflow_graph_from_template(&template)?;
 
         let task = format!(
             "Workflow: {} ({})",
@@ -5045,6 +5260,85 @@ fn estimate_node_end(
     None
 }
 
+fn contains_any_keyword(haystack: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|keyword| haystack.contains(keyword))
+}
+
+fn infer_clone_target_dir(repo_url: &str) -> String {
+    let candidate = repo_url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("cloned-repo")
+        .trim_end_matches(".git")
+        .trim()
+        .to_string()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect::<String>()
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .trim_matches('.')
+        .trim()
+        .to_string();
+
+    if candidate.is_empty() {
+        "cloned-repo".to_string()
+    } else {
+        candidate
+    }
+}
+
+fn format_tool_catalog(tools: &[McpToolDefinition]) -> String {
+    tools
+        .iter()
+        .map(|tool| {
+            format!(
+                "- {}: {} | {}",
+                tool.name,
+                tool.description,
+                summarize_tool_input_schema(&tool.input_schema)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn summarize_tool_input_schema(schema: &serde_json::Value) -> String {
+    let properties = schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .map(|properties| {
+            let mut keys = properties.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            keys
+        })
+        .unwrap_or_default();
+
+    let required = schema
+        .get("required")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    match (properties.is_empty(), required.is_empty()) {
+        (true, true) => "args: none".to_string(),
+        (false, true) => format!("args: {}", properties.join(", ")),
+        (false, false) => format!(
+            "args: {} | required: {}",
+            properties.join(", "),
+            required.join(", ")
+        ),
+        (true, false) => format!("required: {}", required.join(", ")),
+    }
+}
+
 fn parse_agent_role(value: &str) -> Option<AgentRole> {
     match value {
         "planner" => Some(AgentRole::Planner),
@@ -5091,6 +5385,10 @@ fn parse_tool_calls(raw: &str) -> Vec<serde_json::Value> {
         }
     }
 
+    if parsed.is_empty() {
+        parsed.extend(tool_augment::extract_tool_calls(trimmed));
+    }
+
     let mut seen = HashSet::<String>::new();
     let mut deduped = Vec::new();
     for call in parsed {
@@ -5126,6 +5424,10 @@ fn collect_tool_calls(value: serde_json::Value, out: &mut Vec<serde_json::Value>
         serde_json::Value::Object(map) => {
             if map.contains_key("tool_name") {
                 out.push(serde_json::Value::Object(map));
+            } else {
+                for value in map.into_values() {
+                    collect_tool_calls(value, out);
+                }
             }
         }
         _ => {}
@@ -5137,6 +5439,57 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    async fn make_test_orchestrator(
+        suffix: &str,
+    ) -> (
+        std::path::PathBuf,
+        Arc<MemoryManager>,
+        Orchestrator,
+    ) {
+        let tmp = std::env::temp_dir().join(format!("agent-{suffix}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let memory = Arc::new(
+            MemoryManager::new(
+                tmp.join("sessions"),
+                format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
+            )
+            .await
+            .unwrap(),
+        );
+        let auth = Arc::new(crate::webhook::AuthManager::new("k", "s", 300));
+        let webhook = Arc::new(crate::webhook::WebhookDispatcher::new(
+            memory.clone(),
+            auth,
+            Duration::from_secs(1),
+        ));
+
+        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
+        let mut coder_mgr = coder_backend::CoderSessionManager::new(
+            memory.clone(),
+            std::path::PathBuf::new(),
+            crate::types::CoderBackendKind::Llm,
+        );
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
+        let orchestrator = Orchestrator::new(
+            AgentRuntime::new(4),
+            AgentRegistry::builtin(),
+            router,
+            memory.clone(),
+            Arc::new(ContextManager::new(8_000)),
+            webhook,
+            6,
+            Arc::new(McpRegistry::new()),
+            Arc::new(coder_mgr),
+            Arc::new(ValidationConfig::default()),
+            Arc::new(RepoAnalysisConfig::default()),
+            crate::session_workspace::SessionWorkspaceManager::new(tmp.join("repo")),
+            None,
+        );
+
+        (tmp, memory, orchestrator)
+    }
 
     #[test]
     fn workflow_node_to_agent_node_preserves_git_commands() {
@@ -5182,48 +5535,121 @@ mod tests {
         assert!(err.to_string().contains("validator"));
     }
 
+    #[test]
+    fn infer_clone_target_dir_uses_repo_name() {
+        assert_eq!(
+            infer_clone_target_dir("https://github.com/openai/cli-agent.git"),
+            "cli-agent".to_string()
+        );
+    }
+
+    #[test]
+    fn summarize_tool_input_schema_reports_properties_and_required() {
+        let summary = summarize_tool_input_schema(&serde_json::json!({
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "required": ["owner", "repo"]
+        }));
+
+        assert!(summary.contains("args: owner, path, repo"));
+        assert!(summary.contains("required: owner, repo"));
+    }
+
     #[tokio::test]
-    async fn graph_builder_respects_depth_and_dependencies() {
-        let tmp = std::env::temp_dir().join(format!("agent-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
+    async fn auto_skill_route_matches_remote_repo_overview() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("auto-skill").await;
 
-        let memory = Arc::new(
-            MemoryManager::new(
-                tmp.join("sessions"),
-                format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
-            )
-            .await
-            .unwrap(),
+        orchestrator.skills.insert(
+            "github_repo_overview".to_string(),
+            WorkflowTemplate {
+                id: "github_repo_overview".to_string(),
+                name: "GitHub Repo Overview".to_string(),
+                description: "Analyze a remote GitHub repository.".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                source_run_id: None,
+                graph_template: crate::types::WorkflowGraphTemplate { nodes: vec![] },
+                parameters: vec![],
+                source: crate::types::SkillSource::File,
+            },
         );
-        let auth = Arc::new(crate::webhook::AuthManager::new("k", "s", 300));
-        let webhook = Arc::new(crate::webhook::WebhookDispatcher::new(
-            memory.clone(),
-            auth,
-            Duration::from_secs(1),
-        ));
 
-        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
-        let mut coder_mgr = coder_backend::CoderSessionManager::new(
-            memory.clone(),
-            std::env::temp_dir(),
-            crate::types::CoderBackendKind::Llm,
-        );
-        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
-        let orchestrator = Orchestrator::new(
-            AgentRuntime::new(4),
-            AgentRegistry::builtin(),
-            router,
-            memory,
-            Arc::new(ContextManager::new(8_000)),
-            webhook,
-            6,
-            Arc::new(McpRegistry::new()),
-            Arc::new(coder_mgr),
-            Arc::new(ValidationConfig::default()),
-            Arc::new(RepoAnalysisConfig::default()),
-            crate::session_workspace::SessionWorkspaceManager::new(tmp.join("repo")),
+        let route = orchestrator.auto_skill_route(
+            "Analyze https://github.com/example/project and summarize the architecture",
             None,
         );
+
+        assert_eq!(
+            route.as_ref().map(|item| item.workflow_id.as_str()),
+            Some("github_repo_overview")
+        );
+        assert_eq!(
+            route
+                .as_ref()
+                .and_then(|item| item.params.as_ref())
+                .and_then(|value| value.get("repo_url"))
+                .and_then(|value| value.as_str()),
+            Some("https://github.com/example/project")
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn planner_subtasks_preserve_mcp_tool_allowlist() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("subtask-allowlist").await;
+
+        let on_completed = orchestrator.build_on_completed_fn(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "Inspect a remote repository".to_string(),
+        );
+        let result = on_completed(
+            AgentNode::new("plan", AgentRole::Planner, "plan"),
+            NodeExecutionResult {
+                node_id: "plan".to_string(),
+                role: AgentRole::Planner,
+                model: "mock:model".to_string(),
+                output: serde_json::json!({
+                    "subtasks": [
+                        {
+                            "id": "repo_meta",
+                            "description": "Read repo metadata",
+                            "agent_role": "tool_caller",
+                            "dependencies": [],
+                            "instructions": "Inspect GitHub metadata",
+                            "mcp_tools": ["github/get_file_contents", "github/list_commits"]
+                        }
+                    ]
+                })
+                .to_string(),
+                duration_ms: 1,
+                succeeded: true,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].mcp_tools,
+            vec![
+                "github/get_file_contents".to_string(),
+                "github/list_commits".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn graph_builder_respects_depth_and_dependencies() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("graph-builder").await;
 
         let no_servers: Vec<String> = vec![];
         let no_tools: Vec<String> = vec![];
@@ -5262,11 +5688,13 @@ mod tests {
                 None,
                 None,
                 None,
-            )
-            .await
-            .unwrap();
+        )
+        .await
+        .unwrap();
         assert!(analysis.node("plan").is_some());
         assert!(analysis.node("analyze").is_some());
+
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[tokio::test]
@@ -5708,6 +6136,29 @@ mod tests {
         assert_eq!(
             calls[0].get("tool_name").and_then(|v| v.as_str()),
             Some("filesystem/list_directory")
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_accepts_wrapped_tool_calls_array() {
+        let raw = r#"{"tool_calls":[{"tool_name":"github/get_file_contents","arguments":{"owner":"haesookimDev","repo":"DevGarden","path":"README.md"}}]}"#;
+        let calls = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("tool_name").and_then(|v| v.as_str()),
+            Some("github/get_file_contents")
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_accepts_tool_call_tags() {
+        let raw = r#"Analysis first.
+<tool_call>{"tool_name":"github/list_commits","arguments":{"owner":"haesookimDev","repo":"DevGarden","perPage":5}}</tool_call>"#;
+        let calls = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("tool_name").and_then(|v| v.as_str()),
+            Some("github/list_commits")
         );
     }
 }

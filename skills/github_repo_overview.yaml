@@ -1,0 +1,34 @@
+name: GitHub Repo Overview
+description: Analyze a remote GitHub repository via MCP without cloning it locally. Use when the user wants a source-grounded overview, architecture summary, setup notes, or repo scan for a GitHub URL.
+parameters:
+  - name: repo_url
+    description: GitHub repository URL to inspect.
+    default_value:
+nodes:
+  - id: inspect_remote_repo
+    role: tool_caller
+    instructions: |
+      Analyze the remote GitHub repository {{repo_url}} using only the allowed MCP tools.
+
+      Goals:
+      - Confirm repo metadata and recent activity.
+      - Read README and high-signal docs first.
+      - Inspect manifests, configs, and likely entry points.
+      - Gather enough evidence for a concise technical overview.
+
+      Rules:
+      - Do not clone the repository locally.
+      - Prefer github/* tools over web search.
+      - Use duckduckgo/duckduckgo_web_search only if repo files are insufficient.
+      - Stop after the overview is well supported by repository sources.
+    mcp_tools:
+      - github/get_file_contents
+      - github/search_code
+      - github/list_commits
+      - github/list_issues
+      - duckduckgo/duckduckgo_web_search
+  - id: summarize_remote_repo
+    role: summarizer
+    instructions: Summarize the remote repository analysis from dependency outputs. Produce a concise, source-grounded overview that covers project purpose, structure, stack, build or run workflow, and notable risks or documentation gaps. If access failed, state the concrete blocker.
+    dependencies:
+      - inspect_remote_repo

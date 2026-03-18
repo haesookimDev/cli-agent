@@ -15,14 +15,21 @@ impl CommandRunner {
         timeout_ms: u64,
     ) -> anyhow::Result<ValidationResult> {
         let started = Instant::now();
-        let parts = shell_words::split(command)?;
-        let (program, args) = parts
-            .split_first()
-            .ok_or_else(|| anyhow::anyhow!("empty command"))?;
+        if command.trim().is_empty() {
+            anyhow::bail!("empty command");
+        }
 
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .current_dir(working_dir)
+        let mut cmd = if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/C").arg(command);
+            cmd
+        } else {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-lc").arg(command);
+            cmd
+        };
+
+        cmd.current_dir(working_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 

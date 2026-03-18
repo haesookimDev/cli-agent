@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use dashmap::DashSet;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -269,6 +270,9 @@ impl ModelRouter {
         let mut scored = Vec::<(ModelSpec, f64)>::new();
         for model in self.catalog.iter() {
             if model.context_window < constraints.min_context {
+                continue;
+            }
+            if self.client.disabled.contains(&model.provider) {
                 continue;
             }
             if self.client.is_model_disabled(&model.model_id) {
@@ -723,11 +727,26 @@ impl ProviderClient {
         mut cmd: Command,
         timeout: Duration,
         label: &str,
+        stdin_payload: Option<&str>,
     ) -> anyhow::Result<std::process::Output> {
-        tokio::time::timeout(timeout, cmd.output())
+        if stdin_payload.is_some() {
+            cmd.stdin(std::process::Stdio::piped());
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| anyhow::anyhow!("{label} failed to spawn: {err}"))?;
+
+        if let Some(payload) = stdin_payload {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(payload.as_bytes()).await?;
+            }
+        }
+
+        tokio::time::timeout(timeout, child.wait_with_output())
             .await
             .map_err(|_| anyhow::anyhow!("{label} timed out after {:?}", timeout))?
-            .map_err(|err| anyhow::anyhow!("{label} failed to spawn: {err}"))
+            .map_err(|err| anyhow::anyhow!("{label} failed while waiting: {err}"))
     }
 
     fn decode_cli_text(bytes: &[u8]) -> String {
@@ -767,7 +786,7 @@ impl ProviderClient {
             .current_dir(self.cli_working_dir());
 
         let output = self
-            .run_cli_command(cmd, config.timeout, "Claude Code CLI")
+            .run_cli_command(cmd, config.timeout, "Claude Code CLI", None)
             .await?;
         Self::ensure_cli_success("Claude Code CLI", &output)?;
 
@@ -786,10 +805,12 @@ impl ProviderClient {
             .arg("--output-last-message")
             .arg(&output_path)
             .args(&config.args)
-            .arg(prompt)
+            .arg("-")
             .current_dir(self.cli_working_dir());
 
-        let output = self.run_cli_command(cmd, config.timeout, "Codex CLI").await?;
+        let output = self
+            .run_cli_command(cmd, config.timeout, "Codex CLI", Some(prompt))
+            .await?;
         let file_output = tokio::fs::read_to_string(&output_path).await.ok();
         let _ = tokio::fs::remove_file(&output_path).await;
 
@@ -1286,7 +1307,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.used_fallback);
+        assert_eq!(result.provider, ProviderKind::Mock);
+        assert!(!result.used_fallback);
     }
 
     #[test]
