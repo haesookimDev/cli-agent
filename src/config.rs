@@ -260,7 +260,7 @@ impl AppConfig {
 
         let repo_analysis = RepoAnalysisConfig {
             clone_base_dir: env::var("REPO_CLONE_DIR")
-                .unwrap_or_else(|_| data_dir.join("repos").to_string_lossy().to_string()),
+                .unwrap_or_else(|_| "repos".to_string()),
             shallow_clone: env::var("REPO_SHALLOW_CLONE")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
@@ -328,9 +328,9 @@ impl AppConfig {
                 self.session_dir.display()
             )
         })?;
-        let repo_dir = std::path::PathBuf::from(&self.repo_analysis.clone_base_dir);
+        let repo_dir = self.data_dir.join("repo");
         std::fs::create_dir_all(&repo_dir).with_context(|| {
-            format!("failed to create repo clone dir {}", repo_dir.display())
+            format!("failed to create session workspace root {}", repo_dir.display())
         })?;
         Ok(())
     }

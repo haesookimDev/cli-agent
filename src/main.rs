@@ -23,6 +23,7 @@ use cli_agent::orchestrator::coder_backend::{
 use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
 use cli_agent::scheduler::CronScheduler;
+use cli_agent::session_workspace::SessionWorkspaceManager;
 use cli_agent::terminal::TerminalManager;
 use cli_agent::types::{CoderBackendKind, RunRequest, TaskProfile};
 use cli_agent::webhook::{AuthManager, WebhookDispatcher};
@@ -95,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         cli_model.clone(),
     ));
     let context = Arc::new(ContextManager::new(cfg.max_context_tokens));
+    let session_workspace = SessionWorkspaceManager::new(cfg.data_dir.join("repo"));
     let auth = Arc::new(AuthManager::new(
         cfg.api_key.clone(),
         cfg.api_secret.clone(),
@@ -145,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.coder_working_dir
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            .unwrap_or_default(),
         cfg.coder_backend,
     );
     coder_mgr.register_backend(Arc::new(LlmCoderBackend::new(router.clone())));
@@ -183,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         coder_manager,
         validation_config,
         repo_analysis_config,
+        session_workspace.clone(),
         skills_dir.clone(),
     );
     orchestrator.load_persisted_settings().await;
@@ -265,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
             println!("serving on http://{addr}");
             println!("  web client: http://{addr}/web-client");
             println!("  dashboard:  http://{addr}/dashboard");
-            let terminal = TerminalManager::new();
+            let terminal = TerminalManager::new(session_workspace.clone());
             api::serve(
                 addr,
                 ApiState {

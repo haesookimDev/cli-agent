@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
+use crate::session_workspace::SessionWorkspaceManager;
+
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
     Output(Vec<u8>),
@@ -58,12 +60,14 @@ pub struct TerminalSessionInfo {
 #[derive(Clone)]
 pub struct TerminalManager {
     sessions: Arc<DashMap<String, Arc<TerminalSession>>>,
+    session_workspace: SessionWorkspaceManager,
 }
 
 impl TerminalManager {
-    pub fn new() -> Self {
+    pub fn new(session_workspace: SessionWorkspaceManager) -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
+            session_workspace,
         }
     }
 
@@ -89,6 +93,11 @@ impl TerminalManager {
         let resolved_command_str = resolved_command.to_string_lossy().into_owned();
         let mut cmd = CommandBuilder::new(&resolved_command_str);
         cmd.args(args);
+        if let Some(session_id) = session_id {
+            let cwd = self.session_workspace.session_dir(session_id);
+            std::fs::create_dir_all(&cwd)?;
+            cmd.cwd(cwd);
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
         let writer = pair.master.take_writer()?;

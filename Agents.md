@@ -72,6 +72,11 @@
 - `submit_run`에서 생성/확정한 `session_id`는 `execute_run`까지 동일하게 전달되어야 한다.
 - 새 세션 실행에서 `session_id`를 다시 생성하면 사용자 메시지가 다른 세션으로 저장되어 새로고침 시 대화가 사라지는 문제가 발생한다.
 
+### Session Workspace Isolation
+- 세션별 파일 산출물, git clone 결과, 기본 작업 디렉터리는 `data/repo/<session_id>/` 아래에서 관리되어야 한다.
+- validator/coder/terminal/external repo clone 경로 결정 시 전역 공유 작업 디렉터리를 기본값으로 사용하면 안 되며, 반드시 세션 workspace 기준으로 resolve해야 한다.
+- 다른 세션에서 기존 산출물을 재사용하려면 대상 세션 workspace로 명시적으로 복사해야 하며, 세션 간 공유 mutable workspace를 암묵적으로 허용하면 안 된다.
+
 ### Follow-up Context Anchoring
 - 짧은 후속 발화(예: `로컬에 있어`)도 독립 질의로 처리하지 말고, 직전 사용자 메시지와 최근 run 결과 요약을 실행 컨텍스트(`History`)에 주입해야 한다.
 - 세션 메모리 검색 시 후속 발화로 판단되면 검색 쿼리를 `현재 입력 + 직전 사용자 입력`으로 확장해 recall 저하를 방지한다.

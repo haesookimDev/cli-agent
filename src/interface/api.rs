@@ -2225,13 +2225,24 @@ async fn create_terminal_handler(
         }
     };
 
+    let effective_session_id = if let Some(session_id) = req.session_id {
+        Some(session_id)
+    } else if let Some(run_id) = req.run_id {
+        match state.orchestrator.get_run(run_id).await {
+            Ok(Some(run)) => Some(run.session_id),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     match state.terminal.spawn(
         &req.command,
         &req.args,
         req.cols,
         req.rows,
         req.run_id,
-        req.session_id,
+        effective_session_id,
     ) {
         Ok(id) => (StatusCode::OK, Json(serde_json::json!({"id": id}))),
         Err(err) => (

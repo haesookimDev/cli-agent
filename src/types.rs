@@ -908,7 +908,7 @@ pub struct RepoAnalysisConfig {
 impl Default for RepoAnalysisConfig {
     fn default() -> Self {
         Self {
-            clone_base_dir: "data/repos".to_string(),
+            clone_base_dir: "repos".to_string(),
             shallow_clone: true,
             max_files_to_scan: 5000,
             max_file_size_bytes: 100_000,

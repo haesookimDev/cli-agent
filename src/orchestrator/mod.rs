@@ -32,6 +32,7 @@ use crate::runtime::{
     ShouldCancelFn, ShouldPauseFn,
 };
 use crate::router::ProviderKind;
+use crate::session_workspace::SessionWorkspaceManager;
 use crate::types::{
     AgentExecutionRecord, AgentRole, AppSettings, ChatMessage, ChatRole, CliModelConfig,
     KnowledgeItem, McpToolDefinition, NodeTraceState, RepoAnalysis,
@@ -61,6 +62,7 @@ pub struct Orchestrator {
     repo_analysis_config: Arc<RepoAnalysisConfig>,
     repo_analyses: Arc<DashMap<Uuid, RepoAnalysis>>,
     skills: Arc<DashMap<String, WorkflowTemplate>>,
+    session_workspace: SessionWorkspaceManager,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,7 @@ impl Orchestrator {
         coder_manager: Arc<coder_backend::CoderSessionManager>,
         validation_config: Arc<ValidationConfig>,
         repo_analysis_config: Arc<RepoAnalysisConfig>,
+        session_workspace: SessionWorkspaceManager,
         skills_dir: Option<PathBuf>,
     ) -> Self {
         let skills = Arc::new(DashMap::new());
@@ -106,11 +109,16 @@ impl Orchestrator {
             repo_analysis_config,
             repo_analyses: Arc::new(DashMap::new()),
             skills,
+            session_workspace,
         }
     }
 
     pub fn router(&self) -> &Arc<ModelRouter> {
         &self.router
+    }
+
+    pub async fn ensure_session_workspace(&self, session_id: Uuid) -> anyhow::Result<PathBuf> {
+        self.session_workspace.ensure_session_dir(session_id).await
     }
 
     pub async fn load_skills_from_dir(&self, dir: &std::path::Path) {
@@ -458,7 +466,7 @@ impl Orchestrator {
         let mut req = req;
         req.session_id = Some(session_id);
 
-        self.memory.create_session(session_id).await?;
+        self.create_session(session_id).await?;
 
         let mut record = RunRecord::new_queued(run_id, session_id, req.task.clone(), req.profile);
         record
@@ -695,6 +703,7 @@ impl Orchestrator {
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+        self.session_workspace.delete_session_dir(session_id).await?;
         self.memory.delete_session(session_id).await?;
         let run_ids = self
             .runs
@@ -852,7 +861,9 @@ impl Orchestrator {
     }
 
     pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
-        self.memory.create_session(session_id).await
+        self.session_workspace.ensure_session_dir(session_id).await?;
+        self.memory.create_session(session_id).await?;
+        Ok(())
     }
 
     pub async fn replay_session(
@@ -2211,6 +2222,7 @@ impl Orchestrator {
         let validation_config = self.validation_config.clone();
         let repo_analysis_config = self.repo_analysis_config.clone();
         let repo_analyses = self.repo_analyses.clone();
+        let session_workspace = self.session_workspace.clone();
 
         Arc::new(move |node: AgentNode, deps: Vec<NodeExecutionResult>| {
             let agents = agents.clone();
@@ -2224,6 +2236,7 @@ impl Orchestrator {
             let validation_config = validation_config.clone();
             let repo_analysis_config = repo_analysis_config.clone();
             let repo_analyses = repo_analyses.clone();
+            let session_workspace = session_workspace.clone();
 
             async move {
                 let started = Instant::now();
@@ -2252,7 +2265,23 @@ impl Orchestrator {
                         });
                     };
 
-                    let clone_dir = std::path::PathBuf::from(&repo_config.clone_base_dir);
+                    let clone_dir = match session_workspace
+                        .ensure_scoped_dir(session_id, Some(&repo_config.clone_base_dir))
+                        .await
+                    {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "repo_analyzer".to_string(),
+                                output: format!("Session workspace setup failed: {}", e),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(format!("workspace setup failed: {}", e)),
+                            });
+                        }
+                    };
                     let repo_path = match git_manager::GitManager::clone_repo(&url, &clone_dir, repo_config.shallow_clone).await {
                         Ok(path) => path,
                         Err(e) => {
@@ -2310,13 +2339,26 @@ impl Orchestrator {
 
                 // Validator role: run lint/build/test/git commands
                 if node.role == AgentRole::Validator {
-                    let working_dir = validation_config
-                        .working_dir
-                        .as_ref()
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| {
-                            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                        });
+                    let working_dir = match session_workspace
+                        .ensure_scoped_dir(
+                            session_id,
+                            validation_config.working_dir.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "validator".to_string(),
+                                output: format!("Session workspace setup failed: {}", e),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(format!("workspace setup failed: {}", e)),
+                            });
+                        }
+                    };
                     let instructions = node.instructions.as_str();
 
                     if !node.git_commands.is_empty() {
@@ -2877,44 +2919,59 @@ impl Orchestrator {
 
                         // Check if this is an external project run
                         let external_analysis = repo_analyses.get(&run_id);
-                        let (effective_working_dir, enriched_task) = if let Some(ref analysis) = external_analysis {
-                            let enriched = format!(
-                                "{}\n\nREPOSITORY MAP:\n{}\n\nTECH STACK: {} ({})\nKey files: {}",
-                                req.task,
-                                analysis.repo_map,
-                                analysis.tech_stack.primary_language,
-                                analysis.tech_stack.frameworks.join(", "),
-                                analysis.key_files.join(", "),
-                            );
-                            (std::path::PathBuf::from(&analysis.repo_path), enriched)
-                        } else {
-                            (coder_manager.default_working_dir().to_path_buf(), req.task.clone())
-                        };
+                        let (effective_working_dir, enriched_task) =
+                            if let Some(ref analysis) = external_analysis {
+                                let enriched = format!(
+                                    "{}\n\nREPOSITORY MAP:\n{}\n\nTECH STACK: {} ({})\nKey files: {}",
+                                    req.task,
+                                    analysis.repo_map,
+                                    analysis.tech_stack.primary_language,
+                                    analysis.tech_stack.frameworks.join(", "),
+                                    analysis.key_files.join(", "),
+                                );
+                                (std::path::PathBuf::from(&analysis.repo_path), enriched)
+                            } else {
+                                let requested = coder_manager
+                                    .default_working_dir()
+                                    .to_str()
+                                    .filter(|value| !value.is_empty());
+                                let working_dir = match session_workspace
+                                    .ensure_scoped_dir(session_id, requested)
+                                    .await
+                                {
+                                    Ok(dir) => dir,
+                                    Err(e) => {
+                                        return Ok(NodeExecutionResult {
+                                            node_id: node.id,
+                                            role: node.role,
+                                            model: backend_kind.to_string(),
+                                            output: format!(
+                                                "Session workspace setup failed: {}",
+                                                e
+                                            ),
+                                            duration_ms: started.elapsed().as_millis(),
+                                            succeeded: false,
+                                            error: Some(format!(
+                                                "workspace setup failed: {}",
+                                                e
+                                            )),
+                                        });
+                                    }
+                                };
+                                (working_dir, req.task.clone())
+                            };
 
-                        let result = if external_analysis.is_some() {
-                            coder_manager
-                                .run_session_at(
-                                    run_id,
-                                    &node.id,
-                                    backend_kind,
-                                    &enriched_task,
-                                    &context_str,
-                                    &effective_working_dir,
-                                    chunk_callback,
-                                )
-                                .await
-                        } else {
-                            coder_manager
-                                .run_session(
-                                    run_id,
-                                    &node.id,
-                                    backend_kind,
-                                    &req.task,
-                                    &context_str,
-                                    chunk_callback,
-                                )
-                                .await
-                        };
+                        let result = coder_manager
+                            .run_session_at(
+                                run_id,
+                                &node.id,
+                                backend_kind,
+                                &enriched_task,
+                                &context_str,
+                                &effective_working_dir,
+                                chunk_callback,
+                            )
+                            .await;
 
                         return match result {
                             Ok(session_result) => {
@@ -4228,7 +4285,7 @@ impl Orchestrator {
 
         // We need to submit via the same path but with a pre-built graph
         // Re-implement submit_run inline to use the pre-stored graph
-        self.memory.create_session(sid).await?;
+        self.create_session(sid).await?;
         let mut record = RunRecord::new_queued(run_id, sid, req.task.clone(), req.profile);
         record
             .timeline
@@ -5164,6 +5221,7 @@ mod tests {
             Arc::new(coder_mgr),
             Arc::new(ValidationConfig::default()),
             Arc::new(RepoAnalysisConfig::default()),
+            crate::session_workspace::SessionWorkspaceManager::new(tmp.join("repo")),
             None,
         );
 
@@ -5250,6 +5308,7 @@ mod tests {
             Arc::new(coder_mgr),
             Arc::new(ValidationConfig::default()),
             Arc::new(RepoAnalysisConfig::default()),
+            crate::session_workspace::SessionWorkspaceManager::new(tmp.join("repo")),
             None,
         );
 
@@ -5274,6 +5333,60 @@ mod tests {
         assert_eq!(node.role, AgentRole::Planner);
         assert!(node.instructions.contains("SubtaskPlan"));
         assert!(node.instructions.contains("parallel"));
+    }
+
+    #[tokio::test]
+    async fn create_and_delete_session_manage_workspace_dirs() {
+        let tmp = std::env::temp_dir().join(format!("agent-session-workspace-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let memory = Arc::new(
+            MemoryManager::new(
+                tmp.join("sessions"),
+                format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
+            )
+            .await
+            .unwrap(),
+        );
+        let auth = Arc::new(crate::webhook::AuthManager::new("k", "s", 300));
+        let webhook = Arc::new(crate::webhook::WebhookDispatcher::new(
+            memory.clone(),
+            auth,
+            Duration::from_secs(1),
+        ));
+
+        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
+        let mut coder_mgr = coder_backend::CoderSessionManager::new(
+            memory.clone(),
+            std::path::PathBuf::new(),
+            crate::types::CoderBackendKind::Llm,
+        );
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
+        let repo_root = tmp.join("repo");
+        let orchestrator = Orchestrator::new(
+            AgentRuntime::new(4),
+            AgentRegistry::builtin(),
+            router,
+            memory,
+            Arc::new(ContextManager::new(8_000)),
+            webhook,
+            6,
+            Arc::new(McpRegistry::new()),
+            Arc::new(coder_mgr),
+            Arc::new(ValidationConfig::default()),
+            Arc::new(RepoAnalysisConfig::default()),
+            crate::session_workspace::SessionWorkspaceManager::new(repo_root.clone()),
+            None,
+        );
+
+        let session_id = Uuid::new_v4();
+        let session_dir = repo_root.join(session_id.to_string());
+
+        orchestrator.create_session(session_id).await.unwrap();
+        assert!(session_dir.is_dir());
+
+        orchestrator.delete_session(session_id).await.unwrap();
+        assert!(!session_dir.exists());
     }
 
     #[test]
