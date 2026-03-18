@@ -196,6 +196,12 @@ impl Orchestrator {
         graph.add_node(node)
     }
 
+    fn normalize_dynamic_nodes_for_runtime(&self, nodes: &mut [AgentNode]) {
+        for node in nodes {
+            self.normalize_node_policy_for_runtime(node);
+        }
+    }
+
     fn build_workflow_graph_from_template(
         &self,
         template: &WorkflowTemplate,
@@ -1683,7 +1689,7 @@ impl Orchestrator {
 
         let review_result = self
             .agents
-            .run_role(AgentRole::Reviewer, review_input, self.router.clone())
+            .run_role(AgentRole::Reviewer, review_input, self.router.clone(), None)
             .await;
 
         let (is_complete, reason) = match &review_result {
@@ -3309,8 +3315,37 @@ impl Orchestrator {
                             working_dir: Some(cli_working_dir.clone()),
                         };
 
+                        let selection_cli_output = router.cli_model_config().map(|cli_model| {
+                            let cli_session_id =
+                                format!("cli-{}-{}-{}", run_id, node.id, iteration + 1);
+                            event_sink(RuntimeEvent::CoderSessionStarted {
+                                node_id: node.id.clone(),
+                                session_id: cli_session_id.clone(),
+                                backend: cli_model.backend.to_string(),
+                            });
+                            let output_node_id = node.id.clone();
+                            let output_session_id = cli_session_id.clone();
+                            let output_sink = event_sink.clone();
+                            Arc::new(move |stream: &str, content: &str| {
+                                if content.trim().is_empty() {
+                                    return;
+                                }
+                                output_sink(RuntimeEvent::CoderOutputChunk {
+                                    node_id: output_node_id.clone(),
+                                    session_id: output_session_id.clone(),
+                                    stream: stream.to_string(),
+                                    content: content.to_string(),
+                                });
+                            }) as crate::router::CliOutputCallback
+                        });
+
                         let selection_result = agents
-                            .run_role(AgentRole::ToolCaller, selection_input, router.clone())
+                            .run_role(
+                                AgentRole::ToolCaller,
+                                selection_input,
+                                router.clone(),
+                                selection_cli_output,
+                            )
                             .await;
 
                         let (selection_model, llm_output) = match selection_result {
@@ -3865,9 +3900,109 @@ impl Orchestrator {
                     });
                 });
 
+                let node_timeout_ms = node.policy.timeout_ms;
+                let cli_model = router.cli_model_config();
+                let cli_output = cli_model.as_ref().map(|cli_model| {
+                    let cli_session_id = format!("cli-{}-{}", run_id, node.id);
+                    event_sink(RuntimeEvent::CoderSessionStarted {
+                        node_id: node.id.clone(),
+                        session_id: cli_session_id.clone(),
+                        backend: cli_model.backend.to_string(),
+                    });
+                    let output_node_id = node.id.clone();
+                    let output_session_id = cli_session_id.clone();
+                    let output_sink = event_sink.clone();
+                    Arc::new(move |stream: &str, content: &str| {
+                        if content.trim().is_empty() {
+                            return;
+                        }
+                        output_sink(RuntimeEvent::CoderOutputChunk {
+                            node_id: output_node_id.clone(),
+                            session_id: output_session_id.clone(),
+                            stream: stream.to_string(),
+                            content: content.to_string(),
+                        });
+                    }) as crate::router::CliOutputCallback
+                });
+                let heartbeat = if let Some(cli_model) = cli_model {
+                    orchestrator
+                        .record_node_progress(
+                            run_id,
+                            session_id,
+                            node.id.as_str(),
+                            node.role,
+                            "cli_execution_started",
+                            format!(
+                                "Executing {} from {}",
+                                cli_model.backend,
+                                cli_working_dir.display()
+                            ),
+                            serde_json::json!({
+                                "backend": cli_model.backend.to_string(),
+                                "working_dir": cli_working_dir.display().to_string(),
+                                "timeout_ms": node_timeout_ms,
+                            }),
+                        )
+                        .await;
+
+                    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+                    let heartbeat_orchestrator = orchestrator.clone();
+                    let heartbeat_node_id = node.id.clone();
+                    let heartbeat_role = node.role;
+                    let heartbeat_working_dir = cli_working_dir.clone();
+                    let heartbeat_backend = cli_model.backend.to_string();
+                    let heartbeat_handle = tokio::spawn(async move {
+                        let heartbeat_started = Instant::now();
+                        loop {
+                            tokio::select! {
+                                _ = sleep(Duration::from_secs(15)) => {
+                                    heartbeat_orchestrator
+                                        .record_node_progress(
+                                            run_id,
+                                            session_id,
+                                            heartbeat_node_id.as_str(),
+                                            heartbeat_role,
+                                            "cli_execution_heartbeat",
+                                            format!(
+                                                "{} still running for {}s",
+                                                heartbeat_backend,
+                                                heartbeat_started.elapsed().as_secs()
+                                            ),
+                                            serde_json::json!({
+                                                "backend": heartbeat_backend.clone(),
+                                                "elapsed_ms": heartbeat_started.elapsed().as_millis(),
+                                                "working_dir": heartbeat_working_dir.display().to_string(),
+                                                "timeout_ms": node_timeout_ms,
+                                            }),
+                                        )
+                                        .await;
+                                }
+                                changed = stop_rx.changed() => {
+                                    if changed.is_err() || *stop_rx.borrow() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    Some((stop_tx, heartbeat_handle))
+                } else {
+                    None
+                };
+
                 let run = agents
-                    .run_role_stream(node.role, input, router.clone(), on_token.clone())
+                    .run_role_stream(
+                        node.role,
+                        input,
+                        router.clone(),
+                        on_token.clone(),
+                        cli_output.clone(),
+                    )
                     .await;
+                if let Some((stop_tx, heartbeat_handle)) = heartbeat {
+                    let _ = stop_tx.send(true);
+                    let _ = heartbeat_handle.await;
+                }
                 match run {
                     Ok(output) => {
                         let node_id = node.id.clone();
@@ -3913,6 +4048,7 @@ impl Orchestrator {
                                 followup_input,
                                 router.clone(),
                                 on_token.clone(),
+                                cli_output.clone(),
                             ).await {
                                 Ok(followup) => {
                                     current_output = followup.content;
@@ -4036,11 +4172,13 @@ impl Orchestrator {
         let memory = self.memory.clone();
         let validation_config = self.validation_config.clone();
         let repo_analyses = self.repo_analyses.clone();
+        let orchestrator = self.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
             let memory = memory.clone();
             let validation_config = validation_config.clone();
             let repo_analyses = repo_analyses.clone();
+            let orchestrator = orchestrator.clone();
             async move {
                 let mut dynamic_nodes = Vec::new();
 
@@ -4092,6 +4230,7 @@ impl Orchestrator {
                                 };
                                 dynamic_nodes.push(sub_node);
                             }
+                            orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
                             return Ok(dynamic_nodes);
                         }
                     }
@@ -4266,6 +4405,7 @@ impl Orchestrator {
                                     run_id,
                                 );
                             }
+                            orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
                             return Ok(dynamic_nodes);
                         }
 
@@ -4308,6 +4448,7 @@ impl Orchestrator {
                                 &mut dynamic_nodes,
                                 run_id,
                             );
+                            orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
                             return Ok(dynamic_nodes);
                         }
 
@@ -4321,6 +4462,7 @@ impl Orchestrator {
                     }
                 }
 
+                orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
                 Ok(dynamic_nodes)
             }
             .boxed()
@@ -6078,6 +6220,7 @@ fn collect_tool_calls(value: serde_json::Value, out: &mut Vec<serde_json::Value>
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use crate::types::{CliModelBackendKind, DetectedCommands, TechStack};
 
     use super::*;
 
@@ -6348,6 +6491,101 @@ mod tests {
                 "github/list_commits".to_string()
             ]
         );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn planner_subtasks_apply_cli_timeout_normalization() {
+        let tmp = std::env::temp_dir().join(format!("agent-cli-timeout-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let memory = Arc::new(
+            MemoryManager::new(
+                tmp.join("sessions"),
+                format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
+            )
+            .await
+            .unwrap(),
+        );
+        let auth = Arc::new(crate::webhook::AuthManager::new("k", "s", 300));
+        let webhook = Arc::new(crate::webhook::WebhookDispatcher::new(
+            memory.clone(),
+            auth,
+            Duration::from_secs(1),
+        ));
+
+        let router = Arc::new(ModelRouter::new(
+            "http://127.0.0.1:8000",
+            None,
+            None,
+            None,
+            Some(CliModelConfig {
+                backend: CliModelBackendKind::Codex,
+                command: "codex".to_string(),
+                args: vec![],
+                timeout_ms: 300_000,
+                cli_only: true,
+            }),
+        ));
+        let mut coder_mgr = coder_backend::CoderSessionManager::new(
+            memory.clone(),
+            std::path::PathBuf::new(),
+            crate::types::CoderBackendKind::Llm,
+        );
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(
+            router.clone(),
+        )));
+        let orchestrator = Orchestrator::new(
+            AgentRuntime::new(4),
+            AgentRegistry::builtin(),
+            router,
+            memory,
+            Arc::new(ContextManager::new(8_000)),
+            webhook,
+            6,
+            Arc::new(McpRegistry::new()),
+            Arc::new(coder_mgr),
+            Arc::new(ValidationConfig::default()),
+            Arc::new(RepoAnalysisConfig::default()),
+            crate::session_workspace::SessionWorkspaceManager::new(tmp.join("repo")),
+            None,
+        );
+
+        let on_completed = orchestrator.build_on_completed_fn(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "Analyze the backend architecture".to_string(),
+        );
+        let result = on_completed(
+            AgentNode::new("plan", AgentRole::Planner, "plan"),
+            NodeExecutionResult {
+                node_id: "plan".to_string(),
+                role: AgentRole::Planner,
+                model: "mock:model".to_string(),
+                output: serde_json::json!({
+                    "subtasks": [
+                        {
+                            "id": "analyze_backend",
+                            "description": "Analyze backend",
+                            "agent_role": "analyzer",
+                            "dependencies": [],
+                            "instructions": "Inspect the backend implementation",
+                            "mcp_tools": []
+                        }
+                    ]
+                })
+                .to_string(),
+                duration_ms: 1,
+                succeeded: true,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].policy.timeout_ms, 330_000);
 
         let _ = std::fs::remove_dir_all(tmp);
     }

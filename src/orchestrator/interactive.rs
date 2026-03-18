@@ -107,8 +107,36 @@ pub async fn execute_react_loop(
             working_dir: working_dir.clone(),
         };
 
+        let cli_output = router.cli_model_config().map(|cli_model| {
+            let cli_session_id = format!("cli-{}-{}-{}", run_id, node.id, iteration);
+            event_sink(RuntimeEvent::CoderSessionStarted {
+                node_id: node.id.clone(),
+                session_id: cli_session_id.clone(),
+                backend: cli_model.backend.to_string(),
+            });
+            let output_node_id = node.id.clone();
+            let output_session_id = cli_session_id.clone();
+            let output_sink = event_sink.clone();
+            Arc::new(move |stream: &str, content: &str| {
+                if content.trim().is_empty() {
+                    return;
+                }
+                output_sink(RuntimeEvent::CoderOutputChunk {
+                    node_id: output_node_id.clone(),
+                    session_id: output_session_id.clone(),
+                    stream: stream.to_string(),
+                    content: content.to_string(),
+                });
+            }) as crate::router::CliOutputCallback
+        });
+
         let output = match agents
-            .run_role(AgentRole::ToolCaller, input, router.clone())
+            .run_role(
+                AgentRole::ToolCaller,
+                input,
+                router.clone(),
+                cli_output,
+            )
             .await
         {
             Ok(o) => o,

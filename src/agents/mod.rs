@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::OptimizedContext;
-use crate::router::{ModelRouter, RoutingConstraints, TokenCallback};
+use crate::router::{CliOutputCallback, ModelRouter, RoutingConstraints, TokenCallback};
 use crate::types::{AgentRole, StructuredBrief, TaskProfile};
 
 #[derive(Debug, Clone)]
@@ -27,7 +27,12 @@ pub struct AgentOutput {
 #[async_trait]
 pub trait SubAgent: Send + Sync {
     fn role(&self) -> AgentRole;
-    async fn run(&self, input: AgentInput, router: Arc<ModelRouter>)
+    async fn run(
+        &self,
+        input: AgentInput,
+        router: Arc<ModelRouter>,
+        cli_output: Option<CliOutputCallback>,
+    )
     -> anyhow::Result<AgentOutput>;
 }
 
@@ -94,13 +99,14 @@ impl AgentRegistry {
         role: AgentRole,
         input: AgentInput,
         router: Arc<ModelRouter>,
+        cli_output: Option<CliOutputCallback>,
     ) -> anyhow::Result<AgentOutput> {
         let agent = self
             .agents
             .get(&role)
             .ok_or_else(|| anyhow::anyhow!("agent role {} not found", role))?
             .clone();
-        agent.run(input, router).await
+        agent.run(input, router, cli_output).await
     }
 
     pub async fn run_role_stream(
@@ -109,6 +115,7 @@ impl AgentRegistry {
         input: AgentInput,
         router: Arc<ModelRouter>,
         on_token: TokenCallback,
+        cli_output: Option<CliOutputCallback>,
     ) -> anyhow::Result<AgentOutput> {
         let _agent = self
             .agents
@@ -129,7 +136,14 @@ impl AgentRegistry {
         let constraints = RoutingConstraints::for_profile(profile);
         let working_dir = input.working_dir.as_deref();
         let (_decision, inference) = router
-            .infer_stream_in_dir(profile, prompt.as_str(), &constraints, working_dir, on_token)
+            .infer_stream_in_dir_with_cli_output(
+                profile,
+                prompt.as_str(),
+                &constraints,
+                working_dir,
+                on_token,
+                cli_output,
+            )
             .await?;
 
         Ok(AgentOutput {
@@ -266,6 +280,7 @@ impl SubAgent for BuiltinAgent {
         &self,
         input: AgentInput,
         router: Arc<ModelRouter>,
+        cli_output: Option<CliOutputCallback>,
     ) -> anyhow::Result<AgentOutput> {
         let prompt = format!(
             "{}\n\nTASK:\n{}\n\nINSTRUCTIONS:\n{}\n\nSTRUCTURED BRIEF:\n{}\n\nDEPENDENCY OUTPUTS:\n{}\n\nCONTEXT:\n{}",
@@ -280,7 +295,13 @@ impl SubAgent for BuiltinAgent {
         let constraints = RoutingConstraints::for_profile(self.profile());
         let working_dir = input.working_dir.as_deref();
         let (_decision, inference) = router
-            .infer_in_dir(self.profile(), prompt.as_str(), &constraints, working_dir)
+            .infer_in_dir_with_cli_output(
+                self.profile(),
+                prompt.as_str(),
+                &constraints,
+                working_dir,
+                cli_output,
+            )
             .await?;
 
         Ok(AgentOutput {

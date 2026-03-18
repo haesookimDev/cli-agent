@@ -9,13 +9,14 @@ use dashmap::DashMap;
 use dashmap::DashSet;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::types::{CliModelBackendKind, CliModelConfig, TaskProfile};
 
 pub type TokenCallback = Arc<dyn Fn(&str) + Send + Sync>;
+pub type CliOutputCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -341,6 +342,18 @@ impl ModelRouter {
         constraints: &RoutingConstraints,
         working_dir: Option<&Path>,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
+        self.infer_in_dir_with_cli_output(profile, prompt, constraints, working_dir, None)
+            .await
+    }
+
+    pub async fn infer_in_dir_with_cli_output(
+        &self,
+        profile: TaskProfile,
+        prompt: &str,
+        constraints: &RoutingConstraints,
+        working_dir: Option<&Path>,
+        cli_output: Option<CliOutputCallback>,
+    ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
         // Check cache
         let hash = Self::prompt_hash(profile, prompt, working_dir);
         if let Some(entry) = self.cache.get(&hash) {
@@ -383,7 +396,11 @@ impl ModelRouter {
                 break;
             }
 
-            match self.client.generate(&model, prompt, working_dir).await {
+            match self
+                .client
+                .generate(&model, prompt, working_dir, cli_output.as_ref())
+                .await
+            {
                 Ok(output) => {
                     // Store in cache
                     self.cache.insert(
@@ -440,6 +457,26 @@ impl ModelRouter {
         working_dir: Option<&Path>,
         on_token: TokenCallback,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
+        self.infer_stream_in_dir_with_cli_output(
+            profile,
+            prompt,
+            constraints,
+            working_dir,
+            on_token,
+            None,
+        )
+        .await
+    }
+
+    pub async fn infer_stream_in_dir_with_cli_output(
+        &self,
+        profile: TaskProfile,
+        prompt: &str,
+        constraints: &RoutingConstraints,
+        working_dir: Option<&Path>,
+        on_token: TokenCallback,
+        cli_output: Option<CliOutputCallback>,
+    ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
         let decision = self.select_model(profile, constraints)?;
 
         let mut chain = Vec::new();
@@ -458,7 +495,13 @@ impl ModelRouter {
 
             match self
                 .client
-                .generate_stream(&model, prompt, working_dir, &on_token)
+                .generate_stream(
+                    &model,
+                    prompt,
+                    working_dir,
+                    &on_token,
+                    cli_output.as_ref(),
+                )
                 .await
             {
                 Ok(output) => {
@@ -600,6 +643,7 @@ impl ProviderClient {
         model: &ModelSpec,
         prompt: &str,
         working_dir: Option<&Path>,
+        cli_output: Option<&CliOutputCallback>,
     ) -> anyhow::Result<String> {
         if self.disabled.contains(&model.provider) {
             return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
@@ -613,8 +657,10 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.generate_anthropic(model, prompt).await,
             ProviderKind::Gemini => self.generate_gemini(model, prompt).await,
             ProviderKind::Vllm => self.generate_vllm(model, prompt).await,
-            ProviderKind::ClaudeCode => self.generate_claude_code(prompt, working_dir).await,
-            ProviderKind::Codex => self.generate_codex(prompt, working_dir).await,
+            ProviderKind::ClaudeCode => {
+                self.generate_claude_code(prompt, working_dir, cli_output).await
+            }
+            ProviderKind::Codex => self.generate_codex(prompt, working_dir, cli_output).await,
             ProviderKind::Mock => Ok(mock_inference(model, prompt)),
         }
     }
@@ -764,10 +810,13 @@ impl ProviderClient {
         timeout: Duration,
         label: &str,
         stdin_payload: Option<&str>,
+        cli_output: Option<&CliOutputCallback>,
     ) -> anyhow::Result<std::process::Output> {
         if stdin_payload.is_some() {
             cmd.stdin(std::process::Stdio::piped());
         }
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
 
         let mut child = cmd
             .spawn()
@@ -779,10 +828,70 @@ impl ProviderClient {
             }
         }
 
-        tokio::time::timeout(timeout, child.wait_with_output())
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("{label} failed to capture stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("{label} failed to capture stderr"))?;
+
+        let stdout_task = tokio::spawn(Self::collect_cli_stream(
+            stdout,
+            "stdout",
+            cli_output.cloned(),
+        ));
+        let stderr_task = tokio::spawn(Self::collect_cli_stream(
+            stderr,
+            "stderr",
+            cli_output.cloned(),
+        ));
+
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(result) => {
+                result.map_err(|err| anyhow::anyhow!("{label} failed while waiting: {err}"))?
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(anyhow::anyhow!("{label} timed out after {:?}", timeout));
+            }
+        };
+
+        let stdout_text = stdout_task
             .await
-            .map_err(|_| anyhow::anyhow!("{label} timed out after {:?}", timeout))?
-            .map_err(|err| anyhow::anyhow!("{label} failed while waiting: {err}"))
+            .map_err(|err| anyhow::anyhow!("{label} stdout join failed: {err}"))?;
+        let stderr_text = stderr_task
+            .await
+            .map_err(|err| anyhow::anyhow!("{label} stderr join failed: {err}"))?;
+
+        Ok(std::process::Output {
+            status,
+            stdout: stdout_text.into_bytes(),
+            stderr: stderr_text.into_bytes(),
+        })
+    }
+
+    async fn collect_cli_stream(
+        reader: impl tokio::io::AsyncRead + Unpin,
+        stream: &'static str,
+        cli_output: Option<CliOutputCallback>,
+    ) -> String {
+        let mut collected = String::new();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.push_str(&line);
+            collected.push('\n');
+            if let Some(callback) = cli_output.as_ref() {
+                callback(stream, &line);
+            }
+        }
+
+        collected
     }
 
     fn decode_cli_text(bytes: &[u8]) -> String {
@@ -816,6 +925,7 @@ impl ProviderClient {
         &self,
         prompt: &str,
         working_dir: Option<&Path>,
+        cli_output: Option<&CliOutputCallback>,
     ) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::ClaudeCode)?;
         let resolved_command = crate::command_resolver::resolve_command_path(&config.command);
@@ -826,7 +936,7 @@ impl ProviderClient {
             .current_dir(self.cli_working_dir(working_dir));
 
         let output = self
-            .run_cli_command(cmd, config.timeout, "Claude Code CLI", None)
+            .run_cli_command(cmd, config.timeout, "Claude Code CLI", None, cli_output)
             .await?;
         Self::ensure_cli_success("Claude Code CLI", &output)?;
 
@@ -837,6 +947,7 @@ impl ProviderClient {
         &self,
         prompt: &str,
         working_dir: Option<&Path>,
+        cli_output: Option<&CliOutputCallback>,
     ) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::Codex)?;
         let output_path =
@@ -854,7 +965,13 @@ impl ProviderClient {
             .current_dir(self.cli_working_dir(working_dir));
 
         let output = self
-            .run_cli_command(cmd, config.timeout, "Codex CLI", Some(prompt))
+            .run_cli_command(
+                cmd,
+                config.timeout,
+                "Codex CLI",
+                Some(prompt),
+                cli_output,
+            )
             .await?;
         let file_output = tokio::fs::read_to_string(&output_path).await.ok();
         let _ = tokio::fs::remove_file(&output_path).await;
@@ -888,6 +1005,7 @@ impl ProviderClient {
         prompt: &str,
         working_dir: Option<&Path>,
         on_token: &TokenCallback,
+        cli_output: Option<&CliOutputCallback>,
     ) -> anyhow::Result<String> {
         if self.disabled.contains(&model.provider) {
             return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
@@ -903,7 +1021,7 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.stream_anthropic(model, prompt, on_token).await,
             ProviderKind::Gemini => self.stream_gemini(model, prompt, on_token).await,
             ProviderKind::ClaudeCode | ProviderKind::Codex => {
-                let output = self.generate(model, prompt, working_dir).await?;
+                let output = self.generate(model, prompt, working_dir, cli_output).await?;
                 if !output.is_empty() {
                     on_token(&output);
                 }

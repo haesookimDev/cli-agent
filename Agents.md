@@ -82,6 +82,11 @@
 - 외부 repo를 clone/pull 한 실행에서는 clone 이후의 CLI 작업 디렉터리를 세션 root가 아니라 그 세션 내부의 분석 대상 repo 경로로 전환해야 한다.
 - `std::env::current_dir()`나 서버 프로세스 루트를 세션 실행의 기본 cwd로 사용하면 안 되며, working directory는 run/session 기준으로 매 호출마다 명시적으로 전달해야 한다.
 
+### CLI Liveness And Timeouts
+- CLI-backed LLM 노드는 실행 중 heartbeat/progress 이벤트를 주기적으로 남겨 현재 살아 있는 작업인지 세션 로그와 trace에서 확인 가능해야 한다.
+- planner가 동적으로 생성한 서브태스크를 포함한 모든 non-validator 노드는 동일한 CLI timeout 보정 규칙을 적용해야 하며, 정적 그래프 노드만 보정하면 안 된다.
+- CLI subprocess의 stdout/stderr는 버리지 말고 터미널 스타일 패널이나 세션 trace에서 실시간으로 볼 수 있도록 스트리밍 이벤트로 전달해야 한다.
+
 ### Follow-up Context Anchoring
 - 짧은 후속 발화(예: `로컬에 있어`)도 독립 질의로 처리하지 말고, 직전 사용자 메시지와 최근 run 결과 요약을 실행 컨텍스트(`History`)에 주입해야 한다.
 - 세션 메모리 검색 시 후속 발화로 판단되면 검색 쿼리를 `현재 입력 + 직전 사용자 입력`으로 확장해 recall 저하를 방지한다.
