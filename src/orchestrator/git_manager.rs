@@ -4,8 +4,8 @@ use anyhow::Context;
 use tokio::process::Command;
 
 use crate::router::ModelRouter;
-use crate::types::ValidationResult;
 use crate::types::TaskProfile;
+use crate::types::ValidationResult;
 
 pub struct GitManager;
 
@@ -98,8 +98,7 @@ impl GitManager {
             Self::truncate(diff, 1000),
         );
 
-        let constraints =
-            crate::router::RoutingConstraints::for_profile(TaskProfile::General);
+        let constraints = crate::router::RoutingConstraints::for_profile(TaskProfile::General);
         let (_decision, inference) = router
             .infer(TaskProfile::General, &prompt, &constraints)
             .await?;

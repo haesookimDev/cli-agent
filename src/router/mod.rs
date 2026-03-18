@@ -795,7 +795,8 @@ impl ProviderClient {
 
     async fn generate_codex(&self, prompt: &str) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::Codex)?;
-        let output_path = std::env::temp_dir().join(format!("codex-last-message-{}.txt", Uuid::new_v4()));
+        let output_path =
+            std::env::temp_dir().join(format!("codex-last-message-{}.txt", Uuid::new_v4()));
         let resolved_command = crate::command_resolver::resolve_command_path(&config.command);
         let mut cmd = Command::new(&resolved_command);
         cmd.arg("exec")

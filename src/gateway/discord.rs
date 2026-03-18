@@ -16,7 +16,9 @@ use crate::gateway::{
     GatewayAction, GatewayAdapter, GatewayCommand, GatewayManager, GatewayResponse,
     GatewayResponsePayload, MessageOrigin, Platform, parse_profile,
 };
-use crate::types::{RunRecord, RunStatus, RunSubmission, SessionSummary, TaskProfile, WorkflowTemplate};
+use crate::types::{
+    RunRecord, RunStatus, RunSubmission, SessionSummary, TaskProfile, WorkflowTemplate,
+};
 
 // ---------------------------------------------------------------------------
 // Status colors & emoji
@@ -146,7 +148,9 @@ fn build_run_details_embed(run: &RunRecord) -> serde_json::Value {
 
     if let Some(ref err) = run.error {
         let err_preview: String = err.chars().take(300).collect();
-        fields.push(serde_json::json!({"name": "Error", "value": format!("```\n{err_preview}\n```")}));
+        fields.push(
+            serde_json::json!({"name": "Error", "value": format!("```\n{err_preview}\n```")}),
+        );
     }
 
     if !run.outputs.is_empty() {
@@ -170,7 +174,9 @@ fn build_run_details_embed(run: &RunRecord) -> serde_json::Value {
 
     if let (Some(start), Some(end)) = (run.started_at, run.finished_at) {
         let dur = (end - start).num_milliseconds();
-        fields.push(serde_json::json!({"name": "Duration", "value": format!("{dur}ms"), "inline": true}));
+        fields.push(
+            serde_json::json!({"name": "Duration", "value": format!("{dur}ms"), "inline": true}),
+        );
     }
 
     serde_json::json!({
@@ -321,7 +327,11 @@ fn build_run_results_embed(run: &RunRecord) -> serde_json::Value {
     let mut fields: Vec<serde_json::Value> = Vec::new();
 
     for output in run.outputs.iter().take(5) {
-        let mark = if output.succeeded { "\u{2705}" } else { "\u{274c}" };
+        let mark = if output.succeeded {
+            "\u{2705}"
+        } else {
+            "\u{274c}"
+        };
         let name = format!("{mark} {} [{}]", output.node_id, output.role);
         let mut value = output.output.chars().take(500).collect::<String>();
         if output.output.len() > 500 {
@@ -356,7 +366,12 @@ fn build_run_results_embed(run: &RunRecord) -> serde_json::Value {
 }
 
 fn build_progress_embed(run: &RunRecord) -> serde_json::Value {
-    let total = run.outputs.len() + if run.status == RunStatus::Running { 1 } else { 0 };
+    let total = run.outputs.len()
+        + if run.status == RunStatus::Running {
+            1
+        } else {
+            0
+        };
     let completed = run.outputs.iter().filter(|o| o.succeeded).count();
     let failed = run.outputs.iter().filter(|o| !o.succeeded).count();
 
@@ -374,7 +389,10 @@ fn build_progress_embed(run: &RunRecord) -> serde_json::Value {
             .take(5)
             .map(|o| {
                 let mark = if o.succeeded { "\u{2705}" } else { "\u{274c}" };
-                format!("{mark} `{}` **{}** {:.0}ms", o.node_id, o.role, o.duration_ms)
+                format!(
+                    "{mark} `{}` **{}** {:.0}ms",
+                    o.node_id, o.role, o.duration_ms
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -463,8 +481,9 @@ async fn discord_poll_and_update(
                     // Fallback: send as channel message if token expired and terminal
                     if token_expired && is_terminal {
                         let embed = build_run_details_embed(&run);
-                        if let Err(err) =
-                            adapter.send_channel_message(&origin.channel_id, &embed).await
+                        if let Err(err) = adapter
+                            .send_channel_message(&origin.channel_id, &embed)
+                            .await
                         {
                             error!("discord fallback channel message failed for {run_id}: {err}");
                         }
@@ -906,8 +925,7 @@ fn handle_application_command(
 
         if is_run {
             if let GatewayResponsePayload::RunSubmitted(ref sub) = response.payload {
-                discord_poll_and_update(manager, adapter, sub.run_id, origin, token_for_poll)
-                    .await;
+                discord_poll_and_update(manager, adapter, sub.run_id, origin, token_for_poll).await;
             }
         }
     });
@@ -1114,8 +1132,8 @@ fn parse_discord_command(name: &str, data: &serde_json::Value) -> GatewayAction 
         }
         "agent-workflow-run" => {
             let workflow_id = get_str("workflow_id").unwrap_or_default();
-            let params = get_str("params")
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let params =
+                get_str("params").and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
             GatewayAction::ExecuteWorkflow {
                 workflow_id,
                 params,

@@ -26,21 +26,21 @@ use crate::context::{ContextChunk, ContextKind, ContextManager, ContextScope};
 use crate::mcp::McpRegistry;
 use crate::memory::MemoryManager;
 use crate::router::ModelRouter;
+use crate::router::ProviderKind;
 use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionGraph, ExecutionPolicy};
 use crate::runtime::{
     AgentRuntime, EventSink, NodeExecutionResult, OnNodeCompletedFn, RunNodeFn, RuntimeEvent,
     ShouldCancelFn, ShouldPauseFn,
 };
-use crate::router::ProviderKind;
 use crate::session_workspace::SessionWorkspaceManager;
 use crate::types::{
     AgentExecutionRecord, AgentRole, AppSettings, ChatMessage, ChatRole, CliModelConfig,
-    KnowledgeItem, McpToolDefinition, NodeTraceState, RepoAnalysis,
-    RepoAnalysisConfig, RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane,
-    RunBehaviorSummary, RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission,
-    RunTrace, RunTraceGraph, SessionEvent, SessionEventType, SessionMemoryItem, SettingsPatch,
-    SubtaskPlan, TaskProfile, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
-    WebhookEndpoint, WorkflowNodeTemplate, WorkflowTemplate,
+    KnowledgeItem, McpToolDefinition, NodeTraceState, RepoAnalysis, RepoAnalysisConfig,
+    RunActionEvent, RunActionType, RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary,
+    RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph,
+    SessionEvent, SessionEventType, SessionMemoryItem, SettingsPatch, SubtaskPlan, TaskProfile,
+    TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord, WebhookEndpoint,
+    WorkflowNodeTemplate, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -179,12 +179,7 @@ impl Orchestrator {
             .and_then(|value| value.as_object())
             .map(|obj| {
                 obj.iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            v.as_str().unwrap_or(&v.to_string()).to_string(),
-                        )
-                    })
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or(&v.to_string()).to_string()))
                     .collect()
             })
             .unwrap_or_default();
@@ -243,7 +238,15 @@ impl Orchestrator {
             && detected_repo_url.is_some()
             && contains_any_keyword(
                 lower.as_str(),
-                &["clone", "clon", "fetch", "checkout", "복제", "클론", "가져와"],
+                &[
+                    "clone",
+                    "clon",
+                    "fetch",
+                    "checkout",
+                    "복제",
+                    "클론",
+                    "가져와",
+                ],
             )
         {
             let url = detected_repo_url?;
@@ -262,7 +265,9 @@ impl Orchestrator {
             && detected_repo_url.is_some()
             && !contains_any_keyword(
                 lower.as_str(),
-                &["clone", "checkout", "patch", "fix", "modify", "edit", "수정", "클론"],
+                &[
+                    "clone", "checkout", "patch", "fix", "modify", "edit", "수정", "클론",
+                ],
             )
             && contains_any_keyword(
                 lower.as_str(),
@@ -430,7 +435,8 @@ impl Orchestrator {
         if cli_patch_applied {
             match Self::normalize_cli_model_config(&settings) {
                 Some(cli_model) => {
-                    settings.preferred_model = Some(cli_model.backend.default_model_id().to_string());
+                    settings.preferred_model =
+                        Some(cli_model.backend.default_model_id().to_string());
                 }
                 None => {
                     if settings
@@ -479,10 +485,12 @@ impl Orchestrator {
         self.router.set_cli_model_config(cli_model.clone());
         if let Some(cli_model) = cli_model.as_ref() {
             self.router.apply_cli_model_bootstrap(cli_model);
-            self.router
-                .set_preferred_model(settings.preferred_model.clone().or_else(|| {
-                    Some(cli_model.backend.default_model_id().to_string())
-                }));
+            self.router.set_preferred_model(
+                settings
+                    .preferred_model
+                    .clone()
+                    .or_else(|| Some(cli_model.backend.default_model_id().to_string())),
+            );
         }
 
         for model_id in &settings.disabled_models {
@@ -534,10 +542,7 @@ impl Orchestrator {
     }
 
     fn is_cli_model_id(model_id: &str) -> bool {
-        matches!(
-            model_id,
-            "claude-code-cli" | "codex-cli"
-        )
+        matches!(model_id, "claude-code-cli" | "codex-cli")
     }
 
     pub fn memory(&self) -> &Arc<MemoryManager> {
@@ -892,7 +897,9 @@ impl Orchestrator {
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> anyhow::Result<()> {
-        self.session_workspace.delete_session_dir(session_id).await?;
+        self.session_workspace
+            .delete_session_dir(session_id)
+            .await?;
         self.memory.delete_session(session_id).await?;
         let run_ids = self
             .runs
@@ -1050,7 +1057,9 @@ impl Orchestrator {
     }
 
     pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
-        self.session_workspace.ensure_session_dir(session_id).await?;
+        self.session_workspace
+            .ensure_session_dir(session_id)
+            .await?;
         self.memory.create_session(session_id).await?;
         Ok(())
     }
@@ -1294,38 +1303,39 @@ impl Orchestrator {
             .map(|t| t.name)
             .collect();
         // Resolve previous run context for continuation detection
-        let (previous_task_type, previous_plan) = if Self::is_continuation_command(req.task.as_str()) {
-            let session_runs = self
-                .memory
-                .list_session_runs(session_id, 5)
-                .await
-                .unwrap_or_default();
-            match session_runs
-                .iter()
-                .find(|r| r.run_id != run_id && r.status == RunStatus::Succeeded)
-            {
-                Some(prev) => {
-                    let prev_type = Self::classify_task_fallback(
-                        prev.task.as_str(),
-                        !mcp_server_names.is_empty(),
-                    );
-                    let prev_plan = prev
-                        .outputs
-                        .iter()
-                        .find(|o| o.role == AgentRole::Planner && o.succeeded)
-                        .map(|o| o.output.clone());
-                    (Some(prev_type), prev_plan)
+        let (previous_task_type, previous_plan) =
+            if Self::is_continuation_command(req.task.as_str()) {
+                let session_runs = self
+                    .memory
+                    .list_session_runs(session_id, 5)
+                    .await
+                    .unwrap_or_default();
+                match session_runs
+                    .iter()
+                    .find(|r| r.run_id != run_id && r.status == RunStatus::Succeeded)
+                {
+                    Some(prev) => {
+                        let prev_type = Self::classify_task_fallback(
+                            prev.task.as_str(),
+                            !mcp_server_names.is_empty(),
+                        );
+                        let prev_plan = prev
+                            .outputs
+                            .iter()
+                            .find(|o| o.role == AgentRole::Planner && o.succeeded)
+                            .map(|o| o.output.clone());
+                        (Some(prev_type), prev_plan)
+                    }
+                    None => (None, None),
                 }
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
+            } else {
+                (None, None)
+            };
 
         let graph = match self.workflow_graphs.remove(&run_id).map(|(_, g)| g) {
             Some(g) => g,
-            None => self
-                .build_graph(
+            None => {
+                self.build_graph(
                     req.task.as_str(),
                     &mcp_server_names,
                     &mcp_tool_names,
@@ -1333,7 +1343,8 @@ impl Orchestrator {
                     previous_plan,
                     req.repo_url.as_deref(),
                 )
-                .await?,
+                .await?
+            }
         };
         self.record_graph_initialized(run_id, session_id, &graph, "initial")
             .await;
@@ -1547,7 +1558,13 @@ impl Orchestrator {
                         .to_string();
                     (false, reason)
                 } else {
-                    (false, format!("Ambiguous reviewer response: {}", Self::trim_for_context(content, 240)))
+                    (
+                        false,
+                        format!(
+                            "Ambiguous reviewer response: {}",
+                            Self::trim_for_context(content, 240)
+                        ),
+                    )
                 }
             }
             Err(e) => {
@@ -1802,7 +1819,9 @@ impl Orchestrator {
         if text.starts_with('{') && text.ends_with('}') {
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&text) {
                 // Try common content field names
-                for key in ["content", "answer", "response", "summary", "text", "message"] {
+                for key in [
+                    "content", "answer", "response", "summary", "text", "message",
+                ] {
                     if let Some(val) = obj.get(key).and_then(|v| v.as_str()) {
                         return val.trim().to_string();
                     }
@@ -1854,7 +1873,12 @@ impl Orchestrator {
         let tool_context = if has_mcp {
             format!(
                 "\nAvailable MCP tools: [{}]",
-                mcp_tool_names.iter().take(15).cloned().collect::<Vec<_>>().join(", ")
+                mcp_tool_names
+                    .iter()
+                    .take(15)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         } else {
             String::new()
@@ -1934,7 +1958,15 @@ impl Orchestrator {
             return TaskType::ExternalProject;
         }
 
-        let code_kw = ["code", "implement", "function", "refactor", "bug", "fix", "debug"];
+        let code_kw = [
+            "code",
+            "implement",
+            "function",
+            "refactor",
+            "bug",
+            "fix",
+            "debug",
+        ];
         if code_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::CodeGeneration;
         }
@@ -1942,7 +1974,13 @@ impl Orchestrator {
         if analysis_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::Analysis;
         }
-        let interactive_kw = ["explore", "investigate", "figure out", "step by step", "iteratively"];
+        let interactive_kw = [
+            "explore",
+            "investigate",
+            "figure out",
+            "step by step",
+            "iteratively",
+        ];
         if interactive_kw.iter().any(|kw| lower.contains(kw)) {
             return TaskType::Interactive;
         }
@@ -2007,8 +2045,14 @@ impl Orchestrator {
         repo_url: Option<&str>,
     ) -> anyhow::Result<ExecutionGraph> {
         let task_type = Self::classify_task(
-            task, mcp_server_names, mcp_tool_names, previous_task_type, &self.router, repo_url,
-        ).await;
+            task,
+            mcp_server_names,
+            mcp_tool_names,
+            previous_task_type,
+            &self.router,
+            repo_url,
+        )
+        .await;
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
         // Planner instructions — include available tools when MCP servers are registered
@@ -2250,11 +2294,8 @@ impl Orchestrator {
                 graph.add_node(fallback_code)?;
 
                 // Validation node: uses detected commands from repo analysis
-                let mut validate_lint = AgentNode::new(
-                    "validate_lint",
-                    AgentRole::Validator,
-                    "external_lint",
-                );
+                let mut validate_lint =
+                    AgentNode::new("validate_lint", AgentRole::Validator, "external_lint");
                 validate_lint.dependencies = vec!["code".to_string()];
                 validate_lint.depth = 4;
                 validate_lint.policy = ExecutionPolicy {
@@ -2346,11 +2387,8 @@ impl Orchestrator {
                 // When validation is configured, insert validate_lint after code.
                 // Summarize is injected dynamically via on_completed.
                 if self.validation_config.has_lint() {
-                    let mut validate_lint = AgentNode::new(
-                        "validate_lint",
-                        AgentRole::Validator,
-                        "lint",
-                    );
+                    let mut validate_lint =
+                        AgentNode::new("validate_lint", AgentRole::Validator, "lint");
                     validate_lint.dependencies = vec!["code".to_string()];
                     validate_lint.policy = ExecutionPolicy {
                         timeout_ms: self.validation_config.lint_timeout_ms,
@@ -2368,8 +2406,7 @@ impl Orchestrator {
                         AgentRole::Summarizer,
                         "Summarize outcomes and produce checkpoint summary for context compaction.",
                     );
-                    summarize.dependencies =
-                        vec!["code".to_string(), "fallback_code".to_string()];
+                    summarize.dependencies = vec!["code".to_string(), "fallback_code".to_string()];
                     summarize.policy = Self::default_policy();
                     graph.add_node(summarize)?;
                 }
@@ -2943,7 +2980,12 @@ impl Orchestrator {
                              - You may use results from previous iterations to inform arguments.\n\
                              - If the task requires sequential steps (e.g., read a value, then use it), \
                                select only the NEXT step's tool(s) in this iteration.\n\
-                             - When ALL steps are complete and no more tools are needed, respond with exactly: DONE\n\n\
+                             - When ALL steps are complete and no more tools are needed, respond with exactly: DONE\n\
+                             - Your response MUST start with '[' for tool calls or 'DONE' for completion.\n\
+                             - Do NOT return prose, analysis, markdown, or a wrapper object like {{\"tool_calls\": [...]}}.\n\
+                             - If you are uncertain, return the single best next tool call instead of explanation-only text.\n\
+                             - Do NOT explain why you chose a tool.\n\
+                             - Valid example: [{{\"tool_name\":\"github/get_file_contents\",\"arguments\":{{\"owner\":\"haesookimDev\",\"repo\":\"DevGarden\",\"path\":\"README.md\"}}}}]\n\n\
                              Respond ONLY with a JSON array of tool calls, OR the word DONE.\n\
                              Each element: {{\"tool_name\": \"server/tool_name\", \"arguments\": {{...}}}}",
                             req.task,
@@ -3032,7 +3074,10 @@ impl Orchestrator {
                                 ),
                                 duration_ms: started.elapsed().as_millis(),
                                 succeeded: false,
-                                error: Some("No executable tool calls were parsed from LLM output".to_string()),
+                                error: Some(format!(
+                                    "No executable tool calls were parsed from LLM output. Selector output preview: {}",
+                                    summarize_selector_output(&llm_output)
+                                )),
                             });
                         }
 
@@ -3967,26 +4012,44 @@ impl Orchestrator {
                         "dependencies": dependencies,
                     }),
                     RuntimeEvent::NodeTokenChunk { .. } => unreachable!(),
-                    RuntimeEvent::CoderSessionStarted { node_id, session_id, backend } => serde_json::json!({
+                    RuntimeEvent::CoderSessionStarted {
+                        node_id,
+                        session_id,
+                        backend,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "session_id": session_id,
                         "backend": backend,
                         "phase": "coder_session_started",
                     }),
-                    RuntimeEvent::CoderOutputChunk { node_id, session_id, stream, content } => serde_json::json!({
+                    RuntimeEvent::CoderOutputChunk {
+                        node_id,
+                        session_id,
+                        stream,
+                        content,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "session_id": session_id,
                         "stream": stream,
                         "content": content,
                         "phase": "coder_output_chunk",
                     }),
-                    RuntimeEvent::CoderFileChanged { node_id, session_id, file } => serde_json::json!({
+                    RuntimeEvent::CoderFileChanged {
+                        node_id,
+                        session_id,
+                        file,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "session_id": session_id,
                         "file": file,
                         "phase": "coder_file_changed",
                     }),
-                    RuntimeEvent::CoderSessionCompleted { node_id, session_id, files_changed, exit_code } => serde_json::json!({
+                    RuntimeEvent::CoderSessionCompleted {
+                        node_id,
+                        session_id,
+                        files_changed,
+                        exit_code,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "session_id": session_id,
                         "files_changed": files_changed,
@@ -4009,23 +4072,40 @@ impl Orchestrator {
                     RuntimeEvent::GraphCompleted => {
                         serde_json::json!({ "phase": "graph_completed" })
                     }
-                    RuntimeEvent::ValidationCompleted { node_id, phase, passed } => serde_json::json!({
+                    RuntimeEvent::ValidationCompleted {
+                        node_id,
+                        phase,
+                        passed,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "phase": phase,
                         "passed": passed,
                     }),
-                    RuntimeEvent::GitCommitCreated { node_id, commit_hash, commit_message, pushed } => serde_json::json!({
+                    RuntimeEvent::GitCommitCreated {
+                        node_id,
+                        commit_hash,
+                        commit_message,
+                        pushed,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "commit_hash": commit_hash,
                         "commit_message": commit_message,
                         "pushed": pushed,
                     }),
-                    RuntimeEvent::RepoCloned { node_id, repo_path, shallow } => serde_json::json!({
+                    RuntimeEvent::RepoCloned {
+                        node_id,
+                        repo_path,
+                        shallow,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "repo_path": repo_path,
                         "shallow": shallow,
                     }),
-                    RuntimeEvent::RepoAnalyzed { node_id, primary_language, file_count } => serde_json::json!({
+                    RuntimeEvent::RepoAnalyzed {
+                        node_id,
+                        primary_language,
+                        file_count,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "primary_language": primary_language,
                         "file_count": file_count,
@@ -4082,7 +4162,11 @@ impl Orchestrator {
                         (RunActionType::CoderSessionCompleted, Some(node_id.as_str()))
                     }
                     RuntimeEvent::GraphCompleted => (RunActionType::GraphCompleted, Some("graph")),
-                    RuntimeEvent::ValidationCompleted { node_id, phase: _, passed } => {
+                    RuntimeEvent::ValidationCompleted {
+                        node_id,
+                        phase: _,
+                        passed,
+                    } => {
                         let action = if *passed {
                             RunActionType::ValidationPassed
                         } else {
@@ -5354,7 +5438,13 @@ fn parse_agent_role(value: &str) -> Option<AgentRole> {
 fn extract_repo_url_from_text(text: &str) -> Option<String> {
     for word in text.split_whitespace() {
         let trimmed = word.trim_matches(|c: char| {
-            !c.is_alphanumeric() && c != '/' && c != ':' && c != '.' && c != '-' && c != '_' && c != '@'
+            !c.is_alphanumeric()
+                && c != '/'
+                && c != ':'
+                && c != '.'
+                && c != '-'
+                && c != '_'
+                && c != '@'
         });
         if (trimmed.starts_with("https://") || trimmed.starts_with("git@"))
             && (trimmed.contains("github.com")
@@ -5375,14 +5465,12 @@ fn parse_tool_calls(raw: &str) -> Vec<serde_json::Value> {
     }
 
     let mut parsed = Vec::<serde_json::Value>::new();
-
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        collect_tool_calls(value, &mut parsed);
-    } else {
-        let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
-        for value in stream.flatten() {
-            collect_tool_calls(value, &mut parsed);
+    let mut seen_candidates = HashSet::<String>::new();
+    for candidate in tool_call_parse_candidates(trimmed) {
+        if !seen_candidates.insert(candidate.clone()) {
+            continue;
         }
+        collect_tool_calls_from_text(candidate.as_str(), &mut parsed);
     }
 
     if parsed.is_empty() {
@@ -5414,6 +5502,143 @@ fn parse_tool_calls(raw: &str) -> Vec<serde_json::Value> {
     deduped
 }
 
+fn collect_tool_calls_from_text(raw: &str, out: &mut Vec<serde_json::Value>) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        collect_tool_calls(value, out);
+        return;
+    }
+
+    let stream = serde_json::Deserializer::from_str(raw).into_iter::<serde_json::Value>();
+    for value in stream.flatten() {
+        collect_tool_calls(value, out);
+    }
+}
+
+fn tool_call_parse_candidates(raw: &str) -> Vec<String> {
+    let mut candidates = vec![raw.trim().to_string()];
+
+    let cleaned = Orchestrator::clean_llm_output(raw);
+    if cleaned != raw.trim() {
+        candidates.push(cleaned.clone());
+    }
+
+    candidates.extend(extract_markdown_code_blocks(raw));
+    candidates.extend(extract_balanced_json_fragments(raw, 16));
+
+    if cleaned != raw.trim() {
+        candidates.extend(extract_markdown_code_blocks(cleaned.as_str()));
+        candidates.extend(extract_balanced_json_fragments(cleaned.as_str(), 16));
+    }
+
+    candidates
+}
+
+fn extract_markdown_code_blocks(raw: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut cursor = raw;
+
+    while let Some(open_idx) = cursor.find("```") {
+        let after_open = &cursor[open_idx + 3..];
+        let Some(first_newline) = after_open.find('\n') else {
+            break;
+        };
+        let content_start = open_idx + 3 + first_newline + 1;
+        let remainder = &cursor[content_start..];
+        let Some(close_idx) = remainder.find("```") else {
+            break;
+        };
+        let content = remainder[..close_idx].trim();
+        if !content.is_empty() {
+            blocks.push(content.to_string());
+        }
+        cursor = &remainder[close_idx + 3..];
+    }
+
+    blocks
+}
+
+fn extract_balanced_json_fragments(raw: &str, max_candidates: usize) -> Vec<String> {
+    let mut fragments = Vec::new();
+
+    for (start_idx, ch) in raw.char_indices() {
+        if ch != '{' && ch != '[' {
+            continue;
+        }
+        if let Some(end_idx) = find_balanced_json_end(raw, start_idx, ch) {
+            let fragment = raw[start_idx..end_idx].trim();
+            if !fragment.is_empty() {
+                fragments.push(fragment.to_string());
+                if fragments.len() >= max_candidates {
+                    break;
+                }
+            }
+        }
+    }
+
+    fragments
+}
+
+fn find_balanced_json_end(raw: &str, start_idx: usize, opening: char) -> Option<usize> {
+    let mut expected = vec![match opening {
+        '{' => '}',
+        '[' => ']',
+        _ => return None,
+    }];
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, ch) in raw[start_idx..].char_indices() {
+        if offset == 0 {
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => expected.push('}'),
+            '[' => expected.push(']'),
+            '}' | ']' => {
+                if expected.pop() != Some(ch) {
+                    return None;
+                }
+                if expected.is_empty() {
+                    return Some(start_idx + offset + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn summarize_selector_output(raw: &str) -> String {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview = String::new();
+    let mut count = 0usize;
+
+    for ch in normalized.chars() {
+        if count >= 320 {
+            preview.push_str("...");
+            return preview;
+        }
+        preview.push(ch);
+        count += 1;
+    }
+
+    preview
+}
+
 fn collect_tool_calls(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
     match value {
         serde_json::Value::Array(values) => {
@@ -5442,11 +5667,7 @@ mod tests {
 
     async fn make_test_orchestrator(
         suffix: &str,
-    ) -> (
-        std::path::PathBuf,
-        Arc<MemoryManager>,
-        Orchestrator,
-    ) {
+    ) -> (std::path::PathBuf, Arc<MemoryManager>, Orchestrator) {
         let tmp = std::env::temp_dir().join(format!("agent-{suffix}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -5465,13 +5686,21 @@ mod tests {
             Duration::from_secs(1),
         ));
 
-        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
+        let router = Arc::new(ModelRouter::new(
+            "http://127.0.0.1:8000",
+            None,
+            None,
+            None,
+            None,
+        ));
         let mut coder_mgr = coder_backend::CoderSessionManager::new(
             memory.clone(),
             std::path::PathBuf::new(),
             crate::types::CoderBackendKind::Llm,
         );
-        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(
+            router.clone(),
+        )));
         let orchestrator = Orchestrator::new(
             AgentRuntime::new(4),
             AgentRegistry::builtin(),
@@ -5688,9 +5917,9 @@ mod tests {
                 None,
                 None,
                 None,
-        )
-        .await
-        .unwrap();
+            )
+            .await
+            .unwrap();
         assert!(analysis.node("plan").is_some());
         assert!(analysis.node("analyze").is_some());
 
@@ -5717,13 +5946,21 @@ mod tests {
             Duration::from_secs(1),
         ));
 
-        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
+        let router = Arc::new(ModelRouter::new(
+            "http://127.0.0.1:8000",
+            None,
+            None,
+            None,
+            None,
+        ));
         let mut coder_mgr = coder_backend::CoderSessionManager::new(
             memory.clone(),
             std::env::temp_dir(),
             crate::types::CoderBackendKind::Llm,
         );
-        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(
+            router.clone(),
+        )));
         let orchestrator = Orchestrator::new(
             AgentRuntime::new(4),
             AgentRegistry::builtin(),
@@ -5783,13 +6020,21 @@ mod tests {
             Duration::from_secs(1),
         ));
 
-        let router = Arc::new(ModelRouter::new("http://127.0.0.1:8000", None, None, None, None));
+        let router = Arc::new(ModelRouter::new(
+            "http://127.0.0.1:8000",
+            None,
+            None,
+            None,
+            None,
+        ));
         let mut coder_mgr = coder_backend::CoderSessionManager::new(
             memory.clone(),
             std::path::PathBuf::new(),
             crate::types::CoderBackendKind::Llm,
         );
-        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(router.clone())));
+        coder_mgr.register_backend(Arc::new(coder_backend::LlmCoderBackend::new(
+            router.clone(),
+        )));
         let repo_root = tmp.join("repo");
         let orchestrator = Orchestrator::new(
             AgentRuntime::new(4),
@@ -6160,5 +6405,52 @@ mod tests {
             calls[0].get("tool_name").and_then(|v| v.as_str()),
             Some("github/list_commits")
         );
+    }
+
+    #[test]
+    fn parse_tool_calls_accepts_prose_then_fenced_json() {
+        let raw = r#"I will inspect the README first.
+
+```json
+[
+  {
+    "tool_name": "github/get_file_contents",
+    "arguments": {
+      "owner": "haesookimDev",
+      "repo": "DevGarden",
+      "path": "README.md"
+    }
+  }
+]
+```"#;
+        let calls = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("tool_name").and_then(|v| v.as_str()),
+            Some("github/get_file_contents")
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_extracts_inline_json_fragment_from_prose() {
+        let raw = r#"Use this next call: [{"tool_name":"github/list_commits","arguments":{"owner":"haesookimDev","repo":"DevGarden","perPage":5}}] and then summarize."#;
+        let calls = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("tool_name").and_then(|v| v.as_str()),
+            Some("github/list_commits")
+        );
+    }
+
+    #[test]
+    fn summarize_selector_output_compacts_whitespace_and_truncates() {
+        let preview =
+            summarize_selector_output("line one\nline two\n\nline three with extra spacing");
+        assert_eq!(preview, "line one line two line three with extra spacing");
+
+        let long = "a".repeat(400);
+        let preview = summarize_selector_output(&long);
+        assert!(preview.ends_with("..."));
+        assert!(preview.len() <= 323);
     }
 }

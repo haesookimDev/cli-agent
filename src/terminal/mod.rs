@@ -154,7 +154,13 @@ impl TerminalManager {
                 }
                 // Collect real exit code from the child process.
                 let code = match child_for_reader.blocking_lock().wait() {
-                    Ok(status) => if status.success() { 0 } else { 1 },
+                    Ok(status) => {
+                        if status.success() {
+                            0
+                        } else {
+                            1
+                        }
+                    }
                     Err(_) => -1,
                 };
                 let _ = events.send(TerminalEvent::Exit(code));

@@ -58,9 +58,8 @@ impl CoderBackend for LlmCoderBackend {
         } else {
             format!("{context}\n\n{task}")
         };
-        let constraints = crate::router::RoutingConstraints::for_profile(
-            crate::types::TaskProfile::Coding,
-        );
+        let constraints =
+            crate::router::RoutingConstraints::for_profile(crate::types::TaskProfile::Coding);
         let (_decision, inference) = self
             .router
             .infer(crate::types::TaskProfile::Coding, &prompt, &constraints)
@@ -501,7 +500,10 @@ impl CoderSessionManager {
         &self,
         run_id: Uuid,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        self.memory.store().list_coder_sessions_for_run(run_id).await
+        self.memory
+            .store()
+            .list_coder_sessions_for_run(run_id)
+            .await
     }
 }
 

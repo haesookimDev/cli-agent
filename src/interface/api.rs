@@ -12,7 +12,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use futures::{stream::StreamExt, SinkExt};
+use futures::{SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -252,22 +252,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/runs/:run_id/save-workflow",
             post(save_workflow_from_run_handler),
         )
-        .route(
-            "/v1/skills",
-            get(list_skills_handler),
-        )
-        .route(
-            "/v1/skills/reload",
-            post(reload_skills_handler),
-        )
-        .route(
-            "/v1/skills/:skill_id",
-            get(get_skill_handler),
-        )
-        .route(
-            "/v1/skills/:skill_id/execute",
-            post(execute_skill_handler),
-        )
+        .route("/v1/skills", get(list_skills_handler))
+        .route("/v1/skills/reload", post(reload_skills_handler))
+        .route("/v1/skills/:skill_id", get(get_skill_handler))
+        .route("/v1/skills/:skill_id/execute", post(execute_skill_handler))
         .route(
             "/v1/terminal/sessions",
             post(create_terminal_handler).get(list_terminals_handler),
@@ -1224,7 +1212,10 @@ async fn list_coder_sessions_handler(
     };
 
     match state.orchestrator.list_coder_sessions(run_id).await {
-        Ok(sessions) => (StatusCode::OK, Json(serde_json::json!({ "sessions": sessions }))),
+        Ok(sessions) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "sessions": sessions })),
+        ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -1955,9 +1946,7 @@ async fn save_workflow_from_run_handler(
 
 // --- Skill handlers ---
 
-async fn list_skills_handler(
-    State(state): State<ApiState>,
-) -> impl IntoResponse {
+async fn list_skills_handler(State(state): State<ApiState>) -> impl IntoResponse {
     let skills = state.orchestrator.list_skills();
     (StatusCode::OK, Json(serde_json::json!(skills)))
 }
@@ -1988,11 +1977,12 @@ async fn execute_skill_handler(
         );
     }
 
-    let req = serde_json::from_slice::<ExecuteWorkflowRequest>(body.as_ref())
-        .unwrap_or(ExecuteWorkflowRequest {
+    let req = serde_json::from_slice::<ExecuteWorkflowRequest>(body.as_ref()).unwrap_or(
+        ExecuteWorkflowRequest {
             parameters: None,
             session_id: None,
-        });
+        },
+    );
 
     match state
         .orchestrator
@@ -2028,10 +2018,7 @@ async fn reload_skills_handler(
                 .reload_skills(std::path::Path::new(&dir))
                 .await;
             let count = state.orchestrator.list_skills().len();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"reloaded": count})),
-            )
+            (StatusCode::OK, Json(serde_json::json!({"reloaded": count})))
         }
         None => (
             StatusCode::BAD_REQUEST,
@@ -2335,10 +2322,7 @@ async fn terminal_ws_handler(
         .into_response()
 }
 
-async fn handle_terminal_ws(
-    socket: WebSocket,
-    session: Arc<crate::terminal::TerminalSession>,
-) {
+async fn handle_terminal_ws(socket: WebSocket, session: Arc<crate::terminal::TerminalSession>) {
     use std::io::Write;
 
     let (mut ws_sender, mut ws_receiver) = socket.split();

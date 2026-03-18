@@ -16,7 +16,12 @@ fn expand_env_vars(input: &str) -> String {
         if let Some(end) = result[start..].find('}') {
             let var_name = &result[start + 2..start + end];
             let value = env::var(var_name).unwrap_or_default();
-            result = format!("{}{}{}", &result[..start], value, &result[start + end + 1..]);
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                value,
+                &result[start + end + 1..]
+            );
         } else {
             break;
         }
@@ -113,8 +118,8 @@ impl AppConfig {
                 env::var("MCP_CONFIG_PATH").unwrap_or_else(|_| "mcp_servers.json".to_string());
             match std::fs::read_to_string(&config_path) {
                 Ok(json) => {
-                    let mut servers: Vec<McpServerConfig> =
-                        serde_json::from_str(&json).unwrap_or_else(|e| {
+                    let mut servers: Vec<McpServerConfig> = serde_json::from_str(&json)
+                        .unwrap_or_else(|e| {
                             eprintln!("warn: failed to parse {}: {}", config_path, e);
                             Vec::new()
                         });
@@ -146,8 +151,7 @@ impl AppConfig {
             "codex" => CoderBackendKind::Codex,
             _ => CoderBackendKind::Llm,
         };
-        let coder_command =
-            env::var("CODER_COMMAND").unwrap_or_else(|_| "claude".to_string());
+        let coder_command = env::var("CODER_COMMAND").unwrap_or_else(|_| "claude".to_string());
         let coder_args: Vec<String> = env::var("CODER_ARGS")
             .ok()
             .map(|v| shell_words::split(&v).unwrap_or_else(|_| vec![v]))
@@ -174,8 +178,10 @@ impl AppConfig {
                 };
                 let reuse_coder_cli = matches!(
                     (backend, coder_backend),
-                    (CliModelBackendKind::ClaudeCode, CoderBackendKind::ClaudeCode)
-                        | (CliModelBackendKind::Codex, CoderBackendKind::Codex)
+                    (
+                        CliModelBackendKind::ClaudeCode,
+                        CoderBackendKind::ClaudeCode
+                    ) | (CliModelBackendKind::Codex, CoderBackendKind::Codex)
                 );
                 let command = env::var("MODEL_CLI_COMMAND")
                     .ok()
@@ -221,7 +227,12 @@ impl AppConfig {
             env::var(var)
                 .ok()
                 .filter(|v| !v.is_empty())
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
@@ -259,8 +270,7 @@ impl AppConfig {
         };
 
         let repo_analysis = RepoAnalysisConfig {
-            clone_base_dir: env::var("REPO_CLONE_DIR")
-                .unwrap_or_else(|_| "repos".to_string()),
+            clone_base_dir: env::var("REPO_CLONE_DIR").unwrap_or_else(|_| "repos".to_string()),
             shallow_clone: env::var("REPO_SHALLOW_CLONE")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
@@ -330,7 +340,10 @@ impl AppConfig {
         })?;
         let repo_dir = self.data_dir.join("repo");
         std::fs::create_dir_all(&repo_dir).with_context(|| {
-            format!("failed to create session workspace root {}", repo_dir.display())
+            format!(
+                "failed to create session workspace root {}",
+                repo_dir.display()
+            )
         })?;
         Ok(())
     }

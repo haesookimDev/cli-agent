@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, warn, error};
+use tracing::{debug, error, warn};
 
 use crate::types::{McpToolCallResult, McpToolDefinition};
 
@@ -50,7 +50,11 @@ impl McpClient {
                 "{} {}",
                 command,
                 args.iter()
-                    .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.to_string() })
+                    .map(|a| if a.contains(' ') {
+                        format!("\"{}\"", a)
+                    } else {
+                        a.to_string()
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             );

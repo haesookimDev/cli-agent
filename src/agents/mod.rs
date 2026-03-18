@@ -179,7 +179,7 @@ impl BuiltinAgent {
                 "You are the fallback agent. Recover gracefully when upstream nodes fail and provide safe alternatives."
             }
             AgentRole::ToolCaller => {
-                "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results."
+                "You are the tool caller agent. Select and execute MCP tool calls as instructed. When asked to choose tools, respond with ONLY a machine-readable JSON array of tool calls or the word DONE. Your first non-whitespace character must be '[' or your entire response must be DONE. Never add prose, markdown fences, or wrapper objects."
             }
             AgentRole::Analyzer => {
                 "You are the analyzer agent. Examine data and results to identify patterns, anomalies, and insights."
@@ -233,7 +233,7 @@ fn agent_role_prompt(role: AgentRole) -> &'static str {
             "You are the fallback agent. Recover gracefully when upstream nodes fail and provide safe alternatives."
         }
         AgentRole::ToolCaller => {
-            "You are the tool caller agent. Execute MCP tool calls as instructed and return structured results."
+            "You are the tool caller agent. Select and execute MCP tool calls as instructed. When asked to choose tools, respond with ONLY a machine-readable JSON array of tool calls or the word DONE. Your first non-whitespace character must be '[' or your entire response must be DONE. Never add prose, markdown fences, or wrapper objects."
         }
         AgentRole::Analyzer => {
             "You are the analyzer agent. Examine data and results to identify patterns, anomalies, and insights."

@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::router::ModelRouter;
-use crate::types::{
-    DetectedCommands, RepoAnalysis, RepoAnalysisConfig, TaskProfile, TechStack,
-};
+use crate::types::{DetectedCommands, RepoAnalysis, RepoAnalysisConfig, TaskProfile, TechStack};
 
 pub struct RepoAnalyzer {
     config: RepoAnalysisConfig,
@@ -23,7 +21,9 @@ impl RepoAnalyzer {
     ) -> anyhow::Result<RepoAnalysis> {
         let file_tree = self.discover_files(repo_path).await?;
         let key_files = self.find_key_files(&file_tree);
-        let tech_stack = self.detect_tech_stack(repo_path, &file_tree, &key_files).await?;
+        let tech_stack = self
+            .detect_tech_stack(repo_path, &file_tree, &key_files)
+            .await?;
         let detected_commands = self
             .detect_build_commands(repo_path, &tech_stack, &key_files)
             .await?;
@@ -360,8 +360,7 @@ impl RepoAnalyzer {
             self.config.repo_map_max_tokens,
         );
 
-        let constraints =
-            crate::router::RoutingConstraints::for_profile(TaskProfile::Extraction);
+        let constraints = crate::router::RoutingConstraints::for_profile(TaskProfile::Extraction);
         let (_decision, inference) = router
             .infer(TaskProfile::Extraction, &prompt, &constraints)
             .await?;

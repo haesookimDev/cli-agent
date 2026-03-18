@@ -33,12 +33,10 @@ impl CommandRunner {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("command timed out after {}ms", timeout_ms))??;
+        let output =
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output())
+                .await
+                .map_err(|_| anyhow::anyhow!("command timed out after {}ms", timeout_ms))??;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

@@ -57,9 +57,9 @@ impl SessionWorkspaceManager {
             raw
         );
         anyhow::ensure!(
-            candidate.components().all(|component| {
-                matches!(component, Component::Normal(_) | Component::CurDir)
-            }),
+            candidate
+                .components()
+                .all(|component| { matches!(component, Component::Normal(_) | Component::CurDir) }),
             "session-scoped paths must not contain parent traversal: {}",
             raw
         );

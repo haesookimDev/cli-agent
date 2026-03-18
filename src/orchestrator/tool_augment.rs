@@ -44,9 +44,7 @@ pub async fn execute_tool_calls(
         // Check tool allowlist
         if !allowed_tools.is_empty()
             && !allowed_tools.iter().any(|a| {
-                tool_name == *a
-                    || tool_name.contains(a.as_str())
-                    || a.contains(tool_name.as_str())
+                tool_name == *a || tool_name.contains(a.as_str()) || a.contains(tool_name.as_str())
             })
         {
             results.push(McpToolCallResult {

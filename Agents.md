@@ -85,6 +85,11 @@
 - 로컬 파일/폴더/워크스페이스 의도에서는 `filesystem/*` 도구를 우선 선택하고, `github/*` 등 원격 저장소 도구는 사용자가 명시적으로 원격 작업을 요청한 경우에만 사용한다.
 - planner/tool-caller 프롬프트에 로컬 우선 정책을 명시해 도구 선택 편향을 줄인다.
 
+### Tool Caller Output Contract
+- `tool_caller` 노드 프롬프트는 응답 형식을 엄격히 고정해야 하며, 첫 토큰이 `[` 또는 `DONE`가 되도록 요구해야 한다.
+- `tool_caller`는 prose, markdown fence, wrapper object(예: `{"tool_calls":[...]}`)를 금지해야 한다.
+- 파싱 실패 시 세션 로그만으로 원인을 확인할 수 있도록 raw selector 출력 preview를 오류 메시지에 포함해야 한다.
+
 ### Skill Git CLI
 - 스킬/워크플로우 노드의 `git_commands`는 `validator` 역할에서만 지원한다.
 - `git_commands` 각 항목은 `status --short` 같은 서브커맨드 형식과 `git status --short` 전체 명령 형식을 모두 허용하되, 런타임은 항상 `git` CLI 실행으로 정규화한다.

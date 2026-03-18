@@ -18,7 +18,7 @@ use cli_agent::interface::tui;
 use cli_agent::memory::MemoryManager;
 use cli_agent::orchestrator::Orchestrator;
 use cli_agent::orchestrator::coder_backend::{
-    ClaudeCodeBackend, CodexBackend, CoderSessionManager, LlmCoderBackend,
+    ClaudeCodeBackend, CoderSessionManager, CodexBackend, LlmCoderBackend,
 };
 use cli_agent::router::ModelRouter;
 use cli_agent::runtime::AgentRuntime;
@@ -111,11 +111,19 @@ async fn main() -> anyhow::Result<()> {
     let mut mcp_registry = cli_agent::mcp::McpRegistry::new();
     for server_cfg in &cfg.mcp_servers {
         let args = shell_words::split(&server_cfg.args).unwrap_or_else(|_| {
-            server_cfg.args.split_whitespace().map(String::from).collect()
+            server_cfg
+                .args
+                .split_whitespace()
+                .map(String::from)
+                .collect()
         });
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match cli_agent::mcp::McpClient::spawn(&server_cfg.command, &args_ref, server_cfg.env.clone())
-            .await
+        match cli_agent::mcp::McpClient::spawn(
+            &server_cfg.command,
+            &args_ref,
+            server_cfg.env.clone(),
+        )
+        .await
         {
             Ok(client) => {
                 if let Err(e) = client.initialize().await {

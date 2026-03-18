@@ -21,6 +21,12 @@ nodes:
       - Prefer github/* tools over web search.
       - Use duckduckgo/duckduckgo_web_search only if repo files are insufficient.
       - Stop after the overview is well supported by repository sources.
+      - On each iteration, respond with ONLY a JSON array of tool calls or DONE.
+      - Do not return prose, markdown fences, wrapper objects, or analysis text.
+      - If you are unsure, pick the single highest-signal next tool call instead of explaining.
+      - Start with small, high-signal discovery calls.
+      - The first iteration should usually inspect README.md and recent commits for the target repo.
+      - After that, inspect manifests, configs, and entry-point files before falling back to web search.
     mcp_tools:
       - github/get_file_contents
       - github/search_code

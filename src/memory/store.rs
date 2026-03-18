@@ -274,11 +274,9 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
-            r#"CREATE INDEX IF NOT EXISTS idx_run_attempts_run ON run_attempts(run_id);"#,
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query(r#"CREATE INDEX IF NOT EXISTS idx_run_attempts_run ON run_attempts(run_id);"#)
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query(
             r#"
@@ -1755,12 +1753,11 @@ impl SqliteStore {
         &self,
         run_id: Uuid,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let rows = sqlx::query(
-            r#"SELECT * FROM coder_sessions WHERE run_id = ?1 ORDER BY started_at"#,
-        )
-        .bind(run_id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query(r#"SELECT * FROM coder_sessions WHERE run_id = ?1 ORDER BY started_at"#)
+                .bind(run_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut result = Vec::new();
         for r in rows {

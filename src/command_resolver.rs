@@ -110,7 +110,10 @@ fn find_bundled_codex_in_roots(roots: &[PathBuf]) -> Option<PathBuf> {
     let mut extensions = Vec::new();
 
     for root in roots {
-        for base in [root.join(".vscode/extensions"), root.join(".vscode-server/extensions")] {
+        for base in [
+            root.join(".vscode/extensions"),
+            root.join(".vscode-server/extensions"),
+        ] {
             let entries = match fs::read_dir(base) {
                 Ok(entries) => entries,
                 Err(_) => continue,
@@ -232,7 +235,10 @@ mod tests {
     fn bundled_codex_lookup_finds_windows_extension_binary() {
         let root = unique_temp_dir("bundle-windows");
         let extension = root.join(".vscode/extensions/openai.chatgpt-0.4.79-win32-x64");
-        let binary = extension.join("bin").join("windows-x86_64").join("codex.exe");
+        let binary = extension
+            .join("bin")
+            .join("windows-x86_64")
+            .join("codex.exe");
         fs::create_dir_all(binary.parent().unwrap()).unwrap();
         fs::write(&binary, b"test").unwrap();
 

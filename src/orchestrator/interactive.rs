@@ -10,8 +10,8 @@ use crate::mcp::McpRegistry;
 use crate::memory::MemoryManager;
 use crate::orchestrator::skill_loader;
 use crate::router::ModelRouter;
-use crate::runtime::{EventSink, NodeExecutionResult, RuntimeEvent};
 use crate::runtime::graph::AgentNode;
+use crate::runtime::{EventSink, NodeExecutionResult, RuntimeEvent};
 use crate::types::{AgentRole, RunActionType};
 
 /// Default max iterations for the interactive ReAct loop.
@@ -95,12 +95,7 @@ pub async fn execute_react_loop(
             priority: 1.0,
         }];
         let optimized = context.optimize(chunks);
-        let brief = context.build_structured_brief(
-            task.to_string(),
-            vec![],
-            vec![],
-            vec![],
-        );
+        let brief = context.build_structured_brief(task.to_string(), vec![], vec![], vec![]);
 
         let input = AgentInput {
             task: task.to_string(),
@@ -147,7 +142,10 @@ pub async fn execute_react_loop(
             .unwrap_or("")
             .to_string();
 
-        let action = parsed.get("action").cloned().unwrap_or(serde_json::json!({}));
+        let action = parsed
+            .get("action")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         let action_type = action
             .get("type")
             .and_then(|v| v.as_str())
@@ -278,9 +276,7 @@ pub async fn execute_react_loop(
         error: if converged {
             None
         } else {
-            Some(format!(
-                "Did not converge in {max_iterations} iterations"
-            ))
+            Some(format!("Did not converge in {max_iterations} iterations"))
         },
     }
 }
