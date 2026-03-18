@@ -759,7 +759,8 @@ impl ProviderClient {
 
     async fn generate_claude_code(&self, prompt: &str) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::ClaudeCode)?;
-        let mut cmd = Command::new(&config.command);
+        let resolved_command = crate::command_resolver::resolve_command_path(&config.command);
+        let mut cmd = Command::new(&resolved_command);
         cmd.arg("-p")
             .arg(prompt)
             .args(&config.args)
@@ -776,7 +777,8 @@ impl ProviderClient {
     async fn generate_codex(&self, prompt: &str) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::Codex)?;
         let output_path = std::env::temp_dir().join(format!("codex-last-message-{}.txt", Uuid::new_v4()));
-        let mut cmd = Command::new(&config.command);
+        let resolved_command = crate::command_resolver::resolve_command_path(&config.command);
+        let mut cmd = Command::new(&resolved_command);
         cmd.arg("exec")
             .arg("--skip-git-repo-check")
             .arg("--full-auto")

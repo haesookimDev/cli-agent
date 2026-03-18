@@ -92,6 +92,10 @@
 - `web/package.json`의 스크립트는 `${VAR:-default}` 같은 POSIX 셸 치환에 의존하면 안 된다.
 - 웹 포트는 `AGENT_WEB_PORT`를 읽는 Node 래퍼 등 크로스플랫폼 방식으로 해석한 뒤 `next dev/start`에 전달해야 한다.
 
+### CLI Command Resolution
+- `codex`/`claude` 같은 bare CLI 명령은 spawn 전에 절대경로로 해석해야 하며, PATH에만 의존하면 안 된다.
+- 특히 Codex는 VS Code 확장 번들 경로(`.vscode/extensions/openai.chatgpt-*/bin/.../codex`)도 fallback 후보로 탐색해야 한다.
+
 ### Workflow Continuation
 - 워크플로우/그래프 실행은 첫 번째 패스가 끝났다고 바로 성공으로 끝내지 말고, reviewer가 `INCOMPLETE`를 반환하면 남은 요구사항을 기준으로 후속 planner/sub-agent 그래프를 재구성해 이어서 실행해야 한다.
 - 후속 planner는 남은 작업을 독립 서브태스크로 분해하고, 병렬 가능한 항목은 별도 노드로 분리해 실행되도록 JSON `SubtaskPlan`을 우선 출력해야 한다.

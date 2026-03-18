@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod command_resolver;
 pub mod config;
 pub mod context;
 pub mod gateway;

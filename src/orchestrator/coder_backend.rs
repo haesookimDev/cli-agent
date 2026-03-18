@@ -109,7 +109,8 @@ impl CoderBackend for ClaudeCodeBackend {
         let session_id = Uuid::new_v4().to_string();
         let started = Instant::now();
 
-        let mut cmd = Command::new(&self.command);
+        let resolved_command = crate::command_resolver::resolve_command_path(&self.command);
+        let mut cmd = Command::new(&resolved_command);
         cmd.arg("-p")
             .arg(task)
             .arg("--output-format")
@@ -215,7 +216,8 @@ impl CoderBackend for CodexBackend {
         let started = Instant::now();
         let output_path = std::env::temp_dir().join(format!("codex-coder-{}.txt", session_id));
 
-        let mut cmd = Command::new(&self.command);
+        let resolved_command = crate::command_resolver::resolve_command_path(&self.command);
+        let mut cmd = Command::new(&resolved_command);
         cmd.arg("exec")
             .arg("--skip-git-repo-check")
             .arg("--full-auto")

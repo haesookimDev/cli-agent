@@ -85,7 +85,9 @@ impl TerminalManager {
             pixel_height: 0,
         })?;
 
-        let mut cmd = CommandBuilder::new(command);
+        let resolved_command = crate::command_resolver::resolve_command_path(command);
+        let resolved_command_str = resolved_command.to_string_lossy().into_owned();
+        let mut cmd = CommandBuilder::new(&resolved_command_str);
         cmd.args(args);
 
         let child = pair.slave.spawn_command(cmd)?;
@@ -98,7 +100,7 @@ impl TerminalManager {
         let id = Uuid::new_v4().to_string();
         let session = Arc::new(TerminalSession {
             id: id.clone(),
-            command: command.to_string(),
+            command: resolved_command_str,
             args: args.to_vec(),
             created_at: Utc::now(),
             cols,
