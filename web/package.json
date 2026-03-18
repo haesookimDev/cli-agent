@@ -2,9 +2,9 @@
   "name": "agent-orchestrator-web",
   "private": true,
   "scripts": {
-    "dev": "next dev --port ${AGENT_WEB_PORT:-3000}",
+    "dev": "node scripts/run-next-with-port.js dev",
     "build": "next build",
-    "start": "next start --port ${AGENT_WEB_PORT:-3000}",
+    "start": "node scripts/run-next-with-port.js start",
     "lint": "next lint"
   },
   "dependencies": {
