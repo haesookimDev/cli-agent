@@ -66,6 +66,8 @@ pub struct AgentNode {
     pub retry_context: Option<String>,
     #[serde(default)]
     pub mcp_tools: Vec<String>,
+    #[serde(default)]
+    pub git_commands: Vec<String>,
 }
 
 impl AgentNode {
@@ -79,6 +81,7 @@ impl AgentNode {
             depth: 0,
             retry_context: None,
             mcp_tools: Vec::new(),
+            git_commands: Vec::new(),
         }
     }
 }

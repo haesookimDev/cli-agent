@@ -80,6 +80,10 @@
 - 로컬 파일/폴더/워크스페이스 의도에서는 `filesystem/*` 도구를 우선 선택하고, `github/*` 등 원격 저장소 도구는 사용자가 명시적으로 원격 작업을 요청한 경우에만 사용한다.
 - planner/tool-caller 프롬프트에 로컬 우선 정책을 명시해 도구 선택 편향을 줄인다.
 
+### Skill Git CLI
+- 스킬/워크플로우 노드의 `git_commands`는 `validator` 역할에서만 지원한다.
+- `git_commands` 각 항목은 `status --short` 같은 서브커맨드 형식과 `git status --short` 전체 명령 형식을 모두 허용하되, 런타임은 항상 `git` CLI 실행으로 정규화한다.
+
 ### CLI Model Routing
 - `MODEL_CLI_BACKEND`가 설정되면 coder 전용 경로만이 아니라 planner/reviewer/tool-caller 등 일반 LLM 노드도 동일한 CLI provider를 통해 실행되어야 한다.
 - `MODEL_CLI_ONLY=true`일 때는 부팅 시 대상 CLI provider만 활성화하고 나머지 provider는 비활성화해 API/OAuth 우회 목적이 fallback 경로에서 깨지지 않도록 보장해야 한다.

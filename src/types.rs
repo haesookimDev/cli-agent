@@ -672,6 +672,8 @@ pub struct WorkflowNodeTemplate {
     pub dependencies: Vec<String>,
     #[serde(default)]
     pub mcp_tools: Vec<String>,
+    #[serde(default)]
+    pub git_commands: Vec<String>,
     pub policy: serde_json::Value,
 }
 

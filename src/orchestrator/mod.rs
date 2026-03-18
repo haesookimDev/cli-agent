@@ -39,7 +39,7 @@ use crate::types::{
     RunBehaviorSummary, RunBehaviorView, RunRecord, RunRequest, RunStatus, RunSubmission,
     RunTrace, RunTraceGraph, SessionEvent, SessionEventType, SessionMemoryItem, SettingsPatch,
     SubtaskPlan, TaskProfile, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
-    WebhookEndpoint, WorkflowTemplate,
+    WebhookEndpoint, WorkflowNodeTemplate, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -2319,6 +2319,51 @@ impl Orchestrator {
                         });
                     let instructions = node.instructions.as_str();
 
+                    if !node.git_commands.is_empty() {
+                        use crate::orchestrator::git_manager::GitManager;
+
+                        let results = GitManager::run_cli_commands(
+                            &node.git_commands,
+                            &working_dir,
+                            node.policy.timeout_ms,
+                        )
+                        .await;
+
+                        let all_passed = results.iter().all(|r| r.passed);
+                        let output = serde_json::to_string(&results).unwrap_or_default();
+
+                        event_sink(RuntimeEvent::ValidationCompleted {
+                            node_id: node.id.clone(),
+                            phase: "git_cli".to_string(),
+                            passed: all_passed,
+                        });
+
+                        let error = if all_passed {
+                            None
+                        } else {
+                            results
+                                .iter()
+                                .find(|r| !r.passed)
+                                .map(|r| {
+                                    format!(
+                                        "{}: {}",
+                                        r.command,
+                                        r.stderr.chars().take(500).collect::<String>()
+                                    )
+                                })
+                        };
+
+                        return Ok(NodeExecutionResult {
+                            node_id: node.id,
+                            role: node.role,
+                            model: "git".to_string(),
+                            output,
+                            duration_ms: started.elapsed().as_millis(),
+                            succeeded: all_passed,
+                            error,
+                        });
+                    }
+
                     if instructions.contains("git") {
                         // Git automation phase
                         use crate::orchestrator::git_manager::GitManager;
@@ -4158,16 +4203,7 @@ impl Orchestrator {
 
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
         for wn in &template.graph_template.nodes {
-            let role = wn.role;
-            let instructions = wn.instructions.clone();
-            let mut node = AgentNode::new(wn.id.clone(), role, instructions);
-            node.dependencies = wn.dependencies.clone();
-            node.mcp_tools = wn.mcp_tools.clone();
-            if !wn.policy.is_null() {
-                if let Ok(policy) = serde_json::from_value::<ExecutionPolicy>(wn.policy.clone()) {
-                    node.policy = policy;
-                }
-            }
+            let node = workflow_node_to_agent_node(wn)?;
             graph.add_node(node)?;
         }
 
@@ -4252,6 +4288,27 @@ impl Orchestrator {
     ) -> anyhow::Result<crate::types::McpToolCallResult> {
         self.mcp.call_tool(name, arguments).await
     }
+}
+
+fn workflow_node_to_agent_node(wn: &WorkflowNodeTemplate) -> anyhow::Result<AgentNode> {
+    if !wn.git_commands.is_empty() && wn.role != AgentRole::Validator {
+        anyhow::bail!(
+            "workflow node '{}' uses git_commands but role '{}' is not validator",
+            wn.id,
+            wn.role
+        );
+    }
+
+    let mut node = AgentNode::new(wn.id.clone(), wn.role, wn.instructions.clone());
+    node.dependencies = wn.dependencies.clone();
+    node.mcp_tools = wn.mcp_tools.clone();
+    node.git_commands = wn.git_commands.clone();
+    if !wn.policy.is_null() {
+        if let Ok(policy) = serde_json::from_value::<ExecutionPolicy>(wn.policy.clone()) {
+            node.policy = policy;
+        }
+    }
+    Ok(node)
 }
 
 fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGraph {
@@ -5023,6 +5080,50 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn workflow_node_to_agent_node_preserves_git_commands() {
+        let node = workflow_node_to_agent_node(&WorkflowNodeTemplate {
+            id: "git_check".to_string(),
+            role: AgentRole::Validator,
+            instructions: "Run repository inspection".to_string(),
+            dependencies: vec!["plan".to_string()],
+            mcp_tools: vec![],
+            git_commands: vec!["status --short".to_string(), "git diff --stat".to_string()],
+            policy: serde_json::json!({
+                "timeout_ms": 45000,
+                "retry": 0,
+                "max_parallelism": 1,
+                "circuit_breaker": 1,
+                "on_dependency_failure": "fail_fast",
+                "fallback_node": null
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            node.git_commands,
+            vec!["status --short".to_string(), "git diff --stat".to_string()]
+        );
+        assert_eq!(node.policy.timeout_ms, 45_000);
+    }
+
+    #[test]
+    fn workflow_node_to_agent_node_rejects_git_commands_on_non_validator() {
+        let err = workflow_node_to_agent_node(&WorkflowNodeTemplate {
+            id: "bad_git".to_string(),
+            role: AgentRole::Planner,
+            instructions: "Plan around git".to_string(),
+            dependencies: vec![],
+            mcp_tools: vec![],
+            git_commands: vec!["status".to_string()],
+            policy: serde_json::json!({}),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("git_commands"));
+        assert!(err.to_string().contains("validator"));
+    }
 
     #[tokio::test]
     async fn graph_builder_respects_depth_and_dependencies() {

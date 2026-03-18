@@ -28,6 +28,8 @@ pub struct SkillNodeDefinition {
     pub dependencies: Vec<String>,
     #[serde(default)]
     pub mcp_tools: Vec<String>,
+    #[serde(default)]
+    pub git_commands: Vec<String>,
     #[serde(default = "default_policy")]
     pub policy: serde_json::Value,
 }
@@ -102,6 +104,7 @@ pub async fn load_skills_from_dir(dir: &Path) -> Vec<WorkflowTemplate> {
                 instructions: n.instructions,
                 dependencies: n.dependencies,
                 mcp_tools: n.mcp_tools,
+                git_commands: n.git_commands,
                 policy: n.policy,
             })
             .collect();
@@ -189,6 +192,7 @@ mod tests {
                     instructions: "Review {{file_path}} with {{mode}}".to_string(),
                     dependencies: vec![],
                     mcp_tools: vec![],
+                    git_commands: vec![],
                     policy: serde_json::json!({}),
                 }],
             },

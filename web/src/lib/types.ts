@@ -1,5 +1,5 @@
 export type TaskProfile = "planning" | "extraction" | "coding" | "general";
-export type AgentRole = "planner" | "extractor" | "coder" | "summarizer" | "fallback" | "tool_caller" | "analyzer" | "reviewer" | "scheduler" | "config_manager";
+export type AgentRole = "planner" | "extractor" | "coder" | "summarizer" | "fallback" | "tool_caller" | "analyzer" | "reviewer" | "scheduler" | "config_manager" | "validator";
 export type RunStatus = "queued" | "cancelling" | "cancelled" | "paused" | "running" | "succeeded" | "failed";
 export type CliModelBackend = "claude_code" | "codex";
 
@@ -261,6 +261,7 @@ export interface WorkflowNodeTemplate {
   instructions: string;
   dependencies: string[];
   mcp_tools: string[];
+  git_commands: string[];
   policy: Record<string, unknown>;
 }
 

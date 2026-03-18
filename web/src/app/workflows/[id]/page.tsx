@@ -164,6 +164,7 @@ export default function WorkflowDetailPage() {
                   <th className="px-4 py-2 font-medium">Role</th>
                   <th className="px-4 py-2 font-medium">Dependencies</th>
                   <th className="px-4 py-2 font-medium">MCP Tools</th>
+                  <th className="px-4 py-2 font-medium">Git CLI</th>
                   <th className="px-4 py-2 font-medium">Instructions</th>
                 </tr>
               </thead>
@@ -182,6 +183,11 @@ export default function WorkflowDetailPage() {
                     <td className="px-4 py-2 text-slate-400">
                       {n.mcp_tools.length > 0
                         ? n.mcp_tools.join(", ")
+                        : "-"}
+                    </td>
+                    <td className="px-4 py-2 text-slate-400">
+                      {n.git_commands.length > 0
+                        ? n.git_commands.join(", ")
                         : "-"}
                     </td>
                     <td className="max-w-xs truncate px-4 py-2 text-slate-600">

@@ -49,6 +49,21 @@ cargo run -- memory vacuum
 - 인증:
   - 대시보드에서 `API Key` + `API Secret`를 입력하면 브라우저가 HMAC 헤더를 직접 생성해 API를 호출합니다.
 
+## Skills
+- `SKILLS_DIR` 아래 YAML/JSON 스킬은 `validator` 노드에서 `git_commands`를 선언해 로컬 `git` CLI를 직접 실행할 수 있습니다.
+
+```yaml
+name: Repo Inspector
+description: Check the current repository state
+nodes:
+  - id: git_status
+    role: validator
+    instructions: Inspect the repository with git
+    git_commands:
+      - status --short
+      - diff --stat
+```
+
 ## TUI 조작
 - 포커스/이동: `Tab`, `↑/↓` 또는 `j/k`
 - 빠른 이동: `PageUp/PageDown`, `Home/End`

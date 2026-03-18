@@ -1,8 +1,10 @@
 use std::path::Path;
 
+use anyhow::Context;
 use tokio::process::Command;
 
 use crate::router::ModelRouter;
+use crate::types::ValidationResult;
 use crate::types::TaskProfile;
 
 pub struct GitManager;
@@ -174,11 +176,78 @@ impl GitManager {
         Ok(())
     }
 
+    pub async fn run_cli_commands(
+        commands: &[String],
+        working_dir: &Path,
+        timeout_ms: u64,
+    ) -> Vec<ValidationResult> {
+        let mut normalized = Vec::with_capacity(commands.len());
+        for command in commands {
+            match Self::normalize_cli_command(command) {
+                Ok(cmd) => normalized.push(cmd),
+                Err(err) => {
+                    return vec![ValidationResult {
+                        command: command.clone(),
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: err.to_string(),
+                        duration_ms: 0,
+                        passed: false,
+                    }];
+                }
+            }
+        }
+
+        crate::orchestrator::validator::CommandRunner::run_commands(
+            &normalized,
+            working_dir,
+            timeout_ms,
+        )
+        .await
+    }
+
     fn truncate(text: &str, max_chars: usize) -> &str {
         if text.len() <= max_chars {
             text
         } else {
             &text[..text.floor_char_boundary(max_chars)]
         }
+    }
+
+    fn normalize_cli_command(command: &str) -> anyhow::Result<String> {
+        let trimmed = command.trim();
+        anyhow::ensure!(!trimmed.is_empty(), "git command cannot be empty");
+
+        let parts = shell_words::split(trimmed).context("invalid git command syntax")?;
+        anyhow::ensure!(!parts.is_empty(), "git command cannot be empty");
+
+        if parts.first().map(String::as_str) == Some("git") {
+            return Ok(trimmed.to_string());
+        }
+
+        Ok(format!("git {trimmed}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GitManager;
+
+    #[test]
+    fn normalize_cli_command_accepts_full_git_command() {
+        let normalized = GitManager::normalize_cli_command("git status --short").unwrap();
+        assert_eq!(normalized, "git status --short");
+    }
+
+    #[test]
+    fn normalize_cli_command_prefixes_subcommand() {
+        let normalized = GitManager::normalize_cli_command("status --short").unwrap();
+        assert_eq!(normalized, "git status --short");
+    }
+
+    #[test]
+    fn normalize_cli_command_rejects_empty_input() {
+        let err = GitManager::normalize_cli_command("   ").unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
     }
 }
