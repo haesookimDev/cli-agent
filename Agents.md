@@ -77,6 +77,11 @@
 - validator/coder/terminal/external repo clone 경로 결정 시 전역 공유 작업 디렉터리를 기본값으로 사용하면 안 되며, 반드시 세션 workspace 기준으로 resolve해야 한다.
 - 다른 세션에서 기존 산출물을 재사용하려면 대상 세션 workspace로 명시적으로 복사해야 하며, 세션 간 공유 mutable workspace를 암묵적으로 허용하면 안 된다.
 
+### Session CLI Working Directory
+- planner/reviewer/tool-caller를 포함한 모든 CLI-backed LLM 실행은 항상 해당 `session_id`의 workspace 내부에서 시작해야 한다.
+- 외부 repo를 clone/pull 한 실행에서는 clone 이후의 CLI 작업 디렉터리를 세션 root가 아니라 그 세션 내부의 분석 대상 repo 경로로 전환해야 한다.
+- `std::env::current_dir()`나 서버 프로세스 루트를 세션 실행의 기본 cwd로 사용하면 안 되며, working directory는 run/session 기준으로 매 호출마다 명시적으로 전달해야 한다.
+
 ### Follow-up Context Anchoring
 - 짧은 후속 발화(예: `로컬에 있어`)도 독립 질의로 처리하지 말고, 직전 사용자 메시지와 최근 run 결과 요약을 실행 컨텍스트(`History`)에 주입해야 한다.
 - 세션 메모리 검색 시 후속 발화로 판단되면 검색 쿼리를 `현재 입력 + 직전 사용자 입력`으로 확장해 recall 저하를 방지한다.

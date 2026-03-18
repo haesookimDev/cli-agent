@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ pub struct AgentInput {
     pub context: OptimizedContext,
     pub dependency_outputs: Vec<String>,
     pub brief: StructuredBrief,
+    pub working_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,8 +127,9 @@ impl AgentRegistry {
 
         let profile = agent_role_profile(role);
         let constraints = RoutingConstraints::for_profile(profile);
+        let working_dir = input.working_dir.as_deref();
         let (_decision, inference) = router
-            .infer_stream(profile, prompt.as_str(), &constraints, on_token)
+            .infer_stream_in_dir(profile, prompt.as_str(), &constraints, working_dir, on_token)
             .await?;
 
         Ok(AgentOutput {
@@ -275,8 +278,9 @@ impl SubAgent for BuiltinAgent {
         );
 
         let constraints = RoutingConstraints::for_profile(self.profile());
+        let working_dir = input.working_dir.as_deref();
         let (_decision, inference) = router
-            .infer(self.profile(), prompt.as_str(), &constraints)
+            .infer_in_dir(self.profile(), prompt.as_str(), &constraints, working_dir)
             .await?;
 
         Ok(AgentOutput {

@@ -362,7 +362,7 @@ impl RepoAnalyzer {
 
         let constraints = crate::router::RoutingConstraints::for_profile(TaskProfile::Extraction);
         let (_decision, inference) = router
-            .infer(TaskProfile::Extraction, &prompt, &constraints)
+            .infer_in_dir(TaskProfile::Extraction, &prompt, &constraints, Some(repo_path))
             .await?;
 
         Ok(inference.output)

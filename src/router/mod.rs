@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -315,10 +315,13 @@ impl ModelRouter {
         }
     }
 
-    fn prompt_hash(profile: TaskProfile, prompt: &str) -> u64 {
+    fn prompt_hash(profile: TaskProfile, prompt: &str, working_dir: Option<&Path>) -> u64 {
         let mut hasher = DefaultHasher::new();
         std::mem::discriminant(&profile).hash(&mut hasher);
         prompt.hash(&mut hasher);
+        if let Some(dir) = working_dir {
+            dir.as_os_str().hash(&mut hasher);
+        }
         hasher.finish()
     }
 
@@ -328,8 +331,18 @@ impl ModelRouter {
         prompt: &str,
         constraints: &RoutingConstraints,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
+        self.infer_in_dir(profile, prompt, constraints, None).await
+    }
+
+    pub async fn infer_in_dir(
+        &self,
+        profile: TaskProfile,
+        prompt: &str,
+        constraints: &RoutingConstraints,
+        working_dir: Option<&Path>,
+    ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
         // Check cache
-        let hash = Self::prompt_hash(profile, prompt);
+        let hash = Self::prompt_hash(profile, prompt, working_dir);
         if let Some(entry) = self.cache.get(&hash) {
             if !entry.is_expired() {
                 let decision = self.select_model(profile, constraints)?;
@@ -370,7 +383,7 @@ impl ModelRouter {
                 break;
             }
 
-            match self.client.generate(&model, prompt).await {
+            match self.client.generate(&model, prompt, working_dir).await {
                 Ok(output) => {
                     // Store in cache
                     self.cache.insert(
@@ -415,6 +428,18 @@ impl ModelRouter {
         constraints: &RoutingConstraints,
         on_token: TokenCallback,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
+        self.infer_stream_in_dir(profile, prompt, constraints, None, on_token)
+            .await
+    }
+
+    pub async fn infer_stream_in_dir(
+        &self,
+        profile: TaskProfile,
+        prompt: &str,
+        constraints: &RoutingConstraints,
+        working_dir: Option<&Path>,
+        on_token: TokenCallback,
+    ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
         let decision = self.select_model(profile, constraints)?;
 
         let mut chain = Vec::new();
@@ -431,10 +456,14 @@ impl ModelRouter {
                 break;
             }
 
-            match self.client.generate_stream(&model, prompt, &on_token).await {
+            match self
+                .client
+                .generate_stream(&model, prompt, working_dir, &on_token)
+                .await
+            {
                 Ok(output) => {
                     // Store in cache
-                    let hash = Self::prompt_hash(profile, prompt);
+                    let hash = Self::prompt_hash(profile, prompt, working_dir);
                     self.cache.insert(
                         hash,
                         CacheEntry {
@@ -566,7 +595,12 @@ impl ProviderClient {
         }
     }
 
-    pub async fn generate(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
+    pub async fn generate(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+        working_dir: Option<&Path>,
+    ) -> anyhow::Result<String> {
         if self.disabled.contains(&model.provider) {
             return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
         }
@@ -579,8 +613,8 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.generate_anthropic(model, prompt).await,
             ProviderKind::Gemini => self.generate_gemini(model, prompt).await,
             ProviderKind::Vllm => self.generate_vllm(model, prompt).await,
-            ProviderKind::ClaudeCode => self.generate_claude_code(prompt).await,
-            ProviderKind::Codex => self.generate_codex(prompt).await,
+            ProviderKind::ClaudeCode => self.generate_claude_code(prompt, working_dir).await,
+            ProviderKind::Codex => self.generate_codex(prompt, working_dir).await,
             ProviderKind::Mock => Ok(mock_inference(model, prompt)),
         }
     }
@@ -718,8 +752,10 @@ impl ProviderClient {
             .ok_or_else(|| anyhow::anyhow!("CLI provider {} is not configured", provider))
     }
 
-    fn cli_working_dir(&self) -> PathBuf {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    fn cli_working_dir(&self, working_dir: Option<&Path>) -> PathBuf {
+        working_dir
+            .map(|path| path.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
     async fn run_cli_command(
@@ -776,14 +812,18 @@ impl ProviderClient {
         ))
     }
 
-    async fn generate_claude_code(&self, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_claude_code(
+        &self,
+        prompt: &str,
+        working_dir: Option<&Path>,
+    ) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::ClaudeCode)?;
         let resolved_command = crate::command_resolver::resolve_command_path(&config.command);
         let mut cmd = Command::new(&resolved_command);
         cmd.arg("-p")
             .arg(prompt)
             .args(&config.args)
-            .current_dir(self.cli_working_dir());
+            .current_dir(self.cli_working_dir(working_dir));
 
         let output = self
             .run_cli_command(cmd, config.timeout, "Claude Code CLI", None)
@@ -793,7 +833,11 @@ impl ProviderClient {
         Ok(Self::decode_cli_text(&output.stdout))
     }
 
-    async fn generate_codex(&self, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_codex(
+        &self,
+        prompt: &str,
+        working_dir: Option<&Path>,
+    ) -> anyhow::Result<String> {
         let config = self.cli_provider(ProviderKind::Codex)?;
         let output_path =
             std::env::temp_dir().join(format!("codex-last-message-{}.txt", Uuid::new_v4()));
@@ -807,7 +851,7 @@ impl ProviderClient {
             .arg(&output_path)
             .args(&config.args)
             .arg("-")
-            .current_dir(self.cli_working_dir());
+            .current_dir(self.cli_working_dir(working_dir));
 
         let output = self
             .run_cli_command(cmd, config.timeout, "Codex CLI", Some(prompt))
@@ -842,6 +886,7 @@ impl ProviderClient {
         &self,
         model: &ModelSpec,
         prompt: &str,
+        working_dir: Option<&Path>,
         on_token: &TokenCallback,
     ) -> anyhow::Result<String> {
         if self.disabled.contains(&model.provider) {
@@ -858,7 +903,7 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.stream_anthropic(model, prompt, on_token).await,
             ProviderKind::Gemini => self.stream_gemini(model, prompt, on_token).await,
             ProviderKind::ClaudeCode | ProviderKind::Codex => {
-                let output = self.generate(model, prompt).await?;
+                let output = self.generate(model, prompt, working_dir).await?;
                 if !output.is_empty() {
                     on_token(&output);
                 }
@@ -1265,6 +1310,7 @@ pub fn providers(catalog: &[ModelSpec]) -> HashSet<ProviderKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[tokio::test]
     async fn planning_prefers_quality_models() {
@@ -1327,5 +1373,21 @@ mod tests {
         assert!(catalog.iter().any(|spec| {
             spec.provider == ProviderKind::Codex && spec.model_id == "codex-cli" && spec.local_only
         }));
+    }
+
+    #[test]
+    fn prompt_hash_scopes_cache_by_working_dir() {
+        let left = ModelRouter::prompt_hash(
+            TaskProfile::General,
+            "hello",
+            Some(Path::new("/tmp/session-a")),
+        );
+        let right = ModelRouter::prompt_hash(
+            TaskProfile::General,
+            "hello",
+            Some(Path::new("/tmp/session-b")),
+        );
+
+        assert_ne!(left, right);
     }
 }

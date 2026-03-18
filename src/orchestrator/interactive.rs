@@ -27,6 +27,7 @@ pub async fn execute_react_loop(
     task: &str,
     run_id: Uuid,
     session_id: Uuid,
+    working_dir: Option<std::path::PathBuf>,
     max_iterations: usize,
     agents: &AgentRegistry,
     router: &Arc<ModelRouter>,
@@ -103,6 +104,7 @@ pub async fn execute_react_loop(
             context: optimized,
             dependency_outputs: vec![],
             brief,
+            working_dir: working_dir.clone(),
         };
 
         let output = match agents

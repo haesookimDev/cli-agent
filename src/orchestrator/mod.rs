@@ -128,6 +128,21 @@ impl Orchestrator {
         self.session_workspace.ensure_session_dir(session_id).await
     }
 
+    async fn resolve_run_cli_working_dir(
+        &self,
+        session_id: Uuid,
+        run_id: Uuid,
+    ) -> anyhow::Result<PathBuf> {
+        if let Some(analysis) = self.repo_analyses.get(&run_id) {
+            let repo_path = analysis.repo_path.trim();
+            if !repo_path.is_empty() {
+                return Ok(PathBuf::from(repo_path));
+            }
+        }
+
+        self.session_workspace.ensure_session_dir(session_id).await
+    }
+
     pub async fn load_skills_from_dir(&self, dir: &std::path::Path) {
         let loaded = skill_loader::load_skills_from_dir(dir).await;
         for skill in loaded {
@@ -1452,6 +1467,7 @@ impl Orchestrator {
         let graph = match self.workflow_graphs.remove(&run_id).map(|(_, g)| g) {
             Some(g) => g,
             None => {
+                let graph_working_dir = self.session_workspace.ensure_session_dir(session_id).await?;
                 self.build_graph(
                     req.task.as_str(),
                     &mcp_server_names,
@@ -1459,6 +1475,7 @@ impl Orchestrator {
                     previous_task_type,
                     previous_plan,
                     req.repo_url.as_deref(),
+                    Some(graph_working_dir.as_path()),
                 )
                 .await?
             }
@@ -1654,6 +1671,13 @@ impl Orchestrator {
                 constraints: vec![],
                 decisions: vec![],
                 references: vec![],
+            },
+            working_dir: match self.resolve_run_cli_working_dir(session_id, run_id).await {
+                Ok(dir) => Some(dir),
+                Err(err) => {
+                    tracing::warn!("failed to resolve reviewer CLI working dir: {err}");
+                    None
+                }
             },
         };
 
@@ -1956,6 +1980,7 @@ impl Orchestrator {
         previous_task_type: Option<TaskType>,
         router: &ModelRouter,
         repo_url: Option<&str>,
+        working_dir: Option<&std::path::Path>,
     ) -> TaskType {
         // If a repo_url is provided, this is an external project task
         if repo_url.is_some() {
@@ -2028,10 +2053,11 @@ impl Orchestrator {
         };
 
         match router
-            .infer(
+            .infer_in_dir(
                 crate::types::TaskProfile::General,
                 &classification_prompt,
                 &constraints,
+                working_dir,
             )
             .await
         {
@@ -2160,6 +2186,7 @@ impl Orchestrator {
         previous_task_type: Option<TaskType>,
         previous_plan: Option<String>,
         repo_url: Option<&str>,
+        working_dir: Option<&std::path::Path>,
     ) -> anyhow::Result<ExecutionGraph> {
         let task_type = Self::classify_task(
             task,
@@ -2168,6 +2195,7 @@ impl Orchestrator {
             previous_task_type,
             &self.router,
             repo_url,
+            working_dir,
         )
         .await;
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
@@ -2887,7 +2915,10 @@ impl Orchestrator {
                             .unwrap_or_default();
 
                         let commit_msg = GitManager::generate_commit_message(
-                            &diff, &req.task, &router,
+                            &diff,
+                            &req.task,
+                            &working_dir,
+                            &router,
                         )
                         .await
                         .unwrap_or_else(|_| "chore: Agent-generated changes".to_string());
@@ -3065,6 +3096,22 @@ impl Orchestrator {
                     });
                 }
 
+                let cli_working_dir =
+                    match orchestrator.resolve_run_cli_working_dir(session_id, run_id).await {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            return Ok(NodeExecutionResult {
+                                node_id: node.id,
+                                role: node.role,
+                                model: "workspace".to_string(),
+                                output: format!("Session workspace setup failed: {}", e),
+                                duration_ms: started.elapsed().as_millis(),
+                                succeeded: false,
+                                error: Some(format!("workspace setup failed: {}", e)),
+                            });
+                        }
+                    };
+
                 // Interactive ReAct loop handler
                 if node.id == "interactive" {
                     let react_result = interactive::execute_react_loop(
@@ -3073,6 +3120,7 @@ impl Orchestrator {
                         &req.task,
                         run_id,
                         session_id,
+                        Some(cli_working_dir.clone()),
                         15, // max iterations
                         &agents,
                         &router,
@@ -3258,6 +3306,7 @@ impl Orchestrator {
                             context: optimized,
                             dependency_outputs: dep_outputs.clone(),
                             brief,
+                            working_dir: Some(cli_working_dir.clone()),
                         };
 
                         let selection_result = agents
@@ -3798,6 +3847,7 @@ impl Orchestrator {
                     context: optimized.clone(),
                     dependency_outputs: dep_outputs.clone(),
                     brief: brief.clone(),
+                    working_dir: Some(cli_working_dir.clone()),
                 };
 
                 let token_node_id = node.id.clone();
@@ -3856,6 +3906,7 @@ impl Orchestrator {
                                 context: optimized.clone(),
                                 dependency_outputs: dep_outputs.clone(),
                                 brief: brief.clone(),
+                                working_dir: Some(cli_working_dir.clone()),
                             };
                             match agents.run_role_stream(
                                 node.role,
@@ -5302,6 +5353,7 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::RunCancelRequested
             | RunActionType::RunPauseRequested
             | RunActionType::RunResumed
+            | RunActionType::NodeProgress
             | RunActionType::GraphCompleted
             | RunActionType::RunFinished
             | RunActionType::WebhookDispatched
@@ -6316,6 +6368,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -6325,7 +6378,7 @@ mod tests {
 
         // SimpleQuery should have minimal graph
         let simple = orchestrator
-            .build_graph("hello world", &no_servers, &no_tools, None, None, None)
+            .build_graph("hello world", &no_servers, &no_tools, None, None, None, None)
             .await
             .unwrap();
         assert!(simple.node("plan").is_some());
@@ -6338,6 +6391,7 @@ mod tests {
                 "analyze the performance patterns and evaluate metrics",
                 &no_servers,
                 &no_tools,
+                None,
                 None,
                 None,
                 None,
@@ -6484,6 +6538,47 @@ mod tests {
 
         orchestrator.delete_session(session_id).await.unwrap();
         assert!(!session_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn run_cli_working_dir_prefers_analyzed_repo_path() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("cli-working-dir").await;
+        let session_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+
+        let session_dir = orchestrator.ensure_session_workspace(session_id).await.unwrap();
+        let repo_path = session_dir.join("repos").join("sample");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        orchestrator.repo_analyses.insert(
+            run_id,
+            RepoAnalysis {
+                repo_path: repo_path.to_string_lossy().to_string(),
+                tech_stack: TechStack {
+                    primary_language: "Rust".to_string(),
+                    languages: vec![("Rust".to_string(), 1.0)],
+                    frameworks: vec![],
+                    package_manager: Some("cargo".to_string()),
+                },
+                detected_commands: DetectedCommands {
+                    lint_commands: vec![],
+                    build_commands: vec![],
+                    test_commands: vec![],
+                },
+                repo_map: String::new(),
+                file_count: 0,
+                key_files: vec![],
+            },
+        );
+
+        let resolved = orchestrator
+            .resolve_run_cli_working_dir(session_id, run_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, repo_path);
+
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]

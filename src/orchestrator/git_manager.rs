@@ -84,6 +84,7 @@ impl GitManager {
     pub async fn generate_commit_message(
         diff: &str,
         task_description: &str,
+        working_dir: &Path,
         router: &ModelRouter,
     ) -> anyhow::Result<String> {
         let prompt = format!(
@@ -100,7 +101,7 @@ impl GitManager {
 
         let constraints = crate::router::RoutingConstraints::for_profile(TaskProfile::General);
         let (_decision, inference) = router
-            .infer(TaskProfile::General, &prompt, &constraints)
+            .infer_in_dir(TaskProfile::General, &prompt, &constraints, Some(working_dir))
             .await?;
 
         let msg = inference.output.trim().to_string();

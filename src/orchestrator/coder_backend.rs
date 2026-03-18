@@ -50,7 +50,7 @@ impl CoderBackend for LlmCoderBackend {
         &self,
         task: &str,
         context: &str,
-        _working_dir: &Path,
+        working_dir: &Path,
         _on_chunk: Arc<dyn Fn(CoderOutputChunk) + Send + Sync>,
     ) -> anyhow::Result<CoderSessionResult> {
         let prompt = if context.is_empty() {
@@ -62,7 +62,12 @@ impl CoderBackend for LlmCoderBackend {
             crate::router::RoutingConstraints::for_profile(crate::types::TaskProfile::Coding);
         let (_decision, inference) = self
             .router
-            .infer(crate::types::TaskProfile::Coding, &prompt, &constraints)
+            .infer_in_dir(
+                crate::types::TaskProfile::Coding,
+                &prompt,
+                &constraints,
+                Some(working_dir),
+            )
             .await?;
 
         Ok(CoderSessionResult {
