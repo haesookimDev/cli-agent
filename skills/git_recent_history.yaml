@@ -1,0 +1,15 @@
+name: Git Recent History
+description: Summarize the recent local git history for the current repository, including the active branch, the latest commits, and the current HEAD summary. Use when the user asks for recent commits, branch history, or what happened recently in git.
+nodes:
+  - id: collect_git_history
+    role: validator
+    instructions: Collect recent git history for the local repository.
+    git_commands:
+      - status --short --branch
+      - log --oneline --decorate -10
+      - show --stat --oneline --summary HEAD
+  - id: summarize_git_history
+    role: summarizer
+    instructions: Summarize the recent git history from dependency outputs. Treat validator output as JSON command results. Highlight the current branch, the latest commits, the current HEAD commit, and any notable working tree state that affects the interpretation.
+    dependencies:
+      - collect_git_history

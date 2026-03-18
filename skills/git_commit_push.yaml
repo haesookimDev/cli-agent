@@ -1,0 +1,24 @@
+name: Git Commit Push
+description: Stage all local changes in the current repository, create a commit, push it to the remote, and summarize the outcome. Use when the user explicitly wants to commit and push the current local worktree.
+parameters:
+  - name: commit_message
+    description: Commit message to use for the new commit.
+    default_value: Agent commit
+  - name: remote
+    description: Remote name to push to.
+    default_value: origin
+nodes:
+  - id: commit_and_push
+    role: validator
+    instructions: Stage local changes, commit them, and push the current branch.
+    git_commands:
+      - status --short --branch
+      - add -A
+      - commit -m "{{commit_message}}"
+      - rev-parse --short HEAD
+      - push -u "{{remote}}" HEAD
+  - id: summarize_commit_push
+    role: summarizer
+    instructions: Summarize the commit and push result from dependency outputs. Treat validator output as JSON command results. Report whether staging, commit creation, and push succeeded, and mention the resulting commit hash when available.
+    dependencies:
+      - commit_and_push

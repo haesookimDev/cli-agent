@@ -1,0 +1,15 @@
+name: Git Worktree Summary
+description: Summarize the current local repository worktree, including branch state, staged and unstaged diff stats, and untracked files. Use when the user asks what changed locally, what is pending commit, or whether the repo is clean.
+nodes:
+  - id: collect_git_worktree
+    role: validator
+    instructions: Collect the current git worktree state for the local repository.
+    git_commands:
+      - status --short --branch
+      - diff --stat
+      - diff --cached --stat
+  - id: summarize_git_worktree
+    role: summarizer
+    instructions: Summarize the repository state from dependency outputs. Treat validator output as JSON command results. Report the branch, whether the worktree is clean, which changes are staged, which changes are unstaged, and whether untracked files exist.
+    dependencies:
+      - collect_git_worktree

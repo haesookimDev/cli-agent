@@ -135,17 +135,30 @@ pub fn interpolate_params(
 ) -> WorkflowTemplate {
     let mut result = template.clone();
     for node in &mut result.graph_template.nodes {
-        let mut instructions = node.instructions.clone();
-        // First use provided params, then fall back to defaults
-        for param_def in &template.parameters {
-            let placeholder = format!("{{{{{}}}}}", param_def.name);
-            if let Some(value) = params.get(&param_def.name) {
-                instructions = instructions.replace(&placeholder, value);
-            } else if let Some(default) = &param_def.default_value {
-                instructions = instructions.replace(&placeholder, default);
-            }
+        node.instructions =
+            interpolate_template_text(&node.instructions, &template.parameters, params);
+        node.git_commands = node
+            .git_commands
+            .iter()
+            .map(|command| interpolate_template_text(command, &template.parameters, params))
+            .collect();
+    }
+    result
+}
+
+fn interpolate_template_text(
+    text: &str,
+    parameters: &[WorkflowParameter],
+    params: &HashMap<String, String>,
+) -> String {
+    let mut result = text.to_string();
+    for param_def in parameters {
+        let placeholder = format!("{{{{{}}}}}", param_def.name);
+        if let Some(value) = params.get(&param_def.name) {
+            result = result.replace(&placeholder, value);
+        } else if let Some(default) = &param_def.default_value {
+            result = result.replace(&placeholder, default);
         }
-        node.instructions = instructions;
     }
     result
 }
@@ -218,6 +231,61 @@ mod tests {
         assert_eq!(
             result.graph_template.nodes[0].instructions,
             "Review src/main.rs with strict"
+        );
+        assert!(result.graph_template.nodes[0].git_commands.is_empty());
+    }
+
+    #[test]
+    fn interpolate_params_replaces_git_command_placeholders() {
+        let template = WorkflowTemplate {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: "".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source_run_id: None,
+            graph_template: WorkflowGraphTemplate {
+                nodes: vec![WorkflowNodeTemplate {
+                    id: "git".to_string(),
+                    role: AgentRole::Validator,
+                    instructions: "Clone and inspect {{repo_url}}".to_string(),
+                    dependencies: vec![],
+                    mcp_tools: vec![],
+                    git_commands: vec![
+                        "clone \"{{repo_url}}\" \"{{target_dir}}\"".to_string(),
+                        "-C \"{{target_dir}}\" status --short".to_string(),
+                    ],
+                    policy: serde_json::json!({}),
+                }],
+            },
+            parameters: vec![
+                WorkflowParameter {
+                    name: "repo_url".to_string(),
+                    description: "".to_string(),
+                    default_value: None,
+                },
+                WorkflowParameter {
+                    name: "target_dir".to_string(),
+                    description: "".to_string(),
+                    default_value: Some("tmp-repo".to_string()),
+                },
+            ],
+            source: SkillSource::File,
+        };
+
+        let mut params = HashMap::new();
+        params.insert(
+            "repo_url".to_string(),
+            "https://example.com/repo.git".to_string(),
+        );
+
+        let result = interpolate_params(&template, &params);
+        assert_eq!(
+            result.graph_template.nodes[0].git_commands,
+            vec![
+                "clone \"https://example.com/repo.git\" \"tmp-repo\"".to_string(),
+                "-C \"tmp-repo\" status --short".to_string(),
+            ]
         );
     }
 

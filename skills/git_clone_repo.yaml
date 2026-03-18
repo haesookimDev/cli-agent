@@ -1,0 +1,20 @@
+name: Git Clone Repo
+description: Clone a remote git repository into the local workspace and summarize the result. Use when the user wants to clone a repository, fetch a remote repo locally, or confirm where a clone was created.
+parameters:
+  - name: repo_url
+    description: Remote git repository URL to clone.
+    default_value:
+  - name: target_dir
+    description: Directory name or path to create for the clone.
+    default_value: cloned-repo
+nodes:
+  - id: clone_repo
+    role: validator
+    instructions: Clone the requested repository into the local workspace.
+    git_commands:
+      - clone "{{repo_url}}" "{{target_dir}}"
+  - id: summarize_clone
+    role: summarizer
+    instructions: Summarize the clone result from dependency outputs. Treat validator output as JSON command results. Report the source URL, the target directory, and whether the clone succeeded or failed.
+    dependencies:
+      - clone_repo

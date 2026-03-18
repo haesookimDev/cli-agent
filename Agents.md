@@ -83,6 +83,7 @@
 ### Skill Git CLI
 - 스킬/워크플로우 노드의 `git_commands`는 `validator` 역할에서만 지원한다.
 - `git_commands` 각 항목은 `status --short` 같은 서브커맨드 형식과 `git status --short` 전체 명령 형식을 모두 허용하되, 런타임은 항상 `git` CLI 실행으로 정규화한다.
+- 스킬 파라미터 치환은 `instructions`뿐 아니라 `git_commands`에도 동일하게 적용되어야 하며, clone/push 같은 실동작 스킬은 이 치환을 전제로 작성한다.
 
 ### CLI Model Routing
 - `MODEL_CLI_BACKEND`가 설정되면 coder 전용 경로만이 아니라 planner/reviewer/tool-caller 등 일반 LLM 노드도 동일한 CLI provider를 통해 실행되어야 한다.
