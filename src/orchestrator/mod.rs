@@ -79,7 +79,12 @@ struct AutoSkillRoute {
 }
 
 const MAX_COMPLETION_CONTINUATIONS: u8 = 2;
+/// How many times the orchestrator may redesign the workflow after a stage failure
+/// before giving up and marking the run as Failed.
+const MAX_FAILURE_RETRIES: u8 = 2;
 const DYNAMIC_SUBTASK_MAX_PARALLELISM: usize = 4;
+/// Hard cap on dynamic nodes a single Planner output may generate to prevent OOM.
+const MAX_DYNAMIC_SUBTASKS_PER_PLAN: usize = 50;
 
 impl Orchestrator {
     pub fn new(
@@ -1340,6 +1345,67 @@ impl Orchestrator {
             .join("\n---\n")
     }
 
+    /// Builds a Planner-led recovery graph when one or more nodes fail outright.
+    /// The Planner receives the failure context and produces a new SubtaskPlan
+    /// targeting only the failed work.
+    fn build_failure_recovery_graph(
+        &self,
+        original_task: &str,
+        failed_results: &[&NodeExecutionResult],
+        successful_results: &[&NodeExecutionResult],
+        attempt: u8,
+    ) -> anyhow::Result<ExecutionGraph> {
+        let mut graph = ExecutionGraph::new(self.max_graph_depth);
+
+        let failed_summary = failed_results
+            .iter()
+            .map(|r| {
+                format!(
+                    "[{}] error: {}",
+                    r.node_id,
+                    r.error.as_deref().unwrap_or("unknown error")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let success_summary = Self::summarize_results_for_followup(
+            &successful_results.iter().copied().cloned().collect::<Vec<_>>(),
+        );
+
+        let planner_id = format!("recovery_plan_{attempt}");
+        let mut planner = AgentNode::new(
+            planner_id,
+            AgentRole::Planner,
+            format!(
+                "One or more agents failed during execution. Your job is to recover.\n\n\
+                 ORIGINAL TASK:\n{}\n\n\
+                 FAILED AGENTS (with errors):\n{}\n\n\
+                 SUCCESSFUL OUTPUTS SO FAR:\n{}\n\n\
+                 Return a JSON SubtaskPlan that addresses the failed work:\n\
+                 {{\"subtasks\":[{{\"id\":\"string\",\"description\":\"string\",\"agent_role\":\"planner|extractor|coder|summarizer|fallback|tool_caller|analyzer|reviewer|scheduler|config_manager|validator\",\"dependencies\":[\"node_id\"],\"instructions\":\"string\",\"mcp_tools\":[\"server/tool\"]}}]}}\n\n\
+                 Rules:\n\
+                 - Focus only on what failed; do not repeat succeeded work.\n\
+                 - If an agent failed due to a transient error, retry it with clearer instructions.\n\
+                 - If an agent failed due to a design flaw, replace it with a different approach.\n\
+                 - Do not wrap the JSON in markdown fences.",
+                Self::trim_for_context(original_task, 1000),
+                Self::trim_for_context(&failed_summary, 800),
+                Self::trim_for_context(&success_summary, 3000),
+            ),
+        );
+        planner.policy = ExecutionPolicy {
+            timeout_ms: 120_000,
+            retry: 1,
+            max_parallelism: 1,
+            circuit_breaker: 2,
+            on_dependency_failure: DependencyFailurePolicy::FailFast,
+            fallback_node: None,
+        };
+        self.add_graph_node(&mut graph, planner)?;
+        Ok(graph)
+    }
+
     fn build_completion_followup_graph(
         &self,
         original_task: &str,
@@ -1515,6 +1581,7 @@ impl Orchestrator {
         let mut current_graph = graph;
         let mut accumulated_results = Vec::<NodeExecutionResult>::new();
         let mut continuation_attempts = 0u8;
+        let mut failure_retries = 0u8;
 
         loop {
             let outputs = self
@@ -1532,6 +1599,12 @@ impl Orchestrator {
             match outputs {
                 Ok(node_results) => {
                     let stage_succeeded = node_results.iter().all(|r| r.succeeded);
+                    // Capture failed nodes before consuming node_results via extend.
+                    let stage_failed: Vec<NodeExecutionResult> = node_results
+                        .iter()
+                        .filter(|r| !r.succeeded)
+                        .cloned()
+                        .collect();
                     accumulated_results.extend(node_results);
 
                     if cancel_flag.load(Ordering::Relaxed) {
@@ -1541,9 +1614,68 @@ impl Orchestrator {
                     }
 
                     if !stage_succeeded {
-                        self.finish_run(run_id, RunStatus::Failed, accumulated_results, None)
+                        if failure_retries >= MAX_FAILURE_RETRIES {
+                            self.finish_run(
+                                run_id,
+                                RunStatus::Failed,
+                                accumulated_results,
+                                Some(format!(
+                                    "Stage failed after {} recovery attempt(s)",
+                                    MAX_FAILURE_RETRIES
+                                )),
+                            )
                             .await?;
-                        break;
+                            break;
+                        }
+
+                        failure_retries += 1;
+                        let failed: Vec<&NodeExecutionResult> = stage_failed.iter().collect();
+                        let succeeded: Vec<&NodeExecutionResult> =
+                            accumulated_results.iter().filter(|r| r.succeeded).collect();
+
+                        self.record_action_event(
+                            run_id,
+                            session_id,
+                            RunActionType::ReplanTriggered,
+                            Some("orchestrator"),
+                            Some("failure_recovery"),
+                            None,
+                            serde_json::json!({
+                                "attempt": failure_retries,
+                                "failed_nodes": failed.iter().map(|r| r.node_id.as_str()).collect::<Vec<_>>(),
+                                "mode": "failure_recovery",
+                                "max_attempts": MAX_FAILURE_RETRIES,
+                            }),
+                        )
+                        .await;
+
+                        current_graph = match self.build_failure_recovery_graph(
+                            req.task.as_str(),
+                            &failed,
+                            &succeeded,
+                            failure_retries,
+                        ) {
+                            Ok(g) => g,
+                            Err(err) => {
+                                self.finish_run(
+                                    run_id,
+                                    RunStatus::Failed,
+                                    accumulated_results,
+                                    Some(err.to_string()),
+                                )
+                                .await?;
+                                break;
+                            }
+                        };
+                        let stage_label = format!("recovery_{failure_retries}");
+                        self.record_graph_initialized(
+                            run_id,
+                            session_id,
+                            &current_graph,
+                            stage_label.as_str(),
+                        )
+                        .await;
+                        continue;
                     }
 
                     let (verified, reason) = self
@@ -4204,6 +4336,13 @@ impl Orchestrator {
                     // Try to parse output as SubtaskPlan JSON
                     if let Ok(plan) = serde_json::from_str::<SubtaskPlan>(&result.output) {
                         if !plan.subtasks.is_empty() {
+                            // Enforce per-plan dynamic node cap to prevent OOM.
+                            let subtasks: Vec<_> = plan
+                                .subtasks
+                                .into_iter()
+                                .take(MAX_DYNAMIC_SUBTASKS_PER_PLAN)
+                                .collect();
+
                             let _ = memory
                                 .append_run_action_event(
                                     run_id,
@@ -4213,13 +4352,13 @@ impl Orchestrator {
                                     Some(node.id.as_str()),
                                     None,
                                     serde_json::json!({
-                                        "subtask_count": plan.subtasks.len(),
-                                        "subtasks": plan.subtasks.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                                        "subtask_count": subtasks.len(),
+                                        "subtasks": subtasks.iter().map(|s| &s.id).collect::<Vec<_>>(),
                                     }),
                                 )
                                 .await;
 
-                            for subtask in plan.subtasks {
+                            for subtask in subtasks {
                                 let role = subtask.agent_role;
                                 let instructions = if subtask.instructions.is_empty() {
                                     subtask.description.clone()
