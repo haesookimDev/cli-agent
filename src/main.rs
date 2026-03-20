@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use cli_agent::agents::AgentRegistry;
+use cli_agent::notifier::{self, NotifyConfig};
 use cli_agent::config::AppConfig;
 use cli_agent::context::ContextManager;
 use cli_agent::gateway::GatewayManager;
@@ -62,6 +64,18 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    /// Send a release notification to configured Slack/Discord webhooks.
+    NotifyRelease {
+        /// Version tag to announce (e.g. v0.2.0)
+        #[arg(long)]
+        version: String,
+        /// Notification body text; if omitted, read from --file
+        #[arg(long)]
+        message: Option<String>,
+        /// Path to RELEASE.md to extract notes from
+        #[arg(long, default_value = "RELEASE.md")]
+        file: String,
     },
 }
 
@@ -301,6 +315,29 @@ async fn main() -> anyhow::Result<()> {
                     event.line, event.event.timestamp, event.event.event_type, event.event.payload
                 );
             }
+        }
+        Commands::NotifyRelease {
+            version,
+            message,
+            file,
+        } => {
+            let cfg = NotifyConfig::from_env();
+            if !cfg.any_configured() {
+                eprintln!(
+                    "error: no webhook configured. Set SLACK_NOTIFY_WEBHOOK_URL or DISCORD_NOTIFY_WEBHOOK_URL"
+                );
+                std::process::exit(1);
+            }
+            let notes = if let Some(msg) = message {
+                msg
+            } else {
+                let content = std::fs::read_to_string(&file)
+                    .with_context(|| format!("failed to read {file}"))?;
+                notifier::parse_release_notes(&content, &version)
+                    .ok_or_else(|| anyhow::anyhow!("version {version} not found in {file}"))?
+            };
+            notifier::notify_release(&cfg, &version, &notes).await?;
+            println!("release notification sent: {version}");
         }
         Commands::Memory { command } => match command {
             MemoryCommand::Compact { session } => {
