@@ -247,6 +247,24 @@ impl ExecutionGraph {
         }
     }
 
+    /// Skip all pending nodes that directly depend on `failed_node_id`.
+    /// Used by the node-level circuit breaker so unrelated same-role nodes are not affected.
+    pub fn mark_dependents_pending_as_skipped(&mut self, failed_node_id: &str) {
+        let targets = self
+            .nodes
+            .values()
+            .filter(|node| {
+                node.dependencies.contains(&failed_node_id.to_string())
+                    && matches!(self.status(node.id.as_str()), Some(NodeStatus::Pending))
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+
+        for node_id in targets {
+            self.set_status(node_id.as_str(), NodeStatus::Skipped);
+        }
+    }
+
     fn has_cycle(&self) -> bool {
         fn dfs(
             node_id: &str,

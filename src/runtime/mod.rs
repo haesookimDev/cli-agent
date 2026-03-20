@@ -170,7 +170,9 @@ impl AgentRuntime {
         let mut outputs: HashMap<String, NodeExecutionResult> = HashMap::new();
         let mut running: HashSet<String> = HashSet::new();
         let mut running_by_role: HashMap<AgentRole, usize> = HashMap::new();
-        let mut role_failures: HashMap<AgentRole, u8> = HashMap::new();
+        // Node-level circuit breaker: tracks consecutive failures per node ID.
+        // Replaced the former role-level map to avoid skipping unrelated same-role nodes.
+        let mut node_failures: HashMap<String, u8> = HashMap::new();
         let mut join_set: JoinSet<(AgentNode, anyhow::Result<NodeExecutionResult>)> =
             JoinSet::new();
 
@@ -323,12 +325,15 @@ impl AgentRuntime {
                             graph.force_ready(fallback_id);
                         }
 
-                        let entry = role_failures.entry(node.role).or_insert(0);
+                        let entry = node_failures.entry(node.id.clone()).or_insert(0);
                         *entry = entry.saturating_add(1);
                         if node.policy.circuit_breaker > 0 && *entry >= node.policy.circuit_breaker
                         {
-                            warn!("circuit breaker opened for role {}", node.role);
-                            graph.mark_role_pending_as_skipped(node.role);
+                            warn!(
+                                "circuit breaker opened for node {} (role {})",
+                                node.id, node.role
+                            );
+                            graph.mark_dependents_pending_as_skipped(&node.id);
                         }
                     }
                     Err(err) => {
