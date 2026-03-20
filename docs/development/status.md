@@ -70,6 +70,13 @@
 - [x] AutoSkillRoute 자동 라우팅 — `src/orchestrator/mod.rs`
 - [x] Cron 스케줄러 (60s 틱) — `src/scheduler.rs`
 
+### 멀티 오케스트레이터 클러스터
+
+- [x] `OrchestratorCluster` — 이름 기반 멤버 등록, 서브태스크 병렬 디스패치 — `src/orchestrator/cluster.rs` (2026-03-20)
+- [x] 클러스터 런 상태 집계 — `ClusterRunStatus`: Succeeded / PartialFailure / Failed (2026-03-20)
+- [x] `CLUSTER_MEMBERS` 환경변수로 멤버 구성 (기본값: `"default"`) (2026-03-20)
+- [x] REST API: `GET/POST /v1/cluster/runs`, `GET /v1/cluster/members`, `GET /v1/cluster/runs/:id` (2026-03-20)
+
 ### 통합
 
 - [x] MCP 멀티 서버 레지스트리 — `src/mcp/mod.rs`
