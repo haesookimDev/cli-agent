@@ -15,6 +15,13 @@ use uuid::Uuid;
 
 use crate::types::{CliModelBackendKind, CliModelConfig, TaskProfile};
 
+/// Maximum elapsed time (seconds) allowed for the fallback chain across all model attempts.
+const FALLBACK_CHAIN_DEADLINE_SECS: u64 = 300;
+
+/// Overall wall-clock budget (seconds) for a single `infer` / `infer_stream` call,
+/// including all fallbacks. Provides a hard upper bound beyond the per-request HTTP timeout.
+const INFER_TOTAL_TIMEOUT_SECS: u64 = 600;
+
 pub type TokenCallback = Arc<dyn Fn(&str) + Send + Sync>;
 pub type CliOutputCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
@@ -332,7 +339,14 @@ impl ModelRouter {
         prompt: &str,
         constraints: &RoutingConstraints,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
-        self.infer_in_dir(profile, prompt, constraints, None).await
+        tokio::time::timeout(
+            Duration::from_secs(INFER_TOTAL_TIMEOUT_SECS),
+            self.infer_in_dir(profile, prompt, constraints, None),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("inference timed out after {}s", INFER_TOTAL_TIMEOUT_SECS)
+        })?
     }
 
     pub async fn infer_in_dir(
@@ -391,8 +405,11 @@ impl ModelRouter {
 
         for model in chain {
             // Abort fallback if too little time remains for another attempt
-            if fallback_start.elapsed().as_secs() > 100 {
-                errors.push("fallback chain deadline exceeded (25s)".to_string());
+            if fallback_start.elapsed().as_secs() > FALLBACK_CHAIN_DEADLINE_SECS {
+                errors.push(format!(
+                    "fallback chain deadline exceeded ({}s)",
+                    FALLBACK_CHAIN_DEADLINE_SECS
+                ));
                 break;
             }
 
@@ -445,8 +462,14 @@ impl ModelRouter {
         constraints: &RoutingConstraints,
         on_token: TokenCallback,
     ) -> anyhow::Result<(RoutingDecision, InferenceResult)> {
-        self.infer_stream_in_dir(profile, prompt, constraints, None, on_token)
-            .await
+        tokio::time::timeout(
+            Duration::from_secs(INFER_TOTAL_TIMEOUT_SECS),
+            self.infer_stream_in_dir(profile, prompt, constraints, None, on_token),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("infer_stream timed out after {}s", INFER_TOTAL_TIMEOUT_SECS)
+        })?
     }
 
     pub async fn infer_stream_in_dir(
