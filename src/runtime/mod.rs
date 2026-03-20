@@ -136,8 +136,15 @@ pub type RunNodeFn = Arc<
         + Sync,
 >;
 
+/// Return type of the node-completed callback.
+/// - First element: dynamic nodes to add to the execution graph.
+/// - Second element: existing pending node IDs to skip (used when a Planner
+///   generates a SubtaskPlan that supersedes the statically-built graph nodes).
 pub type OnNodeCompletedFn = Arc<
-    dyn Fn(AgentNode, NodeExecutionResult) -> BoxFuture<'static, anyhow::Result<Vec<AgentNode>>>
+    dyn Fn(
+            AgentNode,
+            NodeExecutionResult,
+        ) -> BoxFuture<'static, anyhow::Result<(Vec<AgentNode>, Vec<String>)>>
         + Send
         + Sync,
 >;
@@ -290,7 +297,20 @@ impl AgentRuntime {
                             }
                         }
 
-                        let dynamic_nodes = on_completed(node.clone(), ok.clone()).await?;
+                        let (dynamic_nodes, skip_ids) =
+                            on_completed(node.clone(), ok.clone()).await?;
+                        // Skip pending static nodes superseded by a SubtaskPlan.
+                        for id in &skip_ids {
+                            if graph.status(id) == Some(NodeStatus::Pending) {
+                                graph.set_status(id, NodeStatus::Skipped);
+                                if let Some(sink) = &on_event {
+                                    sink(RuntimeEvent::NodeSkipped {
+                                        node_id: id.clone(),
+                                        reason: "superseded_by_subtask_plan".to_string(),
+                                    });
+                                }
+                            }
+                        }
                         for dynamic in dynamic_nodes {
                             let dynamic_id = dynamic.id.clone();
                             let dynamic_role = dynamic.role;
@@ -625,7 +645,7 @@ mod tests {
         };
 
         let on_completed: OnNodeCompletedFn =
-            Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
+            Arc::new(move |_node, _res| async { Ok((vec![], vec![])) }.boxed());
 
         let now = Instant::now();
         let results = runtime
@@ -687,7 +707,7 @@ mod tests {
         });
 
         let on_completed: OnNodeCompletedFn =
-            Arc::new(move |_node, _res| async { Ok(vec![]) }.boxed());
+            Arc::new(move |_node, _res| async { Ok((vec![], vec![])) }.boxed());
 
         let results = runtime
             .execute_graph(graph, run_node, on_completed, None, None, None)

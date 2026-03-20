@@ -196,6 +196,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/runs/:run_id/behavior", get(get_run_behavior_handler))
         .route("/v1/runs/:run_id/trace", get(get_run_trace_handler))
         .route("/v1/runs/:run_id/stream", get(stream_run_handler))
+        .route("/v1/runs/:run_id/ws", get(ws_stream_run_handler))
         .route(
             "/v1/runs/:run_id/coder-sessions",
             get(list_coder_sessions_handler),
@@ -1394,6 +1395,114 @@ async fn stream_run_handler(
     Sse::new(event_stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
         .into_response()
+}
+
+/// WebSocket equivalent of `stream_run_handler`.
+/// Clients connect to `/v1/runs/:run_id/ws?api_key=...` and receive the same
+/// `RunActionEvent` JSON frames that the SSE endpoint emits, but over a persistent
+/// WebSocket connection — no polling delay, no SSE keep-alive overhead.
+///
+/// Message format (server → client): text frames, each containing a JSON object:
+///   `{"type": "action_event", "data": <RunActionEvent>}`
+///   `{"type": "run_terminal", "data": {"run_id": "...", "status": "..."}}`
+///   `{"type": "error", "data": {"error": "..."}}`
+async fn ws_stream_run_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    Query(auth_query): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_query_params(
+        &auth_query.api_key,
+        &auth_query.signature,
+        &auth_query.timestamp,
+        &auth_query.nonce,
+        &[],
+    ) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response();
+    }
+
+    let run_id = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let orchestrator = state.orchestrator.clone();
+    ws.on_upgrade(move |socket| handle_run_ws(socket, orchestrator, run_id))
+        .into_response()
+}
+
+async fn handle_run_ws(
+    socket: WebSocket,
+    orchestrator: crate::orchestrator::Orchestrator,
+    run_id: Uuid,
+) {
+    let (mut sender, _receiver) = socket.split();
+    let mut last_seq: i64 = 0;
+
+    loop {
+        let events = match orchestrator
+            .list_run_action_events_since(run_id, last_seq, 500)
+            .await
+        {
+            Ok(e) => e,
+            Err(err) => {
+                let msg = serde_json::json!({"type": "error", "data": {"error": err.to_string()}});
+                let _ = sender
+                    .send(Message::Text(msg.to_string()))
+                    .await;
+                break;
+            }
+        };
+
+        for event in &events {
+            last_seq = event.seq;
+            if let Ok(data) = serde_json::to_string(event) {
+                let msg = serde_json::json!({"type": "action_event", "data": serde_json::from_str::<serde_json::Value>(&data).unwrap_or_default()});
+                if sender
+                    .send(Message::Text(msg.to_string()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+
+        match orchestrator.get_run(run_id).await {
+            Ok(Some(run)) if run.status.is_terminal() => {
+                let msg = serde_json::json!({
+                    "type": "run_terminal",
+                    "data": {"run_id": run.run_id, "status": run.status}
+                });
+                let _ = sender.send(Message::Text(msg.to_string())).await;
+                break;
+            }
+            Ok(None) => {
+                let msg = serde_json::json!({"type": "error", "data": {"error": "run_not_found"}});
+                let _ = sender.send(Message::Text(msg.to_string())).await;
+                break;
+            }
+            Err(err) => {
+                let msg = serde_json::json!({"type": "error", "data": {"error": err.to_string()}});
+                let _ = sender.send(Message::Text(msg.to_string())).await;
+                break;
+            }
+            Ok(Some(_)) => {}
+        }
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
 }
 
 async fn register_webhook_handler(

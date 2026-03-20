@@ -1567,7 +1567,21 @@ impl Orchestrator {
 
         let event_sink = self.build_event_sink(run_id, session_id);
         let run_node = self.build_run_node_fn(run_id, session_id, req.clone(), event_sink.clone());
-        let on_complete = self.build_on_completed_fn(run_id, session_id, req.task.clone());
+
+        // Shared list of static (non-Planner) node IDs for the current graph stage.
+        // Updated before each execute_graph call so the on_complete closure can skip
+        // them when Planner generates a SubtaskPlan that supersedes the static graph.
+        let static_node_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(
+                graph
+                    .nodes()
+                    .iter()
+                    .filter(|n| n.role != AgentRole::Planner)
+                    .map(|n| n.id.clone())
+                    .collect(),
+            ));
+        let on_complete =
+            self.build_on_completed_fn(run_id, session_id, req.task.clone(), static_node_ids.clone());
 
         let should_cancel: ShouldCancelFn = Arc::new({
             let cancel_flag = cancel_flag.clone();
@@ -1584,6 +1598,16 @@ impl Orchestrator {
         let mut failure_retries = 0u8;
 
         loop {
+            // Update static_node_ids to reflect the current iteration's graph so that
+            // on_complete correctly skips superseded nodes when Planner generates a plan.
+            if let Ok(mut ids) = static_node_ids.lock() {
+                *ids = current_graph
+                    .nodes()
+                    .iter()
+                    .filter(|n| n.role != AgentRole::Planner)
+                    .map(|n| n.id.clone())
+                    .collect();
+            }
             let outputs = self
                 .runtime
                 .execute_graph(
@@ -3778,11 +3802,19 @@ impl Orchestrator {
 
                         // Check if this is an external project run
                         let external_analysis = repo_analyses.get(&run_id);
+                        // Use node.instructions as the specific task for this coder node.
+                        // When Planner creates multiple parallel Coder subtasks, each node
+                        // has distinct instructions; req.task is the top-level user request.
+                        let node_task = if node.instructions.is_empty() {
+                            req.task.clone()
+                        } else {
+                            node.instructions.clone()
+                        };
                         let (effective_working_dir, enriched_task) =
                             if let Some(ref analysis) = external_analysis {
                                 let enriched = format!(
                                     "{}\n\nREPOSITORY MAP:\n{}\n\nTECH STACK: {} ({})\nKey files: {}",
-                                    req.task,
+                                    node_task,
                                     analysis.repo_map,
                                     analysis.tech_stack.primary_language,
                                     analysis.tech_stack.frameworks.join(", "),
@@ -3817,7 +3849,7 @@ impl Orchestrator {
                                         });
                                     }
                                 };
-                                (working_dir, req.task.clone())
+                                (working_dir, node_task)
                             };
 
                         let result = coder_manager
@@ -4300,6 +4332,10 @@ impl Orchestrator {
         run_id: Uuid,
         session_id: Uuid,
         task: String,
+        // Node IDs of static graph nodes (non-Planner) for the current graph stage.
+        // When Planner generates a SubtaskPlan, these are returned as "skip" targets
+        // so the runtime skips them in favour of the dynamic subtask nodes.
+        static_node_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> OnNodeCompletedFn {
         let memory = self.memory.clone();
         let validation_config = self.validation_config.clone();
@@ -4307,6 +4343,7 @@ impl Orchestrator {
         let orchestrator = self.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
+            let static_node_ids = static_node_ids.clone();
             let memory = memory.clone();
             let validation_config = validation_config.clone();
             let repo_analyses = repo_analyses.clone();
@@ -4333,8 +4370,13 @@ impl Orchestrator {
                 }
 
                 if node.role == AgentRole::Planner && result.succeeded && node.depth < 5 {
-                    // Try to parse output as SubtaskPlan JSON
-                    if let Ok(plan) = serde_json::from_str::<SubtaskPlan>(&result.output) {
+                    // Try to parse output as SubtaskPlan JSON.
+                    // LLMs often wrap JSON in markdown fences or add prose before it,
+                    // so use extract_json_object to find the JSON object first.
+                    let plan_result = extract_json_object(&result.output)
+                        .and_then(|json_str| serde_json::from_str::<SubtaskPlan>(json_str).ok())
+                        .or_else(|| serde_json::from_str::<SubtaskPlan>(&result.output).ok());
+                    if let Some(plan) = plan_result {
                         if !plan.subtasks.is_empty() {
                             // Enforce per-plan dynamic node cap to prevent OOM.
                             let subtasks: Vec<_> = plan
@@ -4388,7 +4430,13 @@ impl Orchestrator {
                                 dynamic_nodes.push(sub_node);
                             }
                             orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
-                            return Ok(dynamic_nodes);
+                            // Return static_node_ids so the runtime skips the statically-built
+                            // graph nodes superseded by this SubtaskPlan.
+                            let skip_ids = static_node_ids
+                                .lock()
+                                .map(|g| g.clone())
+                                .unwrap_or_default();
+                            return Ok((dynamic_nodes, skip_ids));
                         }
                     }
 
@@ -4563,7 +4611,7 @@ impl Orchestrator {
                                 );
                             }
                             orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
-                            return Ok(dynamic_nodes);
+                            return Ok((dynamic_nodes, vec![]));
                         }
 
                         // Lint passed: inject test phase if configured, else summarize
@@ -4606,7 +4654,7 @@ impl Orchestrator {
                                 run_id,
                             );
                             orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
-                            return Ok(dynamic_nodes);
+                            return Ok((dynamic_nodes, vec![]));
                         }
 
                         // Test passed: inject git commit (if configured) then summarize
@@ -4620,7 +4668,7 @@ impl Orchestrator {
                 }
 
                 orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
-                Ok(dynamic_nodes)
+                Ok((dynamic_nodes, vec![]))
             }
             .boxed()
         })
@@ -6146,6 +6194,52 @@ fn summarize_tool_input_schema(schema: &serde_json::Value) -> String {
     }
 }
 
+/// Extract the first complete JSON object `{...}` from `text`.
+/// Handles three common LLM output patterns:
+///   1. Raw JSON: `{"subtasks": [...]}`
+///   2. Markdown fenced block: ` ```json\n{...}\n``` `
+///   3. Prose followed by JSON: `Here is the plan: {...}`
+fn extract_json_object(text: &str) -> Option<&str> {
+    // Try markdown code block first: ```json ... ``` or ``` ... ```
+    for fence in &["```json\n", "```\n", "```json ", "```"] {
+        if let Some(start) = text.find(fence) {
+            let after_fence = &text[start + fence.len()..];
+            if let Some(end_fence) = after_fence.find("```") {
+                let candidate = after_fence[..end_fence].trim();
+                if candidate.starts_with('{') {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // Find first '{' and matching '}'
+    let start = text.find('{')?;
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    for (i, &b) in bytes[start..].iter().enumerate() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_string => escape_next = true,
+            b'"' => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..start + i + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_agent_role(value: &str) -> Option<AgentRole> {
     match value {
         "planner" => Some(AgentRole::Planner),
@@ -6616,12 +6710,14 @@ mod tests {
     async fn planner_subtasks_preserve_mcp_tool_allowlist() {
         let (tmp, _memory, orchestrator) = make_test_orchestrator("subtask-allowlist").await;
 
+        let static_ids = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let on_completed = orchestrator.build_on_completed_fn(
             Uuid::new_v4(),
             Uuid::new_v4(),
             "Inspect a remote repository".to_string(),
+            static_ids,
         );
-        let result = on_completed(
+        let (result, _skip) = on_completed(
             AgentNode::new("plan", AgentRole::Planner, "plan"),
             NodeExecutionResult {
                 node_id: "plan".to_string(),
@@ -6717,12 +6813,14 @@ mod tests {
             None,
         );
 
+        let static_ids = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let on_completed = orchestrator.build_on_completed_fn(
             Uuid::new_v4(),
             Uuid::new_v4(),
             "Analyze the backend architecture".to_string(),
+            static_ids,
         );
-        let result = on_completed(
+        let (result, _skip) = on_completed(
             AgentNode::new("plan", AgentRole::Planner, "plan"),
             NodeExecutionResult {
                 node_id: "plan".to_string(),
