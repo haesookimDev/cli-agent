@@ -520,3 +520,93 @@ fn parse_limit_arg(text: &str) -> usize {
 
     limit
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_origin() -> MessageOrigin {
+        MessageOrigin {
+            platform: Platform::Web,
+            channel_id: "ch".to_string(),
+            thread_id: None,
+            user_id: "u1".to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_run_with_profile() {
+        let cmd = parse_gateway_text("run fix the bug --profile coding", dummy_origin());
+        match cmd.action {
+            GatewayAction::SubmitRun { task, profile } => {
+                assert_eq!(task, "fix the bug");
+                assert_eq!(profile, TaskProfile::Coding);
+            }
+            _ => panic!("expected SubmitRun"),
+        }
+    }
+
+    #[test]
+    fn parse_run_default_profile() {
+        let cmd = parse_gateway_text("run do something", dummy_origin());
+        match cmd.action {
+            GatewayAction::SubmitRun { profile, .. } => {
+                assert_eq!(profile, TaskProfile::General);
+            }
+            _ => panic!("expected SubmitRun"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_text_becomes_submit_run() {
+        let cmd = parse_gateway_text("just some free text", dummy_origin());
+        assert!(matches!(cmd.action, GatewayAction::SubmitRun { .. }));
+    }
+
+    #[test]
+    fn parse_cancel_extracts_uuid() {
+        let id = Uuid::new_v4();
+        let cmd = parse_gateway_text(&format!("cancel {id}"), dummy_origin());
+        match cmd.action {
+            GatewayAction::CancelRun { run_id } => assert_eq!(run_id, id),
+            _ => panic!("expected CancelRun"),
+        }
+    }
+
+    #[test]
+    fn parse_runs_with_session_and_limit() {
+        let sid = Uuid::new_v4();
+        let cmd = parse_gateway_text(&format!("runs --session {sid} --limit 5"), dummy_origin());
+        match cmd.action {
+            GatewayAction::ListRuns { session_id, limit } => {
+                assert_eq!(session_id, Some(sid));
+                assert_eq!(limit, 5);
+            }
+            _ => panic!("expected ListRuns"),
+        }
+    }
+
+    #[test]
+    fn parse_help() {
+        let cmd = parse_gateway_text("help", dummy_origin());
+        assert!(matches!(cmd.action, GatewayAction::Help));
+    }
+
+    #[test]
+    fn parse_clone_with_target_session() {
+        let run_id = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let cmd =
+            parse_gateway_text(&format!("clone {run_id} --session {target}"), dummy_origin());
+        match cmd.action {
+            GatewayAction::CloneRun {
+                run_id: rid,
+                target_session,
+            } => {
+                assert_eq!(rid, run_id);
+                assert_eq!(target_session, Some(target));
+            }
+            _ => panic!("expected CloneRun"),
+        }
+    }
+}
