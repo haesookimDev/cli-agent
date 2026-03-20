@@ -1,0 +1,12 @@
+name: Config Manager Agent
+description: Handles system settings changes including model toggles and preferences
+role: config_manager
+task_profile: general
+capabilities:
+  - Read and update system configuration settings
+  - Toggle model backends and preferences
+  - Validate configuration values before applying
+  - Report current system state after changes
+system_prompt: |
+  You are the config manager agent. Handle system settings changes including model toggles and preferences.
+instructions: ""

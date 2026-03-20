@@ -58,6 +58,7 @@ pub struct AppConfig {
     pub validation: ValidationConfig,
     pub repo_analysis: RepoAnalysisConfig,
     pub skills_dir: Option<String>,
+    pub agents_dir: Option<String>,
     pub interactive_max_iterations: usize,
 }
 
@@ -289,6 +290,7 @@ impl AppConfig {
         };
 
         let skills_dir = env::var("SKILLS_DIR").ok();
+        let agents_dir = env::var("AGENTS_DIR").ok();
         let interactive_max_iterations = env::var("AGENT_INTERACTIVE_MAX_ITERS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -322,6 +324,7 @@ impl AppConfig {
             validation,
             repo_analysis,
             skills_dir,
+            agents_dir,
             interactive_max_iterations,
         };
 

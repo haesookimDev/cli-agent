@@ -181,9 +181,15 @@ async fn main() -> anyhow::Result<()> {
     let validation_config = Arc::new(cfg.validation);
     let repo_analysis_config = Arc::new(cfg.repo_analysis);
     let skills_dir = cfg.skills_dir.as_ref().map(PathBuf::from);
+    let agents_dir = cfg.agents_dir.as_ref().map(PathBuf::from);
+    let agent_registry = if let Some(dir) = &agents_dir {
+        AgentRegistry::from_dir_with_fallback(dir).await
+    } else {
+        AgentRegistry::builtin()
+    };
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
-        AgentRegistry::builtin(),
+        agent_registry,
         router.clone(),
         memory,
         context,

@@ -49,6 +49,25 @@ pub enum AgentRole {
     Validator,
 }
 
+impl AgentRole {
+    /// Returns all agent role variants.
+    pub fn all() -> &'static [AgentRole] {
+        &[
+            AgentRole::Planner,
+            AgentRole::Extractor,
+            AgentRole::Coder,
+            AgentRole::Summarizer,
+            AgentRole::Fallback,
+            AgentRole::ToolCaller,
+            AgentRole::Analyzer,
+            AgentRole::Reviewer,
+            AgentRole::Scheduler,
+            AgentRole::ConfigManager,
+            AgentRole::Validator,
+        ]
+    }
+}
+
 impl Display for AgentRole {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
