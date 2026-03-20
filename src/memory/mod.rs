@@ -1,3 +1,4 @@
+pub mod embedding;
 pub mod session_log;
 pub mod store;
 
@@ -219,6 +220,21 @@ impl MemoryManager {
             self.store.link_memory(id.as_str(), source_ref).await?;
         }
 
+        // Compute and store embedding in the background so the write path is non-blocking.
+        {
+            let store = self.store.clone();
+            let content_owned = content.to_string();
+            let id_owned = id.clone();
+            tokio::spawn(async move {
+                if let Some(vec) = embedding::compute_embedding(&content_owned).await {
+                    let bytes = embedding::encode_embedding(&vec);
+                    if let Err(e) = store.update_memory_embedding(&id_owned, &bytes).await {
+                        tracing::warn!("Failed to store embedding for memory {id_owned}: {e}");
+                    }
+                }
+            });
+        }
+
         let event = SessionEvent {
             session_id,
             run_id: None,
@@ -242,9 +258,14 @@ impl MemoryManager {
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryHit>> {
         let follow_up_bias = looks_like_short_follow_up(query);
+
+        // Compute query embedding once; used by search_memory for vector scoring.
+        let query_vec = embedding::compute_embedding(query).await;
+        let query_embedding: Option<&[f32]> = query_vec.as_deref();
+
         let mut long_hits = self
             .store
-            .search_memory(session_id, query, limit * 2)
+            .search_memory(session_id, query, query_embedding, limit * 2)
             .await?;
 
         // For short follow-up turns, lexical search can miss relevant prior context.

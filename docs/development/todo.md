@@ -17,13 +17,13 @@
 
 ## 우선순위 중간
 
-### 3. 역할 기반 멀티 워크플로우 오케스트레이터
+### ~~3. 역할 기반 멀티 워크플로우 오케스트레이터~~ ✓ 완료 (2026-03-20)
 
 현재 단일 워크플로우 실행에서 확장하여 역할 기반 워크플로우가 오케스트레이터 관리 하에 유기적으로 상호작용:
 
-- **목표**: 기획자 → 개발자 → 리뷰어 → QA → 테스터 역할이 서로 피드백을 주고받으며 태스크 완수
-- **예시 흐름**: 프로젝트 개선 기획 → 기획 리뷰 → 개발 → 테스트/QA → GitHub 커밋 & 푸시 → 프로젝트 재빌드
-- **최종 목표**: 스스로 개선하는 에이전트
+- ✓ **in-graph Reviewer → Planner 피드백**: Reviewer 노드가 INCOMPLETE 출력 시 즉시 replan Planner 주입
+- ✓ **`skills/multi_role_dev.yaml`**: plan → review_plan → code → validate_lint → summarize 파이프라인
+- **잔여**: 스스로 개선하는 에이전트 (멀티 오케스트레이터 확장 — 우선순위 낮음 #5로 이동)
 
 ### 4. 업데이트 알림
 
@@ -44,7 +44,7 @@
 
 ## 기술 부채
 
-- 메모리 유사도 검색을 키워드 기반에서 임베딩 벡터 기반으로 전환
+- ~~메모리 유사도 검색을 키워드 기반에서 임베딩 벡터 기반으로 전환~~ ✓ 완료 (2026-03-20) — `src/memory/embedding.rs` 추가, SQLite `embedding BLOB` 컬럼, OpenAI-compatible API 연동 (`EMBEDDING_API_URL`, `OPENAI_API_KEY`, `EMBEDDING_MODEL`)
 - 테스트 커버리지 확대 (현재 69개, Windows 경로 테스트 플랫폼 불일치 1건 잔존)
 - ~~WebSocket 실시간 이벤트 지원 (현재 SSE 폴링)~~ ✓ 완료 (2026-03-20) — `/v1/runs/:run_id/ws` 엔드포인트 추가
 - 프론트엔드 E2E 테스트 추가
@@ -59,11 +59,11 @@
 
 ### MEDIUM — 에이전트 간 통신 개선
 
-#### M-1. 에이전트 출력 구조화 (JSONSchema 검증) — 부분 완료 (2026-03-20)
+#### ~~M-1. 에이전트 출력 구조화 (JSONSchema 검증)~~ ✓ 완료 (2026-03-20)
 - **파일**: `src/agents/mod.rs:27-30`, `src/runtime/mod.rs:15-24`
 - **문제**: `NodeExecutionResult.output`이 비구조적 텍스트라 파싱 오류 빈발
 - ✓ **완료**: `extract_json_object()` 헬퍼 추가 — Planner 출력에서 markdown fence / 산문 제거 후 SubtaskPlan JSON 추출
-- **잔여**: 역할별 출력 JSONSchema 정의 + Planner 외 역할의 파싱 실패 시 에러 명시
+- ✓ **잔여 완료**: Reviewer 모호 출력 시 `warn!()` 추가; ToolCaller/Reviewer 파싱 실패 에러 명시 완료
 
 #### ~~M-2. 서킷 브레이커를 노드 단위로 세분화~~ ✓ 완료 (2026-03-20)
 - `role_failures` → `node_failures` (node ID 기반)로 교체

@@ -75,6 +75,14 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        // Migration: add embedding column if it doesn't exist yet.
+        // ALTER TABLE ADD COLUMN fails if the column already exists, so ignore the error.
+        let _ = sqlx::query(
+            "ALTER TABLE memory_items ADD COLUMN embedding BLOB",
+        )
+        .execute(&self.pool)
+        .await;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS memory_links (
@@ -828,6 +836,22 @@ impl SqliteStore {
         Ok(id)
     }
 
+    /// Store a precomputed embedding vector for an existing memory item.
+    pub async fn update_memory_embedding(
+        &self,
+        id: &str,
+        embedding_bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE memory_items SET embedding = ?1 WHERE id = ?2",
+        )
+        .bind(embedding_bytes)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn link_memory(&self, memory_item_id: &str, source_ref: &str) -> anyhow::Result<()> {
         sqlx::query(
             r#"
@@ -847,8 +871,11 @@ impl SqliteStore {
         &self,
         session_id: Uuid,
         query_text: &str,
+        query_embedding: Option<&[f32]>,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryHit>> {
+        use crate::memory::embedding::{cosine_similarity, decode_embedding};
+
         let normalized_query = query_text.trim().to_lowercase();
         if normalized_query.is_empty() {
             return Ok(Vec::new());
@@ -856,7 +883,7 @@ impl SqliteStore {
 
         let rows = sqlx::query(
             r#"
-            SELECT id, content, importance, created_at
+            SELECT id, content, importance, created_at, embedding
             FROM memory_items
             WHERE session_id = ?1
             ORDER BY updated_at DESC
@@ -875,18 +902,31 @@ impl SqliteStore {
             let created_at = DateTime::parse_from_rfc3339(&created_at_raw)?.with_timezone(&Utc);
             let content: String = row.get("content");
             let importance: f64 = row.get("importance");
-            let content_lower = content.to_lowercase();
-
-            let full_match = content_lower.contains(normalized_query.as_str());
-            let token_score = token_overlap_score(&query_tokens, content_lower.as_str());
-            let lexical = if full_match { 1.0 } else { token_score };
-            if lexical <= 0.0 {
-                continue;
-            }
+            let row_embedding_bytes: Option<Vec<u8>> = row.get("embedding");
 
             let age_secs = (Utc::now() - created_at).num_seconds().max(0) as f64;
             let recency = (1.0 / (1.0 + age_secs / 7200.0)).clamp(0.0, 1.0);
-            let rank = (0.70 * lexical + 0.20 * importance + 0.10 * recency).clamp(0.0, 1.0);
+
+            // Use vector similarity when both query and row embeddings are available.
+            let rank = if let (Some(qe), Some(bytes)) = (query_embedding, &row_embedding_bytes) {
+                let row_vec = decode_embedding(bytes);
+                let cosine = cosine_similarity(qe, &row_vec);
+                // Threshold: skip items with very low semantic relevance.
+                if cosine < 0.20 {
+                    continue;
+                }
+                (0.70 * cosine + 0.20 * importance + 0.10 * recency).clamp(0.0, 1.0)
+            } else {
+                // Fallback: keyword-based scoring (existing behaviour).
+                let content_lower = content.to_lowercase();
+                let full_match = content_lower.contains(normalized_query.as_str());
+                let token_score = token_overlap_score(&query_tokens, &content_lower);
+                let lexical = if full_match { 1.0 } else { token_score };
+                if lexical <= 0.0 {
+                    continue;
+                }
+                (0.70 * lexical + 0.20 * importance + 0.10 * recency).clamp(0.0, 1.0)
+            };
 
             scored.push((
                 rank,

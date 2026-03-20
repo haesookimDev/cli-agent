@@ -1861,6 +1861,11 @@ impl Orchestrator {
                         .to_string();
                     (false, reason)
                 } else {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        "Reviewer returned ambiguous output (neither COMPLETE nor INCOMPLETE): {}",
+                        Self::trim_for_context(content, 240)
+                    );
                     (
                         false,
                         format!(
@@ -4663,6 +4668,63 @@ impl Orchestrator {
                             &node,
                             &mut dynamic_nodes,
                             run_id,
+                        );
+                    }
+                }
+
+                // Reviewer node in-graph feedback: if INCOMPLETE, inject a Planner
+                // replan so the graph can self-correct without waiting for the outer
+                // orchestrator review loop.
+                if node.role == AgentRole::Reviewer && result.succeeded && node.depth < 4 {
+                    let content = result.output.trim();
+                    if content.starts_with("INCOMPLETE") {
+                        let reason = content
+                            .strip_prefix("INCOMPLETE:")
+                            .unwrap_or(content)
+                            .trim();
+                        let replan_id = format!("replan_after_{}", node.id);
+                        let mut replan_node = AgentNode::new(
+                            replan_id,
+                            AgentRole::Planner,
+                            format!(
+                                "Reviewer flagged the previous work as incomplete.\n\n\
+                                 REASON:\n{}\n\n\
+                                 ORIGINAL TASK:\n{}\n\n\
+                                 Create a JSON SubtaskPlan to address the remaining gap. \
+                                 Do not wrap the JSON in markdown fences.",
+                                reason, task,
+                            ),
+                        );
+                        replan_node.dependencies = vec![node.id.clone()];
+                        replan_node.depth = node.depth + 1;
+                        replan_node.policy = ExecutionPolicy {
+                            timeout_ms: 120_000,
+                            retry: 1,
+                            max_parallelism: 1,
+                            circuit_breaker: 2,
+                            on_dependency_failure: DependencyFailurePolicy::FailFast,
+                            fallback_node: None,
+                        };
+                        dynamic_nodes.push(replan_node);
+                        let _ = memory
+                            .append_run_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::ReplanTriggered,
+                                Some("reviewer"),
+                                Some(node.id.as_str()),
+                                None,
+                                serde_json::json!({
+                                    "reason": reason,
+                                    "mode": "in_graph_reviewer_replan",
+                                }),
+                            )
+                            .await;
+                        tracing::warn!(
+                            run_id = %run_id,
+                            node_id = %node.id,
+                            reason,
+                            "Reviewer flagged task as incomplete; injecting replan planner"
                         );
                     }
                 }

@@ -1,0 +1,53 @@
+name: Multi-Role Dev
+description: >
+  Full development cycle: Planner creates a SubtaskPlan, Reviewer checks the
+  plan and triggers replan if incomplete, Coder implements, Validator runs
+  lint/tests (if configured), and a Summarizer consolidates the outcome.
+  Use when the user wants a structured plan-review-code-validate loop.
+parameters:
+  - name: task
+    description: The development task to implement.
+    default_value: Implement the requested feature
+nodes:
+  - id: plan
+    role: planner
+    instructions: >
+      Create a detailed SubtaskPlan for the following task: {{task}}
+
+      Return a JSON SubtaskPlan object:
+      {"subtasks":[{"id":"string","description":"string","agent_role":"planner|extractor|coder|summarizer|fallback|tool_caller|analyzer|reviewer|scheduler|config_manager|validator","dependencies":["node_id"],"instructions":"string","mcp_tools":["server/tool"]}]}
+
+      Rules:
+      - Split independent work into parallel subtasks.
+      - Use dependencies only when sequencing is truly required.
+      - Do not wrap the JSON in markdown fences.
+
+  - id: review_plan
+    role: reviewer
+    instructions: >
+      Review the plan produced by the planner.
+      If the plan is clear, feasible, and fully addresses the original task,
+      respond with exactly: COMPLETE
+      If the plan needs revision, respond with exactly: INCOMPLETE: <specific reason>
+    dependencies: [plan]
+
+  - id: code
+    role: coder
+    instructions: "Implement the following task based on the approved plan: {{task}}"
+    dependencies: [review_plan]
+
+  - id: validate_lint
+    role: validator
+    instructions: lint
+    dependencies: [code]
+    policy:
+      timeout_ms: 120000
+      retry: 0
+
+  - id: summarize
+    role: summarizer
+    instructions: >
+      Summarize the completed development cycle.
+      Cover: what was planned, any plan revisions requested by the reviewer,
+      what was implemented, and validation results.
+    dependencies: [validate_lint]
