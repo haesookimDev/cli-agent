@@ -4,6 +4,34 @@
 
 ---
 
+## 우선순위 중간
+
+### C-1. 클러스터 멤버 역할(role) 및 태스크 지정 방식
+
+멤버 등록 시 역할 설명을 함께 저장하고, 태스크 지정을 두 가지 방식으로 지원한다.
+
+#### 백엔드 (`src/orchestrator/cluster.rs`, `src/types.rs`)
+
+- `MemberEntry { orchestrator: Orchestrator, role: String }` 도입 — 현재 `DashMap<String, Orchestrator>` 교체
+- `ClusterRunRequest`에 `auto_decompose: bool` 플래그 추가
+- **수동 지정** (`auto_decompose: false`, `subtasks` 직접 기입): 현재 동작 유지
+- **Planner 자동 분해** (`auto_decompose: true`):
+  - 멤버 이름 + role을 컨텍스트로 Planner 오케스트레이터에 주입
+  - LLM이 역할별 서브태스크 JSON 반환 → `subtasks` 자동 생성
+  - 응답 형식: `[{"member":"...","task":"..."}]`
+- `POST /v1/cluster/members` — 런타임 멤버 등록 (`name`, `role` 수신)
+- `DELETE /v1/cluster/members/:name` — 런타임 멤버 해제
+
+#### 프론트엔드 (`web/src/`)
+
+- `web/src/lib/types.ts` — `ClusterRunRecord`, `ClusterSubRunEntry`, `ClusterRunStatus` 타입 추가
+- `web/src/hooks/use-cluster-run.ts` — `GET /v1/cluster/runs/:id` 1초 폴링 훅
+- `web/src/components/cluster-run-card.tsx` — 서브런별 상태 배지 카드 컴포넌트
+- `web/src/app/chat/page.tsx` — 클러스터 모드 토글 추가:
+  - 토글 OFF: 기존 `POST /v1/runs` 단일 런 흐름
+  - 토글 ON: 멤버 선택 + `auto_decompose` 체크박스 → `POST /v1/cluster/runs`
+  - 클러스터 런 진행 중: `ClusterRunCard`로 서브런 상태 표시
+
 ---
 
 ## 장기 아키텍처 개선
