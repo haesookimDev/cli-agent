@@ -232,6 +232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn bundled_codex_lookup_finds_windows_extension_binary() {
         let root = unique_temp_dir("bundle-windows");
         let extension = root.join(".vscode/extensions/openai.chatgpt-0.4.79-win32-x64");
