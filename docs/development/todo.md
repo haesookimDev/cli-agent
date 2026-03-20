@@ -4,13 +4,14 @@
 
 ---
 
-## 우선순위 높음
+## ~~우선순위 높음~~
 
-### 2. 코더 에이전트 병렬 실행
+### ~~2. 코더 에이전트 병렬 실행~~ ✓ 완료 (2026-03-20)
 
-- Claude Code / Codex를 사용하여 실제 코드 작성
-- 병렬 실행 시 여러 세션 생성
-- Claude Code / Codex 출력을 채팅에서 실시간으로 표시
+- ~~Claude Code / Codex를 사용하여 실제 코드 작성~~ — ClaudeCodeBackend / CodexBackend 이미 구현됨
+- ~~병렬 실행 시 여러 세션 생성~~ — 각 Coder 노드가 개별 세션으로 실행됨
+- ~~Claude Code / Codex 출력을 채팅에서 실시간으로 표시~~ — CoderOutputChunk 이벤트로 스트리밍
+- **핵심 버그 수정**: Coder 노드가 `req.task` 대신 `node.instructions`를 실행하도록 수정 — 병렬 Coder 서브태스크가 각자 고유한 작업을 실행
 
 ---
 
@@ -45,7 +46,7 @@
 
 - 메모리 유사도 검색을 키워드 기반에서 임베딩 벡터 기반으로 전환
 - 테스트 커버리지 확대 (현재 69개, Windows 경로 테스트 플랫폼 불일치 1건 잔존)
-- WebSocket 실시간 이벤트 지원 (현재 SSE 폴링)
+- ~~WebSocket 실시간 이벤트 지원 (현재 SSE 폴링)~~ ✓ 완료 (2026-03-20) — `/v1/runs/:run_id/ws` 엔드포인트 추가
 - 프론트엔드 E2E 테스트 추가
 
 ---
@@ -54,13 +55,15 @@
 
 > 2026-03-20 분석 완료.
 > 2026-03-20 MEDIUM 항목 M-2 ~ M-4, M-6 및 TODO #1 수정 완료.
+> 2026-03-20 M-1(부분), M-5, TODO #2(코더 병렬), 기술부채(WebSocket) 수정 완료.
 
 ### MEDIUM — 에이전트 간 통신 개선
 
-#### M-1. 에이전트 출력 구조화 (JSONSchema 검증)
+#### M-1. 에이전트 출력 구조화 (JSONSchema 검증) — 부분 완료 (2026-03-20)
 - **파일**: `src/agents/mod.rs:27-30`, `src/runtime/mod.rs:15-24`
 - **문제**: `NodeExecutionResult.output`이 비구조적 텍스트라 파싱 오류 빈발
-- **개선**: 역할별 출력 JSONSchema 정의 + 파싱 실패 시 에러 명시
+- ✓ **완료**: `extract_json_object()` 헬퍼 추가 — Planner 출력에서 markdown fence / 산문 제거 후 SubtaskPlan JSON 추출
+- **잔여**: 역할별 출력 JSONSchema 정의 + Planner 외 역할의 파싱 실패 시 에러 명시
 
 #### ~~M-2. 서킷 브레이커를 노드 단위로 세분화~~ ✓ 완료 (2026-03-20)
 - `role_failures` → `node_failures` (node ID 기반)로 교체
@@ -74,10 +77,10 @@
 - `FALLBACK_CHAIN_DEADLINE_SECS = 300` named constant 추출
 - 체크 조건(`> 100`)과 에러 메시지(`"25s"`) 불일치 해소
 
-#### M-5. 실행 중 태스크 재분류 로직 추가
-- **파일**: `src/orchestrator/mod.rs:2197` (`build_graph()`)
-- **문제**: 태스크 타입이 최초 한 번만 결정됨
-- **개선**: Planner 완료 후 출력 기반으로 그래프 재구성 가능하도록 리훅
+#### ~~M-5. 실행 중 태스크 재분류 로직 추가~~ ✓ 완료 (2026-03-20)
+- `OnNodeCompletedFn` 반환 타입을 `(Vec<AgentNode>, Vec<String>)`으로 변경
+- Planner가 SubtaskPlan 생성 시 정적 그래프 노드(`extract`, `code` 등)를 Skipped 처리
+- `static_node_ids: Arc<Mutex<Vec<String>>>`로 각 실행 단계별 정적 노드 목록 관리
 
 ### MEDIUM — 라우팅 개선
 
