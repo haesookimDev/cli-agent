@@ -25,10 +25,10 @@
 - ✓ **`skills/multi_role_dev.yaml`**: plan → review_plan → code → validate_lint → summarize 파이프라인
 - **잔여**: 스스로 개선하는 에이전트 (멀티 오케스트레이터 확장 — 우선순위 낮음 #5로 이동)
 
-### 4. 업데이트 알림
+### ~~4. 업데이트 알림~~ ✓ 완료 (2026-03-20)
 
-- `UPDATE.md` / `RELEASE.md` 형식으로 업데이트 이력 관리
-- Slack / Discord 웹훅으로 업데이트 알림 발송
+- ~~`UPDATE.md` / `RELEASE.md` 형식으로 업데이트 이력 관리~~ — `RELEASE.md` 추가
+- ~~Slack / Discord 웹훅으로 업데이트 알림 발송~~ — `src/notifier.rs` + `agent notify-release` CLI 커맨드 (`SLACK_NOTIFY_WEBHOOK_URL`, `DISCORD_NOTIFY_WEBHOOK_URL`)
 
 ---
 
@@ -45,9 +45,9 @@
 ## 기술 부채
 
 - ~~메모리 유사도 검색을 키워드 기반에서 임베딩 벡터 기반으로 전환~~ ✓ 완료 (2026-03-20) — `src/memory/embedding.rs` 추가, SQLite `embedding BLOB` 컬럼, OpenAI-compatible API 연동 (`EMBEDDING_API_URL`, `OPENAI_API_KEY`, `EMBEDDING_MODEL`)
-- 테스트 커버리지 확대 (현재 69개, Windows 경로 테스트 플랫폼 불일치 1건 잔존)
+- ~~테스트 커버리지 확대~~ ✓ 완료 (2026-03-20) — Windows 테스트 `#[cfg(windows)]` 게이팅 수정 + `gateway::parse_gateway_text` 7개 테스트 추가 (총 81개)
 - ~~WebSocket 실시간 이벤트 지원 (현재 SSE 폴링)~~ ✓ 완료 (2026-03-20) — `/v1/runs/:run_id/ws` 엔드포인트 추가
-- 프론트엔드 E2E 테스트 추가
+- ~~프론트엔드 E2E 테스트 추가~~ ✓ 완료 (2026-03-20) — Playwright 설정 + `e2e/navigation.spec.ts`, `e2e/runner.spec.ts` (API 모킹 포함)
 
 ---
 
