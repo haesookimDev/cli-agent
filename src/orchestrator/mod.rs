@@ -4182,6 +4182,24 @@ impl Orchestrator {
             async move {
                 let mut dynamic_nodes = Vec::new();
 
+                // Auto-save successful node output to long-term memory so
+                // future sessions can benefit from accumulated knowledge.
+                if result.succeeded && !result.output.is_empty() {
+                    let importance = match node.role {
+                        AgentRole::Analyzer | AgentRole::Reviewer => 0.8,
+                        AgentRole::Coder | AgentRole::Extractor => 0.7,
+                        AgentRole::Summarizer => 0.6,
+                        _ => 0.5,
+                    };
+                    // Truncate very long outputs to keep memory store lean.
+                    let content: String = result.output.chars().take(4000).collect();
+                    let scope = format!("agent_output:{}", node.role);
+                    let source = format!("{}:{}", run_id, node.id);
+                    let _ = memory
+                        .remember_long(session_id, &scope, &content, importance, Some(&source))
+                        .await;
+                }
+
                 if node.role == AgentRole::Planner && result.succeeded && node.depth < 5 {
                     // Try to parse output as SubtaskPlan JSON
                     if let Ok(plan) = serde_json::from_str::<SubtaskPlan>(&result.output) {
@@ -4745,7 +4763,7 @@ impl Orchestrator {
                     }
                 };
 
-                let _ = memory
+                if let Err(err) = memory
                     .append_event(SessionEvent {
                         session_id,
                         run_id: Some(run_id),
@@ -4753,9 +4771,12 @@ impl Orchestrator {
                         timestamp: Utc::now(),
                         payload: payload.clone(),
                     })
-                    .await;
+                    .await
+                {
+                    tracing::warn!(%run_id, %session_id, "failed to append session event: {}", err);
+                }
 
-                let _ = memory
+                if let Err(err) = memory
                     .append_run_action_event(
                         run_id,
                         session_id,
@@ -4765,9 +4786,14 @@ impl Orchestrator {
                         None,
                         payload.clone(),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(%run_id, %session_id, "failed to append run action event: {}", err);
+                }
 
-                let _ = webhook.dispatch("run.progress", payload).await;
+                if let Err(err) = webhook.dispatch("run.progress", payload).await {
+                    tracing::warn!(%run_id, "webhook dispatch failed: {}", err);
+                }
             });
         })
     }

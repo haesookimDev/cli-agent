@@ -1079,6 +1079,12 @@ impl ProviderClient {
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
+            if buf.len() + bytes.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(anyhow::anyhow!(
+                    "SSE stream buffer exceeded {} bytes",
+                    MAX_SSE_BUFFER_BYTES
+                ));
+            }
             buf.extend_from_slice(&bytes);
 
             for raw_line in drain_sse_lines(&mut buf) {
@@ -1147,6 +1153,12 @@ impl ProviderClient {
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
+            if buf.len() + bytes.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(anyhow::anyhow!(
+                    "SSE stream buffer exceeded {} bytes",
+                    MAX_SSE_BUFFER_BYTES
+                ));
+            }
             buf.extend_from_slice(&bytes);
 
             for raw_line in drain_sse_lines(&mut buf) {
@@ -1209,6 +1221,12 @@ impl ProviderClient {
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
+            if buf.len() + bytes.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(anyhow::anyhow!(
+                    "SSE stream buffer exceeded {} bytes",
+                    MAX_SSE_BUFFER_BYTES
+                ));
+            }
             buf.extend_from_slice(&bytes);
 
             for raw_line in drain_sse_lines(&mut buf) {
@@ -1232,6 +1250,8 @@ impl ProviderClient {
         Ok(full_output)
     }
 }
+
+const MAX_SSE_BUFFER_BYTES: usize = 16 * 1024 * 1024; // 16 MB
 
 fn drain_sse_lines(buf: &mut Vec<u8>) -> Vec<String> {
     let mut lines = Vec::new();

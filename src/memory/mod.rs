@@ -289,7 +289,7 @@ impl MemoryManager {
 
         for hit in &mut long_hits {
             let age_secs = (Utc::now() - hit.created_at).num_seconds().max(0) as f64;
-            let recency = (1.0 / (1.0 + age_secs / 3600.0)).clamp(0.0, 1.0);
+            let recency = (1.0 / (1.0 + age_secs / 7200.0)).clamp(0.0, 1.0);
             let similarity = similarity_score(hit.content.as_str(), query);
             hit.score = 0.35 * recency + 0.35 * hit.importance + 0.30 * similarity;
         }

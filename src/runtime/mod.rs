@@ -518,7 +518,7 @@ async fn execute_node_with_policy(
 ) -> anyhow::Result<NodeExecutionResult> {
     let mut last_error: Option<anyhow::Error> = None;
 
-    for _attempt in 0..=node.policy.retry {
+    for attempt in 0..=node.policy.retry {
         let fut = (run_node)(node.clone(), deps.clone());
         let result = timeout(Duration::from_millis(node.policy.timeout_ms), fut).await;
 
@@ -540,6 +540,18 @@ async fn execute_node_with_policy(
                     node.policy.timeout_ms
                 ));
             }
+        }
+
+        // Exponential backoff before next retry: 1s, 2s, 4s, ... capped at 30s
+        if attempt < node.policy.retry {
+            let backoff_secs = (1u64 << attempt).min(30);
+            warn!(
+                node_id = %node.id,
+                attempt,
+                backoff_secs,
+                "node failed, retrying with backoff"
+            );
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         }
     }
 
