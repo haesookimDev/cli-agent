@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use cli_agent::agents::AgentRegistry;
 use cli_agent::notifier::{self, NotifyConfig};
+use cli_agent::orchestrator::cluster::OrchestratorCluster;
 use cli_agent::config::AppConfig;
 use cli_agent::context::ContextManager;
 use cli_agent::gateway::GatewayManager;
@@ -295,6 +296,25 @@ async fn main() -> anyhow::Result<()> {
             println!("serving on http://{addr}");
             println!("  web client: http://{addr}/web-client");
             println!("  dashboard:  http://{addr}/dashboard");
+            // Build the orchestrator cluster.
+            // CLUSTER_MEMBERS is a comma-separated list of member names (e.g. "frontend,backend").
+            // Each member is a clone of the base orchestrator (shared resources, isolated sessions).
+            let cluster = OrchestratorCluster::new();
+            let member_names: Vec<String> = std::env::var("CLUSTER_MEMBERS")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["default".to_string()]);
+            for name in &member_names {
+                cluster.add(name.clone(), orchestrator.clone());
+                tracing::info!("cluster member registered: {name}");
+            }
+
             let terminal = TerminalManager::new(session_workspace.clone());
             api::serve(
                 addr,
@@ -302,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
                     orchestrator,
                     auth,
                     terminal,
+                    cluster,
                 },
                 Some(gateway_router),
             )

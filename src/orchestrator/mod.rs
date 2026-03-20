@@ -1,3 +1,4 @@
+pub mod cluster;
 pub mod coder_backend;
 pub mod git_manager;
 pub mod interactive;

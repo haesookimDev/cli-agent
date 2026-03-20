@@ -962,3 +962,69 @@ pub enum InteractiveAction {
         summary: String,
     },
 }
+
+// ── Multi-Orchestrator Cluster ──────────────────────────────────────────────
+
+/// A sub-task assigned to a specific named orchestrator in a cluster run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterSubtask {
+    /// Name of the target orchestrator (must be registered in the cluster).
+    pub orchestrator: String,
+    /// The task description to run on that orchestrator.
+    pub task: String,
+}
+
+/// Request body for `POST /v1/cluster/runs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterRunRequest {
+    /// High-level task description (used as label; also sent to all members when
+    /// `subtasks` is empty).
+    pub task: String,
+    /// Explicit per-orchestrator assignments. If empty, the task is broadcast to
+    /// every registered cluster member.
+    #[serde(default)]
+    pub subtasks: Vec<ClusterSubtask>,
+}
+
+/// Status of a cluster-level run (aggregated across all sub-runs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusterRunStatus {
+    Running,
+    Succeeded,
+    /// At least one sub-run failed but others succeeded.
+    PartialFailure,
+    Failed,
+}
+
+impl Display for ClusterRunStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ClusterRunStatus::Running => "running",
+            ClusterRunStatus::Succeeded => "succeeded",
+            ClusterRunStatus::PartialFailure => "partial_failure",
+            ClusterRunStatus::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// One sub-run entry within a cluster run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterSubRunEntry {
+    pub orchestrator_name: String,
+    pub run_id: Uuid,
+    pub task: String,
+    pub status: RunStatus,
+}
+
+/// Top-level record for a cluster run spanning multiple orchestrators.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterRunRecord {
+    pub cluster_run_id: Uuid,
+    pub task: String,
+    pub sub_runs: Vec<ClusterSubRunEntry>,
+    pub status: ClusterRunStatus,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
