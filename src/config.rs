@@ -290,7 +290,7 @@ impl AppConfig {
         };
 
         let skills_dir = env::var("SKILLS_DIR").ok();
-        let agents_dir = env::var("AGENTS_DIR").ok();
+        let agents_dir = Some(env::var("AGENTS_DIR").unwrap_or_else(|_| "agents".to_string()));
         let interactive_max_iterations = env::var("AGENT_INTERACTIVE_MAX_ITERS")
             .ok()
             .and_then(|v| v.parse().ok())

@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -182,11 +182,10 @@ async fn main() -> anyhow::Result<()> {
     let repo_analysis_config = Arc::new(cfg.repo_analysis);
     let skills_dir = cfg.skills_dir.as_ref().map(PathBuf::from);
     let agents_dir = cfg.agents_dir.as_ref().map(PathBuf::from);
-    let agent_registry = if let Some(dir) = &agents_dir {
-        AgentRegistry::from_dir_with_fallback(dir).await
-    } else {
-        AgentRegistry::builtin()
-    };
+    let agent_registry = AgentRegistry::from_dir_with_fallback(
+        agents_dir.as_deref().unwrap_or_else(|| Path::new("agents")),
+    )
+    .await;
     let orchestrator = Orchestrator::new(
         AgentRuntime::new(cfg.max_parallelism),
         agent_registry,
