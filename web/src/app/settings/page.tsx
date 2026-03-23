@@ -42,6 +42,13 @@ export default function SettingsPage() {
   const [terminalAutoSpawn, setTerminalAutoSpawn] = useState(false);
   const [terminalSaving, setTerminalSaving] = useState(false);
 
+  const [vllmBaseUrl, setVllmBaseUrl] = useState("http://127.0.0.1:8000");
+  const [vllmCustomModel, setVllmCustomModel] = useState("");
+  const [vllmSaving, setVllmSaving] = useState(false);
+  const [vllmAvailableModels, setVllmAvailableModels] = useState<string[]>([]);
+  const [vllmLoading, setVllmLoading] = useState(false);
+  const [vllmLoadError, setVllmLoadError] = useState<string | null>(null);
+
   async function loadPage() {
     try {
       const [loadedModels, settings] = await Promise.all([
@@ -63,6 +70,8 @@ export default function SettingsPage() {
       setTerminalCommand(settings.terminal_command ?? "bash");
       setTerminalArgs((settings.terminal_args ?? []).join(" "));
       setTerminalAutoSpawn(settings.terminal_auto_spawn ?? false);
+      setVllmBaseUrl(settings.vllm_base_url ?? "http://127.0.0.1:8000");
+      setVllmCustomModel(settings.vllm_custom_model ?? "");
     } catch (err) {
       console.error("load settings page:", err);
     } finally {
@@ -146,6 +155,42 @@ export default function SettingsPage() {
       console.error("save terminal settings:", err);
     } finally {
       setTerminalSaving(false);
+    }
+  }
+
+  async function loadVllmModels() {
+    const url = vllmBaseUrl.trim();
+    if (!url) return;
+    setVllmLoading(true);
+    setVllmLoadError(null);
+    try {
+      const models = await apiGet<string[]>(
+        `/v1/local-models?url=${encodeURIComponent(url)}`
+      );
+      setVllmAvailableModels(models);
+      if (models.length > 0 && !vllmCustomModel) {
+        setVllmCustomModel(models[0]);
+      }
+    } catch {
+      setVllmLoadError("서버에 연결할 수 없습니다.");
+      setVllmAvailableModels([]);
+    } finally {
+      setVllmLoading(false);
+    }
+  }
+
+  async function saveVllmSettings() {
+    setVllmSaving(true);
+    try {
+      await apiPatch("/v1/settings", {
+        vllm_base_url: vllmBaseUrl.trim() || "http://127.0.0.1:8000",
+        vllm_custom_model: vllmCustomModel.trim() || null,
+      });
+      await loadPage();
+    } catch (err) {
+      console.error("save vllm settings:", err);
+    } finally {
+      setVllmSaving(false);
     }
   }
 
@@ -434,6 +479,78 @@ export default function SettingsPage() {
             className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50"
           >
             {terminalSaving ? "Saving..." : "Save Terminal"}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-white p-5">
+        <h2 className="mb-1 text-sm font-semibold text-slate-700">
+          Local Model (vLLM)
+        </h2>
+        <p className="mb-4 text-xs text-slate-400">
+          Connect to a local vLLM server. The custom model ID will appear in the
+          model catalog as <code className="font-mono">custom:&lt;model&gt;</code>.
+        </p>
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Server URL
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={vllmBaseUrl}
+                onChange={(event) => {
+                  setVllmBaseUrl(event.target.value);
+                  setVllmAvailableModels([]);
+                  setVllmLoadError(null);
+                }}
+                className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none"
+                placeholder="http://127.0.0.1:8000"
+              />
+              <button
+                onClick={loadVllmModels}
+                disabled={vllmLoading || !vllmBaseUrl.trim()}
+                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+              >
+                {vllmLoading ? "Loading..." : "Load Models"}
+              </button>
+            </div>
+            {vllmLoadError && (
+              <p className="mt-1 text-xs text-red-500">{vllmLoadError}</p>
+            )}
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Model ID
+            </label>
+            {vllmAvailableModels.length > 0 ? (
+              <select
+                value={vllmCustomModel}
+                onChange={(event) => setVllmCustomModel(event.target.value)}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none"
+              >
+                <option value="">-- 모델 선택 --</option>
+                {vllmAvailableModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={vllmCustomModel}
+                onChange={(event) => setVllmCustomModel(event.target.value)}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-teal-500 focus:outline-none"
+                placeholder="llama3.1:8b"
+              />
+            )}
+          </div>
+          <button
+            onClick={saveVllmSettings}
+            disabled={vllmSaving}
+            className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50"
+          >
+            {vllmSaving ? "Saving..." : "Save Local Model"}
           </button>
         </div>
       </div>

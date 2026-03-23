@@ -448,6 +448,8 @@ impl Orchestrator {
             terminal_command: crate::types::default_terminal_command(),
             terminal_args: crate::types::default_terminal_args(),
             terminal_auto_spawn: false,
+            vllm_base_url: crate::types::default_vllm_base_url(),
+            vllm_custom_model: None,
         }
     }
 
@@ -530,6 +532,12 @@ impl Orchestrator {
         if let Some(auto) = patch.terminal_auto_spawn {
             settings.terminal_auto_spawn = auto;
         }
+        if let Some(url) = patch.vllm_base_url {
+            settings.vllm_base_url = url;
+        }
+        if let Some(model) = patch.vllm_custom_model {
+            settings.vllm_custom_model = model;
+        }
 
         if cli_patch_applied {
             match Self::normalize_cli_model_config(&settings) {
@@ -579,6 +587,11 @@ impl Orchestrator {
         for provider in Self::all_providers() {
             self.router.set_provider_disabled(provider, false);
         }
+
+        self.router.set_vllm_config(
+            settings.vllm_base_url.clone(),
+            settings.vllm_custom_model.clone(),
+        );
 
         let cli_model = Self::normalize_cli_model_config(settings);
         self.router.set_cli_model_config(cli_model.clone());

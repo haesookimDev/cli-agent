@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -141,7 +141,7 @@ pub struct InferenceResult {
 
 #[derive(Debug, Clone)]
 pub struct ModelRouter {
-    catalog: Arc<Vec<ModelSpec>>,
+    catalog: Arc<RwLock<Vec<ModelSpec>>>,
     client: ProviderClient,
     preferred_model: Arc<Mutex<Option<String>>>,
     cli_model: Arc<Mutex<Option<CliModelConfig>>>,
@@ -157,7 +157,7 @@ impl ModelRouter {
         cli_model: Option<CliModelConfig>,
     ) -> Self {
         let router = Self {
-            catalog: Arc::new(default_catalog(cli_model.as_ref())),
+            catalog: Arc::new(RwLock::new(default_catalog(cli_model.as_ref()))),
             client: ProviderClient::new(
                 vllm_base_url.into(),
                 openai_api_key,
@@ -184,7 +184,7 @@ impl ModelRouter {
         catalog: Vec<ModelSpec>,
     ) -> Self {
         let router = Self {
-            catalog: Arc::new(catalog),
+            catalog: Arc::new(RwLock::new(catalog)),
             client: ProviderClient::new(
                 vllm_base_url.into(),
                 openai_api_key,
@@ -202,8 +202,8 @@ impl ModelRouter {
         router
     }
 
-    pub fn catalog(&self) -> &[ModelSpec] {
-        &self.catalog
+    pub fn catalog(&self) -> Vec<ModelSpec> {
+        self.catalog.read().unwrap().clone()
     }
 
     pub fn set_provider_disabled(&self, provider: ProviderKind, disabled: bool) {
@@ -243,6 +243,24 @@ impl ModelRouter {
         self.client.set_cli_model_config(cli_model);
     }
 
+    pub fn set_vllm_config(&self, base_url: String, custom_model: Option<String>) {
+        self.client.set_vllm_base_url(base_url);
+        let mut catalog = self.catalog.write().unwrap();
+        catalog.retain(|s| !(s.provider == ProviderKind::Vllm && s.model_id.starts_with("custom:")));
+        if let Some(model_id) = custom_model {
+            catalog.push(ModelSpec {
+                provider: ProviderKind::Vllm,
+                model_id: format!("custom:{}", model_id),
+                quality: 0.75,
+                latency: 1500.0,
+                cost: 0.001,
+                context_window: 32_000,
+                tool_call_accuracy: 0.70,
+                local_only: true,
+            });
+        }
+    }
+
     pub fn cli_model_config(&self) -> Option<CliModelConfig> {
         self.cli_model.lock().unwrap().clone()
     }
@@ -276,7 +294,8 @@ impl ModelRouter {
     ) -> anyhow::Result<RoutingDecision> {
         let preferred = self.preferred_model();
         let mut scored = Vec::<(ModelSpec, f64)>::new();
-        for model in self.catalog.iter() {
+        let catalog_snapshot = self.catalog.read().unwrap().clone();
+        for model in catalog_snapshot.iter() {
             if model.context_window < constraints.min_context {
                 continue;
             }
@@ -575,7 +594,7 @@ struct CliProviderConfig {
 #[derive(Debug, Clone)]
 pub struct ProviderClient {
     http: reqwest::Client,
-    vllm_base_url: String,
+    vllm_base_url: Arc<RwLock<String>>,
     openai_api_key: Option<String>,
     anthropic_api_key: Option<String>,
     gemini_api_key: Option<String>,
@@ -597,7 +616,7 @@ impl ProviderClient {
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            vllm_base_url,
+            vllm_base_url: Arc::new(RwLock::new(vllm_base_url)),
             openai_api_key,
             anthropic_api_key,
             gemini_api_key,
@@ -651,6 +670,10 @@ impl ProviderClient {
 
     pub fn is_model_disabled(&self, model_id: &str) -> bool {
         self.disabled_models.contains(model_id)
+    }
+
+    pub fn set_vllm_base_url(&self, url: String) {
+        *self.vllm_base_url.write().unwrap() = url;
     }
 
     pub fn set_provider_disabled(&self, provider: ProviderKind, disabled: bool) {
@@ -785,10 +808,8 @@ impl ProviderClient {
     }
 
     async fn generate_vllm(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
-        let endpoint = format!(
-            "{}/v1/chat/completions",
-            self.vllm_base_url.trim_end_matches('/')
-        );
+        let base_url = self.vllm_base_url.read().unwrap().clone();
+        let endpoint = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
 
         let resp = self
             .http
@@ -799,7 +820,7 @@ impl ProviderClient {
             }))
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("vLLM server unavailable at {}", self.vllm_base_url))?;
+            .map_err(|_| anyhow::anyhow!("vLLM server unavailable at {}", base_url))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -1066,10 +1087,8 @@ impl ProviderClient {
         on_token: &TokenCallback,
     ) -> anyhow::Result<String> {
         let base_url = if model.provider == ProviderKind::Vllm {
-            format!(
-                "{}/v1/chat/completions",
-                self.vllm_base_url.trim_end_matches('/')
-            )
+            let vllm_url = self.vllm_base_url.read().unwrap().clone();
+            format!("{}/v1/chat/completions", vllm_url.trim_end_matches('/'))
         } else {
             "https://api.openai.com/v1/chat/completions".to_string()
         };

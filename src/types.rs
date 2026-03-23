@@ -528,6 +528,10 @@ pub struct AppSettings {
     pub terminal_args: Vec<String>,
     #[serde(default)]
     pub terminal_auto_spawn: bool,
+    #[serde(default = "default_vllm_base_url")]
+    pub vllm_base_url: String,
+    #[serde(default)]
+    pub vllm_custom_model: Option<String>,
 }
 
 pub fn default_terminal_command() -> String {
@@ -550,6 +554,11 @@ fn default_cli_model_timeout_ms() -> u64 {
     300_000
 }
 
+pub fn default_vllm_base_url() -> String {
+    std::env::var("VLLM_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8000".to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsPatch {
     pub default_profile: Option<TaskProfile>,
@@ -565,6 +574,8 @@ pub struct SettingsPatch {
     pub terminal_command: Option<String>,
     pub terminal_args: Option<Vec<String>>,
     pub terminal_auto_spawn: Option<bool>,
+    pub vllm_base_url: Option<String>,
+    pub vllm_custom_model: Option<Option<String>>,
 }
 
 // --- Cron Schedule Types ---

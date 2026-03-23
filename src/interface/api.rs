@@ -117,6 +117,11 @@ struct DeliveryListQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct VllmModelsQuery {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterWebhookRequest {
     url: String,
     events: Vec<String>,
@@ -224,6 +229,7 @@ pub fn router(state: ApiState) -> Router {
             get(get_settings_handler).patch(update_settings_handler),
         )
         .route("/v1/models", get(list_models_handler))
+        .route("/v1/local-models", get(list_vllm_models_handler))
         .route("/v1/models/:model_id/toggle", post(toggle_model_handler))
         .route(
             "/v1/providers/:provider_name/toggle",
@@ -1821,6 +1827,54 @@ async fn list_models_handler(
         .collect();
 
     (StatusCode::OK, Json(serde_json::json!(models)))
+}
+
+async fn list_vllm_models_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<VllmModelsQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": err.to_string()})),
+        );
+    }
+
+    let endpoint = format!("{}/v1/models", query.url.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => reqwest::Client::new(),
+    };
+
+    match client.get(&endpoint).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let model_ids: Vec<String> = body["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["id"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (StatusCode::OK, Json(serde_json::json!(model_ids)))
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("vLLM returned {}", status)})),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 async fn toggle_model_handler(

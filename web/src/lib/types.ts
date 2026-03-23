@@ -199,6 +199,8 @@ export interface AppSettings {
   terminal_command: string;
   terminal_args: string[];
   terminal_auto_spawn: boolean;
+  vllm_base_url: string;
+  vllm_custom_model: string | null;
 }
 
 export interface TerminalSessionInfo {
