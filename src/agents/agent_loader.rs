@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tracing::{info, warn};
 
-use crate::types::{AgentRole, TaskProfile};
+use crate::types::{AgentPersona, AgentRole, TaskProfile};
 
 /// YAML/JSON agent definition file schema.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -16,6 +16,9 @@ pub struct AgentDefinition {
     pub system_prompt: String,
     #[serde(default)]
     pub instructions: String,
+    /// Optional persona for team-based collaboration.
+    #[serde(default)]
+    pub persona: Option<AgentPersona>,
 }
 
 /// Load all `*.yaml`, `*.yml`, and `*.json` agent definition files from a directory.

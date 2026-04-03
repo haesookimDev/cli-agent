@@ -60,6 +60,10 @@ pub struct AppConfig {
     pub skills_dir: Option<String>,
     pub agents_dir: Option<String>,
     pub interactive_max_iterations: usize,
+    // Team / virtual dev team configuration
+    pub team_agents_dir: Option<String>,
+    pub team_github_repo: Option<String>,
+    pub team_sign_comments: bool,
 }
 
 impl AppConfig {
@@ -296,6 +300,12 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(15);
 
+        let team_agents_dir = env::var("TEAM_AGENTS_DIR").ok();
+        let team_github_repo = env::var("TEAM_GITHUB_REPO").ok();
+        let team_sign_comments = env::var("TEAM_SIGN_COMMENTS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true);
+
         let cfg = Self {
             data_dir,
             session_dir,
@@ -326,6 +336,9 @@ impl AppConfig {
             skills_dir,
             agents_dir,
             interactive_max_iterations,
+            team_agents_dir,
+            team_github_repo,
+            team_sign_comments,
         };
 
         cfg.ensure_dirs()?;

@@ -1,0 +1,160 @@
+name: team_dev_workflow
+description: Virtual dev team collaborates on GitHub — PM creates issues, Tech Lead designs, Devs implement, Reviewers approve, QA validates.
+
+parameters:
+  - name: task
+    description: High-level task or feature to develop
+  - name: repo
+    description: Target GitHub repository (owner/name)
+  - name: base_branch
+    description: Base branch to work from
+    default_value: main
+
+nodes:
+  # Stage 1: PM decomposes task into GitHub issues
+  - id: create_issues
+    role: planner
+    instructions: |
+      You are the Project Manager.
+      Analyze the task "{{task}}" and decompose it into concrete GitHub issues.
+
+      Use MCP github tools to create real issues in {{repo}}.
+      For each issue include:
+      - Clear title
+      - Detailed body with requirements and acceptance criteria
+      - Labels: feature, bug, enhancement, or documentation
+      - Suggested assignee based on expertise
+
+      Return a JSON summary of created issues:
+      {"issues": [{"number": 1, "title": "...", "assignee": "..."}]}
+    mcp_tools:
+      - github/create_issue
+      - github/add_issue_comment
+
+  # Stage 2: Tech Lead reviews issues and provides architecture guidance
+  - id: architecture_design
+    role: reviewer
+    dependencies: [create_issues]
+    instructions: |
+      You are the Tech Lead.
+      Review the created issues and design the technical architecture.
+
+      For each issue:
+      1. Read the issue details
+      2. Comment with implementation guidelines (file structure, APIs, patterns)
+      3. Identify risks and dependencies between issues
+
+      Use MCP tools to comment on each issue directly.
+      Return a summary of your architectural decisions.
+    mcp_tools:
+      - github/list_issues
+      - github/get_issue
+      - github/add_issue_comment
+
+  # Stage 3a: Senior Dev implements backend (parallel with frontend)
+  - id: implement_backend
+    role: coder
+    dependencies: [architecture_design]
+    instructions: |
+      You are the Senior Backend Developer.
+      Based on the architecture guidelines, implement the backend changes.
+
+      Steps:
+      1. Create a feature branch from {{base_branch}}
+      2. Implement the code changes
+      3. Push files to the branch
+      4. Create a PR with clear description referencing the issues
+
+      Follow existing code patterns and conventions.
+    mcp_tools:
+      - github/create_branch
+      - github/push_files
+      - github/create_pull_request
+      - github/get_file_contents
+    policy:
+      max_parallelism: 2
+      timeout_ms: 300000
+
+  # Stage 3b: Frontend Dev implements UI (parallel with backend)
+  - id: implement_frontend
+    role: coder
+    dependencies: [architecture_design]
+    instructions: |
+      You are the Frontend Developer.
+      Based on the architecture guidelines, implement the UI changes.
+
+      Steps:
+      1. Create a feature branch from {{base_branch}}
+      2. Implement React/Next.js components
+      3. Push files to the branch
+      4. Create a PR with clear description
+
+      Use TypeScript, Tailwind CSS, and follow existing component patterns.
+    mcp_tools:
+      - github/create_branch
+      - github/push_files
+      - github/create_pull_request
+      - github/get_file_contents
+    policy:
+      max_parallelism: 2
+      timeout_ms: 300000
+
+  # Stage 4: Tech Lead reviews all PRs
+  - id: review_prs
+    role: reviewer
+    dependencies: [implement_backend, implement_frontend]
+    instructions: |
+      You are the Tech Lead.
+      Review all open PRs created by the developers.
+
+      For each PR:
+      1. Read the diff and changed files
+      2. Check architecture compliance, code quality, security
+      3. Submit a review: APPROVE or REQUEST_CHANGES with specific feedback
+
+      Use MCP tools to read PR contents and submit reviews.
+      Return your review decisions as JSON:
+      {"reviews": [{"pr_number": 1, "decision": "APPROVE|REQUEST_CHANGES", "summary": "..."}]}
+    mcp_tools:
+      - github/list_pull_requests
+      - github/pull_request_read
+      - github/pull_request_review_write
+      - github/add_issue_comment
+
+  # Stage 5: QA validates the implementation
+  - id: qa_validation
+    role: validator
+    dependencies: [review_prs]
+    instructions: |
+      You are the QA Engineer.
+      Validate that the implementations meet the original requirements.
+
+      Steps:
+      1. Read the original issues and their acceptance criteria
+      2. Review the PR changes against those criteria
+      3. Comment on PRs with test results
+      4. If issues are found, create new bug issues
+
+      Return validation results as JSON:
+      {"validation": "PASS|FAIL", "issues_found": [...], "notes": "..."}
+    mcp_tools:
+      - github/list_issues
+      - github/list_pull_requests
+      - github/add_issue_comment
+      - github/create_issue
+
+  # Stage 6: Summarize the entire development cycle
+  - id: summary
+    role: summarizer
+    dependencies: [qa_validation]
+    instructions: |
+      Summarize the complete development cycle for task "{{task}}".
+
+      Include:
+      - Issues created and their status
+      - PRs created and review outcomes
+      - QA validation results
+      - Any remaining action items
+      - Team member contributions
+
+      Provide a concise but comprehensive summary.

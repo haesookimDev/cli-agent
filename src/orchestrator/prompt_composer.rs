@@ -1,4 +1,4 @@
-use crate::types::PromptLayers;
+use crate::types::{AgentPersona, PromptLayers};
 
 /// 6-layer prompt assembly.
 ///
@@ -13,7 +13,18 @@ pub struct PromptComposer;
 
 impl PromptComposer {
     pub fn compose(layers: &PromptLayers) -> String {
+        Self::compose_with_persona(layers, None)
+    }
+
+    pub fn compose_with_persona(layers: &PromptLayers, persona: Option<&AgentPersona>) -> String {
         let mut prompt = String::with_capacity(4096);
+
+        // Inject persona identity before system policy when available.
+        if let Some(p) = persona {
+            prompt.push_str("[PERSONA]\n");
+            prompt.push_str(&Self::format_persona(p));
+            prompt.push_str("\n\n");
+        }
 
         prompt.push_str("[SYSTEM_POLICY]\n");
         prompt.push_str(&layers.system_policy);
@@ -48,6 +59,25 @@ impl PromptComposer {
         }
 
         prompt
+    }
+
+    /// Format persona information as a prompt section.
+    fn format_persona(persona: &AgentPersona) -> String {
+        let mut s = String::with_capacity(512);
+        s.push_str(&format!("Name: {}\n", persona.display_name));
+        s.push_str(&format!("Title: {}\n", persona.title));
+        if !persona.bio.is_empty() {
+            s.push_str(&format!("Bio: {}\n", persona.bio));
+        }
+        s.push_str(&format!("Communication Style: {}\n", persona.communication_style));
+        if !persona.expertise.is_empty() {
+            s.push_str(&format!("Expertise: {}\n", persona.expertise.join(", ")));
+        }
+        s.push_str(&format!(
+            "\nWhen writing GitHub comments or PR reviews, sign as {} and maintain your personality consistently.\n",
+            persona.display_name
+        ));
+        s
     }
 }
 
