@@ -313,6 +313,38 @@ impl SqliteStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS github_activities (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                persona_name TEXT NOT NULL,
+                activity_type TEXT NOT NULL,
+                github_url TEXT,
+                target_number INTEGER,
+                title TEXT,
+                body_preview TEXT,
+                metadata TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_github_activities_run ON github_activities(run_id);"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_github_activities_persona ON github_activities(persona_name);"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -1940,11 +1972,127 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "repo_clone_completed" => RunActionType::RepoCloneCompleted,
         "repo_analysis_completed" => RunActionType::RepoAnalysisCompleted,
         "interactive_step" => RunActionType::InteractiveStep,
+        "github_issue_created" => RunActionType::GitHubIssueCreated,
+        "github_issue_commented" => RunActionType::GitHubIssueCommented,
+        "github_issue_closed" => RunActionType::GitHubIssueClosed,
+        "github_pr_created" => RunActionType::GitHubPrCreated,
+        "github_pr_reviewed" => RunActionType::GitHubPrReviewed,
+        "github_pr_commented" => RunActionType::GitHubPrCommented,
+        "github_pr_merged" => RunActionType::GitHubPrMerged,
+        "github_branch_created" => RunActionType::GitHubBranchCreated,
         _ => {
             return Err(anyhow::anyhow!("unknown run action event type: {value}"));
         }
     };
     Ok(action)
+}
+
+// --- GitHub Activity persistence ---
+
+impl SqliteStore {
+    /// Record a GitHub activity performed by an agent persona.
+    pub async fn record_github_activity(
+        &self,
+        id: &str,
+        run_id: &str,
+        session_id: &str,
+        persona_name: &str,
+        activity_type: &str,
+        github_url: Option<&str>,
+        target_number: Option<i64>,
+        title: &str,
+        body_preview: &str,
+        metadata: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO github_activities (id, run_id, session_id, persona_name, activity_type, github_url, target_number, title, body_preview, metadata, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+            "#,
+        )
+        .bind(id)
+        .bind(run_id)
+        .bind(session_id)
+        .bind(persona_name)
+        .bind(activity_type)
+        .bind(github_url)
+        .bind(target_number)
+        .bind(title)
+        .bind(&body_preview[..body_preview.len().min(200)])
+        .bind(serde_json::to_string(metadata).unwrap_or_default())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// List GitHub activities, optionally filtered by persona and/or run_id.
+    pub async fn list_github_activities(
+        &self,
+        persona: Option<&str>,
+        run_id: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut conditions = vec!["1=1".to_string()];
+        if let Some(p) = persona {
+            conditions.push(format!("persona_name = '{}'", p.replace('\'', "''")));
+        }
+        if let Some(r) = run_id {
+            conditions.push(format!("run_id = '{}'", r.replace('\'', "''")));
+        }
+        let where_clause = conditions.join(" AND ");
+
+        let query = format!(
+            "SELECT id, run_id, session_id, persona_name, activity_type, github_url, target_number, title, body_preview, metadata, created_at \
+             FROM github_activities WHERE {} ORDER BY created_at DESC LIMIT {}",
+            where_clause, limit
+        );
+
+        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for row in &rows {
+            use sqlx::Row;
+            result.push(serde_json::json!({
+                "id": row.get::<String, _>("id"),
+                "run_id": row.get::<String, _>("run_id"),
+                "session_id": row.get::<String, _>("session_id"),
+                "persona_name": row.get::<String, _>("persona_name"),
+                "activity_type": row.get::<String, _>("activity_type"),
+                "github_url": row.get::<Option<String>, _>("github_url"),
+                "target_number": row.get::<Option<i64>, _>("target_number"),
+                "title": row.get::<String, _>("title"),
+                "body_preview": row.get::<String, _>("body_preview"),
+                "metadata": row.get::<String, _>("metadata"),
+                "created_at": row.get::<String, _>("created_at"),
+            }));
+        }
+        Ok(result)
+    }
+
+    /// Get GitHub activity statistics per persona.
+    pub async fn github_activity_stats(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT persona_name, activity_type, COUNT(*) as count
+            FROM github_activities
+            GROUP BY persona_name, activity_type
+            ORDER BY persona_name, count DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut result = Vec::new();
+        for row in &rows {
+            use sqlx::Row;
+            result.push(serde_json::json!({
+                "persona_name": row.get::<String, _>("persona_name"),
+                "activity_type": row.get::<String, _>("activity_type"),
+                "count": row.get::<i64, _>("count"),
+            }));
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

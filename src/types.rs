@@ -87,6 +87,122 @@ impl Display for AgentRole {
     }
 }
 
+// --- Agent Persona ---
+
+/// Personality traits that influence how an agent communicates and works.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalityTraits {
+    /// 0.0–1.0: how thorough / detail-oriented the agent is.
+    #[serde(default = "default_mid")]
+    pub thoroughness: f32,
+    /// 0.0–1.0: creative vs. conservative approach.
+    #[serde(default = "default_mid")]
+    pub creativity: f32,
+    /// 0.0–1.0: strictness when reviewing code / PRs.
+    #[serde(default = "default_mid")]
+    pub strictness: f32,
+    /// 0.0–1.0: verbosity in explanations and comments.
+    #[serde(default = "default_mid")]
+    pub verbosity: f32,
+}
+
+fn default_mid() -> f32 {
+    0.5
+}
+
+impl Default for PersonalityTraits {
+    fn default() -> Self {
+        Self {
+            thoroughness: 0.5,
+            creativity: 0.5,
+            strictness: 0.5,
+            verbosity: 0.5,
+        }
+    }
+}
+
+/// A persona gives an agent a unique identity for GitHub collaboration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPersona {
+    /// Human-readable display name, e.g. "김지훈" or "Alex Chen".
+    pub display_name: String,
+    /// Job title, e.g. "Senior Backend Engineer".
+    pub title: String,
+    /// Username shown in GitHub comments/signatures.
+    pub github_username: String,
+    /// Optional avatar image URL.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// Short biography describing expertise and style.
+    #[serde(default)]
+    pub bio: String,
+    /// Personality configuration.
+    #[serde(default)]
+    pub personality: PersonalityTraits,
+    /// Areas of expertise, e.g. ["rust", "performance", "systems"].
+    #[serde(default)]
+    pub expertise: Vec<String>,
+    /// Communication style tag, e.g. "concise-technical", "friendly-mentor".
+    #[serde(default = "default_communication_style")]
+    pub communication_style: String,
+}
+
+fn default_communication_style() -> String {
+    "balanced".to_string()
+}
+
+// --- GitHub Activity ---
+
+/// Represents a recorded GitHub activity performed by an agent persona.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubActivity {
+    pub id: String,
+    pub run_id: Uuid,
+    pub session_id: Uuid,
+    pub persona_name: String,
+    pub activity_type: GitHubActivityType,
+    #[serde(default)]
+    pub github_url: Option<String>,
+    #[serde(default)]
+    pub target_number: Option<i64>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub body_preview: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubActivityType {
+    IssueCreated,
+    IssueCommented,
+    IssueClosed,
+    PrCreated,
+    PrReviewed,
+    PrCommented,
+    PrMerged,
+    BranchCreated,
+}
+
+impl Display for GitHubActivityType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            GitHubActivityType::IssueCreated => "issue_created",
+            GitHubActivityType::IssueCommented => "issue_commented",
+            GitHubActivityType::IssueClosed => "issue_closed",
+            GitHubActivityType::PrCreated => "pr_created",
+            GitHubActivityType::PrReviewed => "pr_reviewed",
+            GitHubActivityType::PrCommented => "pr_commented",
+            GitHubActivityType::PrMerged => "pr_merged",
+            GitHubActivityType::BranchCreated => "branch_created",
+        };
+        write!(f, "{s}")
+    }
+}
+
 // --- Task Classification ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +442,14 @@ pub enum RunActionType {
     RepoCloneCompleted,
     RepoAnalysisCompleted,
     InteractiveStep,
+    GitHubIssueCreated,
+    GitHubIssueCommented,
+    GitHubIssueClosed,
+    GitHubPrCreated,
+    GitHubPrReviewed,
+    GitHubPrCommented,
+    GitHubPrMerged,
+    GitHubBranchCreated,
 }
 
 impl Display for RunActionType {
@@ -363,6 +487,14 @@ impl Display for RunActionType {
             RunActionType::RepoCloneCompleted => "repo_clone_completed",
             RunActionType::RepoAnalysisCompleted => "repo_analysis_completed",
             RunActionType::InteractiveStep => "interactive_step",
+            RunActionType::GitHubIssueCreated => "github_issue_created",
+            RunActionType::GitHubIssueCommented => "github_issue_commented",
+            RunActionType::GitHubIssueClosed => "github_issue_closed",
+            RunActionType::GitHubPrCreated => "github_pr_created",
+            RunActionType::GitHubPrReviewed => "github_pr_reviewed",
+            RunActionType::GitHubPrCommented => "github_pr_commented",
+            RunActionType::GitHubPrMerged => "github_pr_merged",
+            RunActionType::GitHubBranchCreated => "github_branch_created",
         };
         write!(f, "{s}")
     }

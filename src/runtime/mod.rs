@@ -110,6 +110,14 @@ pub enum RuntimeEvent {
         action_type: String,
         observation_preview: String,
     },
+    GitHubActivity {
+        node_id: String,
+        persona_name: String,
+        activity_type: String,
+        target_number: Option<i64>,
+        url: Option<String>,
+        title: String,
+    },
 }
 
 const NODE_OUTPUT_PREVIEW_CHARS: usize = 8_192;

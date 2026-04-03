@@ -4500,6 +4500,70 @@ impl Orchestrator {
                         .await;
                 }
 
+                // --- Reviewer iteration loop for team workflows ---
+                // When a Reviewer node outputs REQUEST_CHANGES, dynamically inject
+                // a Coder fix node and a re-review node to continue the cycle.
+                if node.role == AgentRole::Reviewer
+                    && result.succeeded
+                    && result.output.contains("REQUEST_CHANGES")
+                {
+                    let iteration = Self::parse_fix_iteration(&node.id);
+                    let max_review_iterations: u8 = 3;
+                    if iteration < max_review_iterations {
+                        let next_iter = iteration + 1;
+                        let review_feedback: String =
+                            result.output.chars().take(3000).collect();
+
+                        let fix_id = format!("fix_review_{}", next_iter);
+                        let mut fix_node = AgentNode::new(
+                            fix_id.clone(),
+                            AgentRole::Coder,
+                            format!(
+                                "The reviewer requested changes. Address the feedback below and push fixes.\n\n{}",
+                                review_feedback
+                            ),
+                        );
+                        fix_node.dependencies = vec![node.id.clone()];
+                        fix_node.depth = node.depth + 1;
+                        fix_node.mcp_tools = vec![
+                            "github/push_files".into(),
+                            "github/get_file_contents".into(),
+                        ];
+                        fix_node.policy = ExecutionPolicy {
+                            max_parallelism: 1,
+                            retry: 1,
+                            timeout_ms: 180_000,
+                            circuit_breaker: 2,
+                            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
+                            fallback_node: None,
+                        };
+
+                        let re_review_id = format!("re_review_{}", next_iter);
+                        let mut re_review = AgentNode::new(
+                            re_review_id,
+                            AgentRole::Reviewer,
+                            "Review the updated code after fixes. Output APPROVE or REQUEST_CHANGES.",
+                        );
+                        re_review.dependencies = vec![fix_id];
+                        re_review.depth = node.depth + 2;
+                        re_review.mcp_tools = vec![
+                            "github/pull_request_read".into(),
+                            "github/pull_request_review_write".into(),
+                        ];
+                        re_review.policy = ExecutionPolicy {
+                            max_parallelism: 1,
+                            retry: 1,
+                            timeout_ms: 120_000,
+                            circuit_breaker: 2,
+                            on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
+                            fallback_node: None,
+                        };
+
+                        dynamic_nodes.push(fix_node);
+                        dynamic_nodes.push(re_review);
+                    }
+                }
+
                 // --- Validator dynamic node injection ---
 
                 if node.role == AgentRole::Validator && !result.succeeded {
@@ -4948,6 +5012,21 @@ impl Orchestrator {
                         "primary_language": primary_language,
                         "file_count": file_count,
                     }),
+                    RuntimeEvent::GitHubActivity {
+                        node_id,
+                        persona_name,
+                        activity_type,
+                        target_number,
+                        url,
+                        title,
+                    } => serde_json::json!({
+                        "node_id": node_id,
+                        "persona_name": persona_name,
+                        "activity_type": activity_type,
+                        "target_number": target_number,
+                        "url": url,
+                        "title": title,
+                    }),
                 };
 
                 let event_type = match event_clone {
@@ -4964,7 +5043,8 @@ impl Orchestrator {
                     | RuntimeEvent::GraphCompleted
                     | RuntimeEvent::ValidationCompleted { .. }
                     | RuntimeEvent::GitCommitCreated { .. }
-                    | RuntimeEvent::InteractiveStep { .. } => SessionEventType::RunProgress,
+                    | RuntimeEvent::InteractiveStep { .. }
+                    | RuntimeEvent::GitHubActivity { .. } => SessionEventType::RunProgress,
                     RuntimeEvent::RepoCloned { .. } | RuntimeEvent::RepoAnalyzed { .. } => {
                         SessionEventType::AgentOutput
                     }
@@ -5023,6 +5103,20 @@ impl Orchestrator {
                     }
                     RuntimeEvent::InteractiveStep { node_id, .. } => {
                         (RunActionType::InteractiveStep, Some(node_id.as_str()))
+                    }
+                    RuntimeEvent::GitHubActivity { node_id, activity_type, .. } => {
+                        let action = match activity_type.as_str() {
+                            "issue_created" => RunActionType::GitHubIssueCreated,
+                            "issue_commented" => RunActionType::GitHubIssueCommented,
+                            "issue_closed" => RunActionType::GitHubIssueClosed,
+                            "pr_created" => RunActionType::GitHubPrCreated,
+                            "pr_reviewed" => RunActionType::GitHubPrReviewed,
+                            "pr_commented" => RunActionType::GitHubPrCommented,
+                            "pr_merged" => RunActionType::GitHubPrMerged,
+                            "branch_created" => RunActionType::GitHubBranchCreated,
+                            _ => RunActionType::GitHubIssueCreated,
+                        };
+                        (action, Some(node_id.as_str()))
                     }
                 };
 
@@ -5803,7 +5897,15 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::GitPushCompleted
             | RunActionType::RepoCloneCompleted
             | RunActionType::RepoAnalysisCompleted
-            | RunActionType::InteractiveStep => {}
+            | RunActionType::InteractiveStep
+            | RunActionType::GitHubIssueCreated
+            | RunActionType::GitHubIssueCommented
+            | RunActionType::GitHubIssueClosed
+            | RunActionType::GitHubPrCreated
+            | RunActionType::GitHubPrReviewed
+            | RunActionType::GitHubPrCommented
+            | RunActionType::GitHubPrMerged
+            | RunActionType::GitHubBranchCreated => {}
         }
     }
 

@@ -4,6 +4,7 @@ pub mod command_resolver;
 pub mod config;
 pub mod context;
 pub mod gateway;
+pub mod github_ops;
 pub mod interface;
 pub mod mcp;
 pub mod memory;

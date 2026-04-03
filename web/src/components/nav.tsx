@@ -17,6 +17,7 @@ const tabs = [
   { href: "/schedules", label: "Schedules" },
   { href: "/terminal", label: "Terminal" },
   { href: "/tools", label: "Tools" },
+  { href: "/team", label: "Team" },
   { href: "/settings", label: "Settings" },
 ];
 

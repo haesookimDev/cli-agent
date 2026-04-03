@@ -277,6 +277,10 @@ pub fn router(state: ApiState) -> Router {
             post(submit_cluster_run_handler).get(list_cluster_runs_handler),
         )
         .route("/v1/cluster/runs/:cluster_run_id", get(get_cluster_run_handler))
+        // Team & GitHub activity endpoints
+        .route("/v1/team/members", get(list_team_members_handler))
+        .route("/v1/github/activities", get(list_github_activities_handler))
+        .route("/v1/github/activities/stats", get(github_activity_stats_handler))
         .with_state(state)
 }
 
@@ -2679,5 +2683,103 @@ async fn get_cluster_run_handler(
             Json(serde_json::json!({"error": "cluster run not found"})),
         )
             .into_response(),
+    }
+}
+
+// --- Team & GitHub Activity handlers ---
+
+async fn list_team_members_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    // Load team agent definitions from agents/team/ directory.
+    let team_dir = std::path::Path::new("agents/team");
+    let members = crate::agents::agent_loader::load_agents_from_dir(team_dir).await;
+
+    let result: Vec<serde_json::Value> = members
+        .into_iter()
+        .map(|def| {
+            let mut val = serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "role": def.role.to_string(),
+                "task_profile": def.task_profile.to_string(),
+                "capabilities": def.capabilities,
+            });
+            if let Some(persona) = &def.persona {
+                val["persona"] = serde_json::to_value(persona).unwrap_or_default();
+            }
+            val
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!(result)))
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubActivityQuery {
+    persona: Option<String>,
+    run_id: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn list_github_activities_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<GitHubActivityQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    match state
+        .orchestrator
+        .memory()
+        .store()
+        .list_github_activities(query.persona.as_deref(), query.run_id.as_deref(), limit)
+        .await
+    {
+        Ok(activities) => (StatusCode::OK, Json(serde_json::json!(activities))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+async fn github_activity_stats_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    match state
+        .orchestrator
+        .memory()
+        .store()
+        .github_activity_stats()
+        .await
+    {
+        Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
     }
 }

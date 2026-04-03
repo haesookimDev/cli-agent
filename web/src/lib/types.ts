@@ -14,7 +14,10 @@ export type RunActionType =
   | "coder_session_started" | "coder_session_completed"
   | "validation_passed" | "validation_failed" | "git_commit_created"
   | "git_push_completed" | "repo_clone_completed" | "repo_analysis_completed"
-  | "interactive_step";
+  | "interactive_step"
+  | "github_issue_created" | "github_issue_commented" | "github_issue_closed"
+  | "github_pr_created" | "github_pr_reviewed" | "github_pr_commented"
+  | "github_pr_merged" | "github_branch_created";
 
 export interface RunRequest {
   task: string;
@@ -282,4 +285,52 @@ export interface WorkflowTemplate {
   source_run_id: string | null;
   graph_template: WorkflowGraphTemplate;
   parameters: WorkflowParameter[];
+}
+
+// --- Team Persona Types ---
+
+export interface PersonalityTraits {
+  thoroughness: number;
+  creativity: number;
+  strictness: number;
+  verbosity: number;
+}
+
+export interface AgentPersona {
+  display_name: string;
+  title: string;
+  github_username: string;
+  avatar_url?: string;
+  bio: string;
+  personality: PersonalityTraits;
+  expertise: string[];
+  communication_style: string;
+}
+
+export interface TeamMember {
+  name: string;
+  description: string;
+  role: AgentRole;
+  task_profile: TaskProfile;
+  capabilities: string[];
+  persona: AgentPersona;
+}
+
+export type GitHubActivityType =
+  | "issue_created" | "issue_commented" | "issue_closed"
+  | "pr_created" | "pr_reviewed" | "pr_commented"
+  | "pr_merged" | "branch_created";
+
+export interface GitHubActivityItem {
+  id: string;
+  run_id: string;
+  session_id: string;
+  persona_name: string;
+  activity_type: GitHubActivityType;
+  github_url: string | null;
+  target_number: number | null;
+  title: string;
+  body_preview: string;
+  metadata: string;
+  created_at: string;
 }
