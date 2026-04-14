@@ -265,6 +265,262 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
+## 7. Workflow Composition & Requirement Analyzer (워크플로우 구성 및 요구사항 분석기)
+
+### 현재 상태
+- 워크플로우는 `skills/*.yaml`에 정적 DAG로 정의 (7개 스킬)
+- `auto_skill_route()`가 키워드 매칭으로 스킬 선택 (오탐 위험, TODO 2-4 참조)
+- `build_graph()`가 TaskType별로 하드코딩된 고정 그래프 생성 (9가지 패턴)
+- 사용자 요구사항 분석 → 동적 워크플로우 구성 경로 없음
+- SubtaskPlan은 Planner LLM 출력에 전적으로 의존, 구조적 검증 부재
+
+### TODO 7-1: 사용자 요구사항 분석기 (Requirement Analyzer) 도입
+- **파일**: `src/orchestrator/requirement_analyzer.rs` (신규)
+- **문제**: 현재 `classify_task()`는 단순히 TaskType 하나로 분류할 뿐, 사용자 요구의 복합성/제약조건/우선순위를 구조적으로 분석하지 않음
+- **설계**:
+  ```rust
+  pub struct RequirementAnalysis {
+      pub primary_intent: TaskType,
+      pub sub_intents: Vec<TaskType>,        // 복합 요구 분해
+      pub constraints: Vec<Constraint>,       // 시간, 도구, 언어 등 제약
+      pub required_capabilities: Vec<String>, // 필요한 MCP 도구/에이전트 역할
+      pub priority: Priority,                 // 긴급도
+      pub estimated_complexity: Complexity,   // simple/moderate/complex
+      pub context_requirements: Vec<String>,  // 필요한 선행 컨텍스트
+  }
+  ```
+- **동작**: classify_task 호출 전에 1차 분석 → 복합 요구 시 자동으로 multi-phase 워크플로우 생성
+- **관련 파일**: `src/orchestrator/mod.rs` (classify_task, build_graph 호출부)
+
+### TODO 7-2: 동적 워크플로우 컴포저 (Workflow Composer)
+- **파일**: `src/orchestrator/workflow_composer.rs` (신규)
+- **문제**: 현재 `build_graph()`는 TaskType별 고정 그래프만 생성. 사용자 요구에 맞는 커스텀 워크플로우를 런타임에 조합할 수 없음
+- **설계**:
+  ```rust
+  pub struct WorkflowComposer {
+      skill_registry: Arc<DashMap<String, WorkflowTemplate>>,
+      agent_registry: AgentRegistry,
+  }
+  impl WorkflowComposer {
+      /// RequirementAnalysis 기반으로 최적 워크플로우 자동 구성
+      pub async fn compose(&self, analysis: &RequirementAnalysis, available_tools: &[McpToolDefinition]) -> ExecutionGraph;
+      /// 기존 스킬 템플릿들을 체이닝하여 복합 워크플로우 생성
+      pub fn chain_skills(&self, skill_ids: &[&str], params: HashMap<String, String>) -> anyhow::Result<ExecutionGraph>;
+      /// 사용자 자연어 → 워크플로우 YAML 생성 (LLM 지원)
+      pub async fn generate_from_description(&self, description: &str, router: &ModelRouter) -> anyhow::Result<WorkflowTemplate>;
+  }
+  ```
+- **핵심**: 고정 그래프 패턴(SimpleQuery, Analysis, CodeGeneration 등)을 컴포저블 빌딩 블록으로 전환
+
+### TODO 7-3: SubtaskPlan 구조적 검증 레이어
+- **파일**: `src/orchestrator/mod.rs:4392-4397` (on_completed 내 SubtaskPlan 파싱 부분)
+- **문제**: Planner LLM이 생성한 SubtaskPlan JSON을 파싱만 하고 구조적 검증 없이 실행. 순환 의존, 없는 역할 참조, 과도한 서브태스크 등 검증 부재
+- **수정**:
+  - 의존성 DAG 유효성 검사 (순환 탐지)
+  - agent_role 존재 여부 확인
+  - mcp_tools 가용성 확인
+  - 서브태스크 수 / 깊이 제한 적용
+  - 검증 실패 시 Planner에 에러 피드백 + 재생성 요청
+
+### TODO 7-4: 워크플로우 템플릿 UI — 시각적 편집기
+- **파일**: `web/src/app/workflows/` (확장)
+- **문제**: 현재 워크플로우 페이지는 목록/실행만 지원. DAG 기반 시각적 편집 불가
+- **수정**:
+  - 드래그앤드롭 노드 편집기 (react-flow 등 활용)
+  - 에이전트 역할 노드 팔레트
+  - 의존성 간선 연결
+  - 파라미터 바인딩 UI
+  - YAML 미리보기 및 내보내기
+
+---
+
+## 8. Agent Execution Tracing & Chat Visibility (에이전트 실행 트레이싱 & 채팅 가시성)
+
+### 현재 상태
+- `RuntimeEvent` 13종 이벤트가 `EventSink` 콜백으로 발행됨
+- `record_action_event` / `record_node_progress`로 DB 기록
+- 프론트엔드 `AgentThinking` 컴포넌트가 SSE 이벤트를 `NodeTimeline`으로 변환하여 표시
+- DAG 그래프 (`trace/dag-graph.tsx`)와 이벤트 타임라인 (`trace/event-timeline.tsx`) 존재
+- 행동 분석 (`behavior/swim-lane.tsx`, `action-mix.tsx`, `summary-metrics.tsx`) 존재
+
+### 핵심 Gap
+- 실시간 DAG 상태 업데이트 없음 (페이지 새로고침 필요)
+- 서브에이전트 실행 계층 구조 미표시 (flat list로만 보임)
+- 노드 간 데이터 흐름(어떤 출력이 어디로 전달되었는지) 불투명
+- recovery/continuation 루프 진행 상태 채팅에서 미표시
+- 토큰 사용량/비용 실시간 추적 없음
+
+### TODO 8-1: 실시간 DAG 상태 스트리밍
+- **파일**: `web/src/components/trace/dag-graph.tsx`, `web/src/hooks/use-sse.ts`
+- **문제**: DAG 그래프가 API 폴링 기반으로만 업데이트. 실행 중 노드 상태 변화가 실시간 반영 안 됨
+- **수정**:
+  - SSE `action_event`에서 `node_started`/`node_completed`/`node_failed` 이벤트를 DAG 노드 상태에 즉시 반영
+  - 노드 색상/애니메이션으로 실행 중(pulse), 성공(green), 실패(red) 시각적 표시
+  - 동적으로 추가되는 서브태스크 노드를 DAG에 실시간 삽입
+
+### TODO 8-2: 채팅 내 에이전트 실행 진행 인라인 카드
+- **파일**: `web/src/components/agent-thinking.tsx` (확장)
+- **문제**: 현재 `AgentThinking`은 노드별 토큰/툴콜만 표시. 전체 실행 흐름(classify → build_graph → execute → verify → replan) 가시화 부족
+- **수정**:
+  - **Phase Indicator**: 현재 어떤 단계인지 표시 (분류 → 그래프 빌드 → 실행 → 검증 → [재계획])
+  - **Progress Bar**: 전체 노드 수 대비 완료 노드 수 진행률
+  - **Recovery Alert Card**: replan/recovery 발생 시 이유와 함께 인라인 알림 카드
+  - **Data Flow Card**: 선행 노드 출력 → 현재 노드 입력 데이터 흐름 요약
+
+### TODO 8-3: 서브태스크 계층 트리 뷰
+- **파일**: `web/src/components/trace/subtask-tree.tsx` (신규)
+- **문제**: Planner가 SubtaskPlan으로 동적 서브태스크를 생성하면, 이것이 flat list로만 표시되어 계층 구조를 알 수 없음
+- **수정**:
+  - 트리 뷰 컴포넌트: 원본 그래프 노드 → 동적 서브태스크 → 추가 동적 노드 계층 표시
+  - 각 서브태스크의 상태(pending/running/succeeded/failed) 표시
+  - 서브태스크 클릭 시 해당 노드의 상세 출력/툴콜 확장
+
+### TODO 8-4: 노드별 토큰 사용량 및 비용 실시간 추적
+- **파일**: `src/runtime/mod.rs` (RuntimeEvent 확장), `src/router/mod.rs` (추론 결과에 토큰 수 포함)
+- **문제**: 노드별/전체 run의 토큰 사용량, 추정 비용을 추적하는 메커니즘 없음
+- **수정**:
+  - `InferenceResult`에 `input_tokens`, `output_tokens` 필드 추가
+  - `NodeExecutionResult`에 `token_usage: Option<TokenUsage>` 추가
+  - `RuntimeEvent::NodeCompleted`에 토큰 사용량 포함
+  - 프론트엔드에서 누적 토큰/비용 표시 위젯
+
+### TODO 8-5: 검증/재계획 루프 트레이싱 강화
+- **파일**: `src/orchestrator/mod.rs:1719-1786` (verify → replan 루프)
+- **문제**: continuation/recovery 루프의 진행 상태가 `ReplanTriggered` 이벤트 하나로만 기록. 몇 번째 시도인지, 왜 재계획인지 채팅에서 직관적으로 보이지 않음
+- **수정**:
+  - 새 이벤트 타입: `RunActionType::RecoveryPhaseStarted`, `RecoveryPhaseCompleted`
+  - 페이로드에 `attempt`, `max_attempts`, `reason`, `mode(failure_recovery|completion_continuation)` 포함
+  - 채팅 UI에 "재계획 시도 2/2: 검증 실패 — 미완성 항목 존재" 같은 명시적 상태 표시
+
+---
+
+## 9. Harness Engineering & Sub-Agent Management (하네스 엔지니어링 & 서브에이전트 관리)
+
+### 현재 상태
+- `AgentRegistry`가 11개 역할 에이전트를 관리 (YAML 설정 가능)
+- `OrchestratorCluster`가 명명된 오케스트레이터 인스턴스를 멤버로 등록/관리
+- `SubtaskPlan` 동적 파싱 → `on_completed` 콜백에서 새 AgentNode를 그래프에 주입
+- 에이전트 실행은 `run_role()` / `run_role_stream()` 단일 진입점
+- 서브에이전트 라이프사이클 관리 없음 (생성→실행→종료가 일회성)
+- 에이전트 간 직접 통신 불가 (오직 의존성 출력을 통한 간접 전달)
+
+### TODO 9-1: Agent Harness 추상 레이어 도입
+- **파일**: `src/harness/mod.rs` (신규 모듈)
+- **문제**: 현재 에이전트 실행은 `AgentRegistry.run_role()` → LLM 호출 → 결과 반환의 단순 파이프라인. 에이전트의 라이프사이클(초기화, 실행, 중간 상태 보고, 재시도, 정리)을 관리하는 하네스 계층 없음
+- **설계**:
+  ```rust
+  /// 에이전트 하네스: 에이전트 실행의 전체 라이프사이클을 관리
+  pub struct AgentHarness {
+      registry: AgentRegistry,
+      router: Arc<ModelRouter>,
+      memory: Arc<MemoryManager>,
+      mcp: Arc<McpRegistry>,
+      active_sessions: Arc<DashMap<String, AgentSession>>,
+  }
+
+  pub struct AgentSession {
+      pub session_id: String,
+      pub agent_role: AgentRole,
+      pub status: AgentSessionStatus,
+      pub created_at: Instant,
+      pub context_window: Vec<ContextChunk>,  // 누적 컨텍스트
+      pub iteration_count: u32,
+      pub token_budget_remaining: usize,
+      pub parent_session: Option<String>,      // 서브에이전트 계층
+      pub child_sessions: Vec<String>,
+  }
+
+  impl AgentHarness {
+      /// 에이전트 세션 생성 및 초기화
+      pub async fn spawn(&self, role: AgentRole, input: AgentInput, parent: Option<&str>) -> anyhow::Result<String>;
+      /// 세션에 추가 입력 전달 (멀티턴)
+      pub async fn send(&self, session_id: &str, message: &str) -> anyhow::Result<AgentOutput>;
+      /// 세션 상태 조회
+      pub fn status(&self, session_id: &str) -> Option<AgentSessionStatus>;
+      /// 모든 자식 세션 포함 트리 구조 조회
+      pub fn session_tree(&self, session_id: &str) -> SessionTree;
+      /// 세션 종료 및 리소스 정리
+      pub async fn terminate(&self, session_id: &str) -> anyhow::Result<()>;
+      /// 토큰 예산 기반 자동 컨텍스트 압축
+      pub async fn compact_context(&self, session_id: &str) -> anyhow::Result<()>;
+  }
+  ```
+- **핵심 가치**: 에이전트를 일회성 함수 호출이 아닌 상태를 가진 세션으로 관리
+
+### TODO 9-2: 서브에이전트 스포닝 및 계층 관리
+- **파일**: `src/harness/sub_agent.rs` (신규)
+- **문제**: 현재 Planner가 SubtaskPlan을 생성하면 `on_completed`에서 그래프 노드로만 추가. 서브에이전트의 부모-자식 관계, 결과 집약, 실패 전파를 체계적으로 관리하지 않음
+- **설계**:
+  ```rust
+  pub struct SubAgentManager {
+      harness: Arc<AgentHarness>,
+      /// 부모 → 자식 세션 매핑
+      hierarchy: Arc<DashMap<String, Vec<String>>>,
+      /// 결과 수집기
+      result_aggregator: Arc<ResultAggregator>,
+  }
+
+  impl SubAgentManager {
+      /// 부모 세션의 컨텍스트를 상속받아 서브에이전트 생성
+      pub async fn spawn_child(&self, parent_id: &str, role: AgentRole, task: &str) -> anyhow::Result<String>;
+      /// 병렬 서브에이전트 일괄 생성 (SubtaskPlan에서 변환)
+      pub async fn spawn_from_plan(&self, parent_id: &str, plan: &SubtaskPlan) -> anyhow::Result<Vec<String>>;
+      /// 서브에이전트 결과 집약
+      pub async fn collect_results(&self, parent_id: &str) -> Vec<AgentOutput>;
+      /// 자식 실패 시 부모에게 통지 및 복구 전략 결정
+      pub async fn handle_child_failure(&self, child_id: &str, error: &str) -> RecoveryAction;
+      /// 전체 계층 트리 시각화 데이터
+      pub fn hierarchy_tree(&self, root_id: &str) -> HierarchyTree;
+  }
+  ```
+- **기존 연동**: `build_on_completed_fn`의 SubtaskPlan 처리 로직을 SubAgentManager로 위임
+
+### TODO 9-3: 에이전트 간 메시지 버스
+- **파일**: `src/harness/message_bus.rs` (신규)
+- **문제**: 에이전트 간 통신이 오직 dependency_outputs (선행 노드 출력)으로만 가능. 실행 중 에이전트가 다른 에이전트에 질문하거나 피드백을 주고받을 수 없음
+- **설계**:
+  - `mpsc` 기반 에이전트 간 메시지 채널
+  - 메시지 타입: `Query(질문)`, `Feedback(피드백)`, `Delegation(위임)`, `Status(상태 알림)`
+  - 수신 에이전트의 컨텍스트에 메시지 자동 주입
+  - 타임아웃 및 메시지 큐 크기 제한
+
+### TODO 9-4: 하네스 수준 관측성 (Observability)
+- **파일**: `src/harness/metrics.rs` (신규)
+- **문제**: 현재 관측은 `RunActionEvent` 기록에 한정. 에이전트 세션 수준의 메트릭(토큰 소비율, 응답 지연, 재시도율, 컨텍스트 활용도) 부재
+- **수정**:
+  ```rust
+  pub struct HarnessMetrics {
+      pub active_sessions: usize,
+      pub total_tokens_consumed: u64,
+      pub total_cost_estimate: f64,
+      pub avg_response_latency_ms: f64,
+      pub retry_rate: f64,
+      pub context_utilization: f64,     // 컨텍스트 예산 대비 사용률
+      pub sub_agent_depth: u8,          // 최대 계층 깊이
+      pub per_role_stats: HashMap<AgentRole, RoleStats>,
+  }
+  ```
+- **노출**: API 엔드포인트 `GET /v1/harness/metrics` + 프론트엔드 대시보드 위젯
+
+### TODO 9-5: 에이전트 역할 동적 확장 — 런타임 에이전트 등록
+- **파일**: `src/agents/mod.rs` (AgentRegistry 확장)
+- **문제**: 현재 `AgentRegistry`는 초기화 시 11개 고정 역할만 등록. 런타임에 새 역할 추가/수정 불가
+- **수정**:
+  - `register_role(&self, role_config: AgentRoleConfig) -> anyhow::Result<()>` 메서드 추가
+  - API 엔드포인트 `POST /v1/agents/roles` 로 동적 역할 등록
+  - YAML 핫 리로드: `agents/` 디렉토리 감시 → 변경 시 자동 재로드
+
+### TODO 9-6: 하네스 기반 실행 흐름으로 orchestrator 전환
+- **파일**: `src/orchestrator/mod.rs` (execute_run, build_run_node_fn)
+- **문제**: 현재 `build_run_node_fn`이 직접 `agents.run_role()`을 호출. 하네스 계층을 거치지 않아 세션 관리, 컨텍스트 축적, 계층 추적 등이 불가능
+- **수정**:
+  - `build_run_node_fn` 내부에서 `harness.spawn()` → `harness.send()` → `harness.terminate()` 패턴으로 전환
+  - run 시작 시 루트 하네스 세션 생성
+  - 각 노드 실행을 자식 세션으로 관리
+  - 기존 `AgentRegistry.run_role()` 직접 호출 경로는 하네스 내부로 캡슐화
+
+---
+
 ## 검증 계획
 
 ### 단계별 검증
