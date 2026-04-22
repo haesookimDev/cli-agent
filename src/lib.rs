@@ -3,6 +3,7 @@ pub mod notifier;
 pub mod command_resolver;
 pub mod config;
 pub mod context;
+pub mod crypto;
 pub mod gateway;
 pub mod github_ops;
 pub mod interface;

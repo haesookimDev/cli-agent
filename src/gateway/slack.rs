@@ -7,16 +7,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use tracing::{error, info, warn};
 
+use crate::crypto::{SignatureVerifier, SlackHmacVerifier};
 use crate::gateway::{
     GatewayAdapter, GatewayManager, GatewayResponse, GatewayResponsePayload, MessageOrigin,
     Platform, parse_gateway_text, poll_and_deliver,
 };
-
-type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
 pub struct SlackConfig {
@@ -49,41 +46,7 @@ impl SlackAdapter {
     }
 
     fn verify_slack_signature(&self, headers: &HeaderMap, body: &[u8]) -> anyhow::Result<()> {
-        let timestamp = headers
-            .get("X-Slack-Request-Timestamp")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| anyhow::anyhow!("missing X-Slack-Request-Timestamp"))?;
-
-        let signature = headers
-            .get("X-Slack-Signature")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| anyhow::anyhow!("missing X-Slack-Signature"))?;
-
-        let now = chrono::Utc::now().timestamp();
-        let ts: i64 = timestamp
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid timestamp"))?;
-        if (now - ts).abs() > 300 {
-            return Err(anyhow::anyhow!("timestamp too old"));
-        }
-
-        let sig_basestring = format!("v0:{}:{}", timestamp, String::from_utf8_lossy(body));
-        let mut mac = HmacSha256::new_from_slice(self.config.signing_secret.as_bytes())?;
-        mac.update(sig_basestring.as_bytes());
-        let result = mac.finalize().into_bytes();
-        let expected = format!(
-            "v0={}",
-            result
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>()
-        );
-
-        if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
-            return Err(anyhow::anyhow!("signature mismatch"));
-        }
-
-        Ok(())
+        SlackHmacVerifier::new(self.config.signing_secret.clone()).verify(headers, body)
     }
 
     async fn post_message(
@@ -439,13 +402,3 @@ fn format_slack_response(payload: &GatewayResponsePayload) -> String {
     }
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}

@@ -8,10 +8,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::crypto::{DiscordEd25519Verifier, SignatureVerifier};
 use crate::gateway::{
     GatewayAction, GatewayAdapter, GatewayCommand, GatewayManager, GatewayResponse,
     GatewayResponsePayload, MessageOrigin, Platform, parse_profile,
@@ -546,44 +546,7 @@ impl DiscordAdapter {
     }
 
     fn verify_discord_signature(&self, headers: &HeaderMap, body: &[u8]) -> anyhow::Result<()> {
-        let signature_hex = headers
-            .get("X-Signature-Ed25519")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| anyhow::anyhow!("missing X-Signature-Ed25519"))?;
-
-        let timestamp = headers
-            .get("X-Signature-Timestamp")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| anyhow::anyhow!("missing X-Signature-Timestamp"))?;
-
-        let public_key_bytes = hex::decode(&self.config.public_key)
-            .map_err(|_| anyhow::anyhow!("invalid public key hex"))?;
-
-        let verifying_key = VerifyingKey::from_bytes(
-            public_key_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?,
-        )
-        .map_err(|_| anyhow::anyhow!("invalid Ed25519 public key"))?;
-
-        let signature_bytes =
-            hex::decode(signature_hex).map_err(|_| anyhow::anyhow!("invalid signature hex"))?;
-
-        let signature = Signature::from_bytes(
-            signature_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?,
-        );
-
-        let mut message = Vec::with_capacity(timestamp.len() + body.len());
-        message.extend_from_slice(timestamp.as_bytes());
-        message.extend_from_slice(body);
-
-        verifying_key
-            .verify(&message, &signature)
-            .map_err(|_| anyhow::anyhow!("Ed25519 signature verification failed"))
+        DiscordEd25519Verifier::new(self.config.public_key.clone()).verify(headers, body)
     }
 
     async fn edit_original_response(

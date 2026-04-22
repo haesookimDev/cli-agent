@@ -4,16 +4,13 @@ use std::time::Duration;
 use axum::http::HeaderMap;
 use chrono::Utc;
 use dashmap::DashMap;
-use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
-use sha2::Sha256;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::crypto::{constant_time_eq, hmac_sha256_hex};
 use crate::memory::MemoryManager;
 use crate::types::WebhookEndpoint;
-
-pub type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
 pub struct AuthManager {
@@ -327,33 +324,14 @@ pub fn sign_payload(
     nonce: &str,
     body: &[u8],
 ) -> anyhow::Result<String> {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
-    mac.update(timestamp.as_bytes());
-    mac.update(b".");
-    mac.update(nonce.as_bytes());
-    mac.update(b".");
-    mac.update(body);
-    let result = mac.finalize().into_bytes();
-    Ok(to_hex(&result))
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(format!("{:02x}", byte).as_str());
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    let mut message =
+        Vec::with_capacity(timestamp.len() + nonce.len() + body.len() + 2);
+    message.extend_from_slice(timestamp.as_bytes());
+    message.push(b'.');
+    message.extend_from_slice(nonce.as_bytes());
+    message.push(b'.');
+    message.extend_from_slice(body);
+    hmac_sha256_hex(secret.as_bytes(), &message)
 }
 
 #[cfg(test)]
