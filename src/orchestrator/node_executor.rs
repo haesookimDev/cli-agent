@@ -673,10 +673,16 @@ impl Orchestrator {
                     };
 
                     // Phase B+C: Iterative tool calling loop
+                    // Hard caps on both dimensions so a confused LLM can't run
+                    // away with the ToolCaller node (TODO 2-6):
+                    //   - MAX_TOOL_ITERATIONS: outer selection loop count
+                    //   - MAX_TOOLS_PER_ITERATION: tool calls from one LLM turn
                     const MAX_TOOL_ITERATIONS: usize = 5;
+                    const MAX_TOOLS_PER_ITERATION: usize = 10;
                     let mut all_results: Vec<String> = Vec::new();
                     let mut total_tool_calls: usize = 0;
                     let mut any_failure = false;
+                    let mut exited_via_break = false;
 
                     for iteration in 0..MAX_TOOL_ITERATIONS {
                         orchestrator
@@ -872,7 +878,18 @@ impl Orchestrator {
                             .unwrap_or(trimmed_output)
                             .trim();
 
-                        let tool_calls = parse_tool_calls(json_str);
+                        let mut tool_calls = parse_tool_calls(json_str);
+                        if tool_calls.len() > MAX_TOOLS_PER_ITERATION {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                node_id = %node.id,
+                                iteration,
+                                requested = tool_calls.len(),
+                                cap = MAX_TOOLS_PER_ITERATION,
+                                "Selector produced more tool calls than the per-iteration cap; truncating"
+                            );
+                            tool_calls.truncate(MAX_TOOLS_PER_ITERATION);
+                        }
 
                         if tool_calls.is_empty() {
                             // If we have prior results, treat as implicit completion
@@ -891,6 +908,7 @@ impl Orchestrator {
                                         }),
                                     )
                                     .await;
+                                exited_via_break = true;
                                 break;
                             }
                             // No prior results — this is a failure
@@ -1048,6 +1066,16 @@ impl Orchestrator {
                             }
                             total_tool_calls += 1;
                         }
+                    }
+
+                    if !exited_via_break {
+                        tracing::warn!(
+                            run_id = %run_id,
+                            node_id = %node.id,
+                            max_iterations = MAX_TOOL_ITERATIONS,
+                            total_tool_calls,
+                            "ToolCaller reached the iteration cap without explicit completion"
+                        );
                     }
 
                     // Final result assembly
