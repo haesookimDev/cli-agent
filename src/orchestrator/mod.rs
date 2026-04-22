@@ -1623,13 +1623,19 @@ impl Orchestrator {
         loop {
             // Update static_node_ids to reflect the current iteration's graph so that
             // on_complete correctly skips superseded nodes when Planner generates a plan.
-            if let Ok(mut ids) = static_node_ids.lock() {
-                *ids = current_graph
-                    .nodes()
-                    .iter()
-                    .filter(|n| n.role != AgentRole::Planner)
-                    .map(|n| n.id.clone())
-                    .collect();
+            // Keep the critical section tight (build the new list, then assign under lock)
+            // and recover from a poisoned mutex so a prior panic cannot take down the run.
+            let next_ids: Vec<String> = current_graph
+                .nodes()
+                .iter()
+                .filter(|n| n.role != AgentRole::Planner)
+                .map(|n| n.id.clone())
+                .collect();
+            {
+                let mut ids = static_node_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *ids = next_ids;
             }
             let outputs = self
                 .runtime
@@ -4459,11 +4465,14 @@ impl Orchestrator {
                             }
                             orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
                             // Return static_node_ids so the runtime skips the statically-built
-                            // graph nodes superseded by this SubtaskPlan.
-                            let skip_ids = static_node_ids
-                                .lock()
-                                .map(|g| g.clone())
-                                .unwrap_or_default();
+                            // graph nodes superseded by this SubtaskPlan. Snapshot under a
+                            // tight lock that also recovers from poisoning.
+                            let skip_ids = {
+                                let guard = static_node_ids
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                guard.clone()
+                            };
                             return Ok((dynamic_nodes, skip_ids));
                         }
                     }
