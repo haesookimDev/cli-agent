@@ -124,9 +124,9 @@ struct SaveWorkflowRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecuteWorkflowRequest {
-    parameters: Option<serde_json::Value>,
-    session_id: Option<Uuid>,
+pub(crate) struct ExecuteWorkflowRequest {
+    pub parameters: Option<serde_json::Value>,
+    pub session_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,10 +245,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/runs/:run_id/save-workflow",
             post(save_workflow_from_run_handler),
         )
-        .route("/v1/skills", get(list_skills_handler))
-        .route("/v1/skills/reload", post(reload_skills_handler))
-        .route("/v1/skills/:skill_id", get(get_skill_handler))
-        .route("/v1/skills/:skill_id/execute", post(execute_skill_handler))
+        .route("/v1/skills", get(handlers::skills::list_skills_handler))
+        .route("/v1/skills/reload", post(handlers::skills::reload_skills_handler))
+        .route("/v1/skills/:skill_id", get(handlers::skills::get_skill_handler))
+        .route("/v1/skills/:skill_id/execute", post(handlers::skills::execute_skill_handler))
         .route(
             "/v1/terminal/sessions",
             post(create_terminal_handler).get(list_terminals_handler),
@@ -1879,89 +1879,6 @@ async fn save_workflow_from_run_handler(
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-// --- Skill handlers ---
-
-async fn list_skills_handler(State(state): State<ApiState>) -> impl IntoResponse {
-    let skills = state.orchestrator.list_skills();
-    (StatusCode::OK, Json(serde_json::json!(skills)))
-}
-
-async fn get_skill_handler(
-    State(state): State<ApiState>,
-    Path(skill_id): Path<String>,
-) -> impl IntoResponse {
-    match state.orchestrator.get_skill(&skill_id) {
-        Some(skill) => (StatusCode::OK, Json(serde_json::json!(skill))),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "skill not found"})),
-        ),
-    }
-}
-
-async fn execute_skill_handler(
-    State(state): State<ApiState>,
-    Path(skill_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let req = serde_json::from_slice::<ExecuteWorkflowRequest>(body.as_ref()).unwrap_or(
-        ExecuteWorkflowRequest {
-            parameters: None,
-            session_id: None,
-        },
-    );
-
-    match state
-        .orchestrator
-        .execute_workflow(&skill_id, req.parameters, req.session_id)
-        .await
-    {
-        Ok(submission) => (StatusCode::OK, Json(serde_json::json!(submission))),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn reload_skills_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    // Reload from default skills directory if configured
-    let skills_dir = std::env::var("SKILLS_DIR").ok();
-    match skills_dir {
-        Some(dir) => {
-            state
-                .orchestrator
-                .reload_skills(std::path::Path::new(&dir))
-                .await;
-            let count = state.orchestrator.list_skills().len();
-            (StatusCode::OK, Json(serde_json::json!({"reloaded": count})))
-        }
-        None => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "SKILLS_DIR not configured"})),
         ),
     }
 }
