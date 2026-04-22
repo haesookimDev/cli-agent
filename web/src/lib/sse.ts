@@ -1,8 +1,5 @@
 import { generateNonce, hmacSha256Hex } from "./hmac";
-
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "local-dev-key";
-const API_SECRET = process.env.NEXT_PUBLIC_API_SECRET ?? "local-dev-secret";
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+import { API_KEY, API_SECRET, API_URL } from "./config";
 
 export type SSEHandler = (eventType: string, data: string) => void;
 
