@@ -7,6 +7,7 @@ pub mod cluster;
 pub mod mcp;
 pub mod memory;
 pub mod schedules;
+pub mod sessions;
 pub mod settings;
 pub mod skills;
 pub mod team;

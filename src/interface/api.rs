@@ -11,7 +11,7 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use futures::{SinkExt, stream::StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ use crate::interface::handlers;
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::cluster::OrchestratorCluster;
 use crate::terminal::TerminalManager;
-use crate::types::{ClusterRunRequest, RunRequest, TaskProfile};
+use crate::types::{RunRequest, TaskProfile};
 use crate::webhook::AuthManager;
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
@@ -31,16 +31,6 @@ pub struct ApiState {
     pub auth: std::sync::Arc<AuthManager>,
     pub terminal: TerminalManager,
     pub cluster: OrchestratorCluster,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateSessionRequest {
-    session_id: Option<Uuid>,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateSessionResponse {
-    session_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,19 +87,21 @@ pub fn router(state: ApiState) -> Router {
         .route("/web-client", get(web_client_handler))
         .route(
             "/v1/sessions",
-            post(create_session_handler).get(list_sessions_handler),
+            post(handlers::sessions::create_session_handler)
+                .get(handlers::sessions::list_sessions_handler),
         )
         .route(
             "/v1/sessions/:session_id",
-            get(get_session_handler).delete(delete_session_handler),
+            get(handlers::sessions::get_session_handler)
+                .delete(handlers::sessions::delete_session_handler),
         )
         .route(
             "/v1/sessions/:session_id/runs",
-            get(list_session_runs_handler),
+            get(handlers::sessions::list_session_runs_handler),
         )
         .route(
             "/v1/sessions/:session_id/messages",
-            get(list_session_messages_handler),
+            get(handlers::sessions::list_session_messages_handler),
         )
         .route(
             "/v1/memory/sessions/:session_id/items",
@@ -289,45 +281,6 @@ pub(crate) fn json_value<T: serde::Serialize>(value: T) -> serde_json::Value {
     })
 }
 
-async fn create_session_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let req = if body.is_empty() {
-        CreateSessionRequest { session_id: None }
-    } else {
-        match serde_json::from_slice::<CreateSessionRequest>(body.as_ref()) {
-            Ok(v) => v,
-            Err(err) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": err.to_string()})),
-                );
-            }
-        }
-    };
-
-    let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
-    if let Err(err) = state.orchestrator.create_session(session_id).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    (
-        StatusCode::CREATED,
-        Json(json_value(CreateSessionResponse { session_id })),
-    )
-}
 
 async fn dashboard_handler() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
@@ -337,177 +290,6 @@ async fn web_client_handler() -> Html<&'static str> {
     Html(WEB_CLIENT_HTML)
 }
 
-async fn list_sessions_handler(
-    State(state): State<ApiState>,
-    Query(query): Query<ListQuery>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    match state.orchestrator.list_sessions(limit).await {
-        Ok(sessions) => (
-            StatusCode::OK,
-            Json(json_value(sessions)),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn get_session_handler(
-    State(state): State<ApiState>,
-    Path(session_id): Path<String>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let session_id = match Uuid::parse_str(session_id.as_str()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-
-    match state.orchestrator.get_session(session_id).await {
-        Ok(Some(summary)) => (StatusCode::OK, Json(json_value(summary))),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "session not found"})),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn delete_session_handler(
-    State(state): State<ApiState>,
-    Path(session_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let session_id = match Uuid::parse_str(session_id.as_str()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-
-    match state.orchestrator.delete_session(session_id).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted"})),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn list_session_runs_handler(
-    State(state): State<ApiState>,
-    Path(session_id): Path<String>,
-    Query(query): Query<ListQuery>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let session_id = match Uuid::parse_str(session_id.as_str()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-
-    match state
-        .orchestrator
-        .list_session_runs(session_id, limit)
-        .await
-    {
-        Ok(runs) => (StatusCode::OK, Json(json_value(runs))),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn list_session_messages_handler(
-    State(state): State<ApiState>,
-    Path(session_id): Path<String>,
-    Query(query): Query<ListQuery>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let session_id = match Uuid::parse_str(session_id.as_str()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
-
-    match state
-        .orchestrator
-        .get_session_messages(session_id, limit)
-        .await
-    {
-        Ok(messages) => (
-            StatusCode::OK,
-            Json(json_value(messages)),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
 
 
 async fn list_active_runs_handler(
