@@ -7,7 +7,9 @@
 //! for known limitations of the current heuristic.
 
 use super::Orchestrator;
-use super::helpers::{contains_any_keyword, extract_repo_url_from_text, infer_clone_target_dir};
+use super::helpers::{
+    contains_any_keyword, contains_word, extract_repo_url_from_text, infer_clone_target_dir,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct AutoSkillRoute {
@@ -31,13 +33,15 @@ impl Orchestrator {
             .map(|value| value.to_string())
             .or_else(|| extract_repo_url_from_text(task));
 
+        // Match skill IDs and names with word-boundary awareness so a short
+        // skill id like "ci" doesn't fire on words like "circle" (TODO 2-4).
         let explicit_skill_id = self
             .skills
             .iter()
             .map(|entry| entry.value().clone())
             .find(|skill| {
-                lower.contains(skill.id.to_lowercase().as_str())
-                    || lower.contains(skill.name.to_lowercase().as_str())
+                contains_word(lower.as_str(), skill.id.to_lowercase().as_str())
+                    || contains_word(lower.as_str(), skill.name.to_lowercase().as_str())
             })
             .map(|skill| skill.id);
 

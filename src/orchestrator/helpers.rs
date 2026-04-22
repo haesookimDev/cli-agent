@@ -45,6 +45,35 @@ pub fn contains_any_keyword(haystack: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| haystack.contains(keyword))
 }
 
+/// Case-insensitive, word-boundary-aware `contains`. A byte is considered a
+/// "word char" if it's ASCII alphanumeric or `_`; the needle matches only
+/// when the surrounding characters (if any) are not word chars.
+///
+/// Used by `auto_skill_route` (TODO 2-4) so short skill IDs like "ci" don't
+/// false-positive against words like "configure" or "mechanic".
+pub fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let hbytes = haystack.as_bytes();
+    let nbytes = needle.as_bytes();
+    if nbytes.len() > hbytes.len() {
+        return false;
+    }
+    let is_word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for i in 0..=(hbytes.len() - nbytes.len()) {
+        if hbytes[i..i + nbytes.len()].eq_ignore_ascii_case(nbytes) {
+            let left_ok = i == 0 || !is_word_byte(hbytes[i - 1]);
+            let right_ok =
+                i + nbytes.len() == hbytes.len() || !is_word_byte(hbytes[i + nbytes.len()]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn infer_clone_target_dir(repo_url: &str) -> String {
     let candidate = repo_url
         .trim_end_matches('/')
@@ -397,5 +426,42 @@ pub fn collect_tool_calls(value: serde_json::Value, out: &mut Vec<serde_json::Va
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_word_requires_boundaries() {
+        assert!(contains_word("run the ci pipeline", "ci"));
+        assert!(contains_word("CI runs now", "ci"));
+        assert!(contains_word("prefix ci", "ci"));
+        assert!(contains_word("ci", "ci"));
+    }
+
+    #[test]
+    fn contains_word_rejects_substring_inside_word() {
+        // The original TODO 2-4 failure mode.
+        assert!(!contains_word("circle the wagons", "ci"));
+        assert!(!contains_word("mechanic", "ci"));
+        assert!(!contains_word("configure this", "config"));
+    }
+
+    #[test]
+    fn contains_word_treats_underscore_as_word_char() {
+        // git_clone_repo should NOT match in "git_clone_repository".
+        assert!(!contains_word(
+            "git_clone_repository tool",
+            "git_clone_repo"
+        ));
+        // But plain "git_clone_repo" as its own token matches.
+        assert!(contains_word("use git_clone_repo now", "git_clone_repo"));
+    }
+
+    #[test]
+    fn contains_word_handles_empty_needle() {
+        assert!(!contains_word("anything", ""));
     }
 }
