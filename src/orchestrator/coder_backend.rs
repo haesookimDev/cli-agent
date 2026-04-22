@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::memory::MemoryManager;
 use crate::router::ModelRouter;
-use crate::types::{CoderBackendKind, CoderOutputChunk, CoderSessionResult};
+use crate::types::{CoderBackendKind, CoderFileChanged, CoderOutputChunk, CoderSessionResult};
 
 /// Trait for coder execution backends.
 #[async_trait]
@@ -26,6 +26,73 @@ pub trait CoderBackend: Send + Sync {
         working_dir: &Path,
         on_chunk: Arc<dyn Fn(CoderOutputChunk) + Send + Sync>,
     ) -> anyhow::Result<CoderSessionResult>;
+}
+
+/// Snapshot `git status --porcelain=v1` for the working directory. Returns
+/// `None` if `dir` is not a git repo or git is unavailable, so callers fall
+/// back to an empty file list instead of erroring out.
+async fn snapshot_working_tree(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// Classify a two-character porcelain v1 status code into a coarse change type.
+fn classify_porcelain_status(code: &str) -> &'static str {
+    match code {
+        "??" => "untracked",
+        s if s.starts_with('A') || s.ends_with('A') => "added",
+        s if s.starts_with('D') || s.ends_with('D') => "deleted",
+        s if s.starts_with('R') || s.ends_with('R') => "renamed",
+        s if s.starts_with('C') || s.ends_with('C') => "copied",
+        _ => "modified",
+    }
+}
+
+/// Parse one line of `git status --porcelain=v1` output into (status, path).
+/// Returns `None` if the line is shorter than the expected 3-byte header.
+fn parse_porcelain_line(line: &str) -> Option<(&str, &str)> {
+    if line.len() < 3 {
+        return None;
+    }
+    let (status, rest) = line.split_at(2);
+    // rest begins with a space separator; strip it before returning the path.
+    let path = rest.strip_prefix(' ').unwrap_or(rest);
+    Some((status, path))
+}
+
+/// Compare a `git status --porcelain=v1` snapshot taken before an operation
+/// against the current state, returning entries that appear only in the
+/// post-snapshot (i.e. files changed by the operation).
+async fn detect_changed_files(dir: &Path, before: Option<&str>) -> Vec<CoderFileChanged> {
+    let after = match snapshot_working_tree(dir).await {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let before = before.unwrap_or("");
+    let before_set: std::collections::HashSet<&str> = before
+        .lines()
+        .filter_map(|l| parse_porcelain_line(l).map(|(_, p)| p))
+        .collect();
+    after
+        .lines()
+        .filter_map(parse_porcelain_line)
+        .filter(|(_, path)| !before_set.contains(path))
+        .map(|(status, path)| CoderFileChanged {
+            path: path.to_string(),
+            change_type: classify_porcelain_status(status).to_string(),
+            diff_preview: None,
+        })
+        .collect()
 }
 
 // --- LlmCoderBackend ---
@@ -53,6 +120,7 @@ impl CoderBackend for LlmCoderBackend {
         working_dir: &Path,
         _on_chunk: Arc<dyn Fn(CoderOutputChunk) + Send + Sync>,
     ) -> anyhow::Result<CoderSessionResult> {
+        let before = snapshot_working_tree(working_dir).await;
         let prompt = if context.is_empty() {
             task.to_string()
         } else {
@@ -70,10 +138,12 @@ impl CoderBackend for LlmCoderBackend {
             )
             .await?;
 
+        let files_changed = detect_changed_files(working_dir, before.as_deref()).await;
+
         Ok(CoderSessionResult {
             output: inference.output,
             exit_code: 0,
-            files_changed: vec![],
+            files_changed,
             duration_ms: 0,
         })
     }
@@ -112,6 +182,7 @@ impl CoderBackend for ClaudeCodeBackend {
     ) -> anyhow::Result<CoderSessionResult> {
         let session_id = Uuid::new_v4().to_string();
         let started = Instant::now();
+        let before = snapshot_working_tree(working_dir).await;
 
         let resolved_command = crate::command_resolver::resolve_command_path(&self.command);
         let mut cmd = Command::new(&resolved_command);
@@ -186,11 +257,12 @@ impl CoderBackend for ClaudeCodeBackend {
 
         let stdout_output = stdout_handle.await.unwrap_or_default();
         let _ = stderr_handle.await;
+        let files_changed = detect_changed_files(working_dir, before.as_deref()).await;
 
         Ok(CoderSessionResult {
             output: stdout_output,
             exit_code: status.code().unwrap_or(-1),
-            files_changed: vec![],
+            files_changed,
             duration_ms: started.elapsed().as_millis(),
         })
     }
@@ -229,6 +301,7 @@ impl CoderBackend for CodexBackend {
     ) -> anyhow::Result<CoderSessionResult> {
         let session_id = Uuid::new_v4().to_string();
         let started = Instant::now();
+        let before = snapshot_working_tree(working_dir).await;
         let output_path = std::env::temp_dir().join(format!("codex-coder-{}.txt", session_id));
 
         let resolved_command = crate::command_resolver::resolve_command_path(&self.command);
@@ -318,11 +391,12 @@ impl CoderBackend for CodexBackend {
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty())
             .unwrap_or(stdout_output);
+        let files_changed = detect_changed_files(working_dir, before.as_deref()).await;
 
         Ok(CoderSessionResult {
             output: final_output,
             exit_code: status.code().unwrap_or(-1),
-            files_changed: vec![],
+            files_changed,
             duration_ms: started.elapsed().as_millis(),
         })
     }
@@ -576,6 +650,64 @@ mod tests {
         let result = flush_utf8_safe(&mut buf);
         assert_eq!(result, "한");
         assert!(buf.is_empty());
+    }
+
+    fn make_tmp_dir(prefix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create tmp dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn detect_changed_files_reports_new_paths_only() {
+        use std::process::Command as StdCommand;
+        let tmp = make_tmp_dir("coder-backend-test");
+        // init a git repo so `git status --porcelain` works
+        assert!(StdCommand::new("git")
+            .arg("-C")
+            .arg(&tmp)
+            .arg("init")
+            .arg("-q")
+            .status()
+            .expect("git init")
+            .success());
+
+        let before = snapshot_working_tree(&tmp).await;
+        assert_eq!(
+            before.as_deref(),
+            Some(""),
+            "fresh repo should be empty: {before:?}"
+        );
+
+        std::fs::write(tmp.join("a.txt"), "hello").expect("write");
+        std::fs::write(tmp.join("b.txt"), "world").expect("write");
+
+        let changed = detect_changed_files(&tmp, before.as_deref()).await;
+        let mut paths: Vec<String> = changed.iter().map(|c| c.path.clone()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert!(changed.iter().all(|c| c.change_type == "untracked"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn detect_changed_files_returns_empty_for_non_git_dir() {
+        let tmp = make_tmp_dir("coder-backend-nogit");
+        let before = snapshot_working_tree(&tmp).await;
+        assert!(before.is_none(), "non-git dir should yield None snapshot");
+
+        std::fs::write(tmp.join("x.txt"), "x").expect("write");
+        let changed = detect_changed_files(&tmp, before.as_deref()).await;
+        assert!(
+            changed.is_empty(),
+            "non-git dir should produce empty changed list, got {changed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
