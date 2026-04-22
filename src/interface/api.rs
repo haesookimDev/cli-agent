@@ -309,6 +309,17 @@ pub async fn serve(
     Ok(())
 }
 
+/// Serialize a response payload to `serde_json::Value`, logging and returning
+/// an error object instead of panicking if serialization fails. Call sites
+/// previously used `serde_json::to_value(x).unwrap()`, which could bring down
+/// the server on a serialization error.
+fn json_value<T: serde::Serialize>(value: T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or_else(|e| {
+        tracing::error!("api response serialization failed: {e}");
+        serde_json::json!({"error": format!("serialization failed: {e}")})
+    })
+}
+
 async fn create_session_handler(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -345,7 +356,7 @@ async fn create_session_handler(
 
     (
         StatusCode::CREATED,
-        Json(serde_json::to_value(CreateSessionResponse { session_id }).unwrap()),
+        Json(json_value(CreateSessionResponse { session_id })),
     )
 }
 
@@ -373,7 +384,7 @@ async fn list_sessions_handler(
     match state.orchestrator.list_sessions(limit).await {
         Ok(sessions) => (
             StatusCode::OK,
-            Json(serde_json::to_value(sessions).unwrap()),
+            Json(json_value(sessions)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -405,7 +416,7 @@ async fn get_session_handler(
     };
 
     match state.orchestrator.get_session(session_id).await {
-        Ok(Some(summary)) => (StatusCode::OK, Json(serde_json::to_value(summary).unwrap())),
+        Ok(Some(summary)) => (StatusCode::OK, Json(json_value(summary))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "session not found"})),
@@ -481,7 +492,7 @@ async fn list_session_runs_handler(
         .list_session_runs(session_id, limit)
         .await
     {
-        Ok(runs) => (StatusCode::OK, Json(serde_json::to_value(runs).unwrap())),
+        Ok(runs) => (StatusCode::OK, Json(json_value(runs))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -520,7 +531,7 @@ async fn list_session_messages_handler(
     {
         Ok(messages) => (
             StatusCode::OK,
-            Json(serde_json::to_value(messages).unwrap()),
+            Json(json_value(messages)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -563,7 +574,7 @@ async fn list_session_memory_items_handler(
         .list_session_memory_items(session_id, query_text, limit)
         .await
     {
-        Ok(items) => (StatusCode::OK, Json(serde_json::to_value(items).unwrap())),
+        Ok(items) => (StatusCode::OK, Json(json_value(items))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -758,7 +769,7 @@ async fn list_global_memory_items_handler(
         .list_global_memory_items(query_text, limit)
         .await
     {
-        Ok(items) => (StatusCode::OK, Json(serde_json::to_value(items).unwrap())),
+        Ok(items) => (StatusCode::OK, Json(json_value(items))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -888,7 +899,7 @@ async fn list_active_runs_handler(
     }
 
     let active = state.orchestrator.list_active_runs().await;
-    (StatusCode::OK, Json(serde_json::to_value(active).unwrap()))
+    (StatusCode::OK, Json(json_value(active)))
 }
 
 async fn create_run_handler(
@@ -925,7 +936,7 @@ async fn create_run_handler(
     match state.orchestrator.submit_run(run_req).await {
         Ok(submission) => (
             StatusCode::ACCEPTED,
-            Json(serde_json::to_value(submission).unwrap()),
+            Json(json_value(submission)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -948,7 +959,7 @@ async fn list_runs_handler(
 
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     match state.orchestrator.list_recent_runs(limit).await {
-        Ok(runs) => (StatusCode::OK, Json(serde_json::to_value(runs).unwrap())),
+        Ok(runs) => (StatusCode::OK, Json(json_value(runs))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -979,7 +990,7 @@ async fn get_run_handler(
     };
 
     match state.orchestrator.get_run(run_id).await {
-        Ok(Some(run)) => (StatusCode::OK, Json(serde_json::to_value(run).unwrap())),
+        Ok(Some(run)) => (StatusCode::OK, Json(json_value(run))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "run not found"})),
@@ -1114,7 +1125,7 @@ async fn retry_run_handler(
     match state.orchestrator.retry_run(run_id).await {
         Ok(sub) => (
             StatusCode::ACCEPTED,
-            Json(serde_json::to_value(sub).unwrap()),
+            Json(json_value(sub)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1162,7 +1173,7 @@ async fn clone_run_handler(
     match state.orchestrator.clone_run(run_id, req.session_id).await {
         Ok(sub) => (
             StatusCode::ACCEPTED,
-            Json(serde_json::to_value(sub).unwrap()),
+            Json(json_value(sub)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1196,7 +1207,7 @@ async fn get_run_trace_handler(
 
     let limit = query.limit.unwrap_or(5_000).clamp(1, 20_000);
     match state.orchestrator.get_run_trace(run_id, limit).await {
-        Ok(Some(trace)) => (StatusCode::OK, Json(serde_json::to_value(trace).unwrap())),
+        Ok(Some(trace)) => (StatusCode::OK, Json(json_value(trace))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "run not found"})),
@@ -1269,7 +1280,7 @@ async fn get_run_behavior_handler(
     match state.orchestrator.get_run_behavior(run_id, limit).await {
         Ok(Some(behavior)) => (
             StatusCode::OK,
-            Json(serde_json::to_value(behavior).unwrap()),
+            Json(json_value(behavior)),
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -1552,7 +1563,7 @@ async fn register_webhook_handler(
     {
         Ok(endpoint) => (
             StatusCode::CREATED,
-            Json(serde_json::to_value(endpoint).unwrap()),
+            Json(json_value(endpoint)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1575,7 +1586,7 @@ async fn list_webhooks_handler(
     match state.orchestrator.list_webhooks().await {
         Ok(endpoints) => (
             StatusCode::OK,
-            Json(serde_json::to_value(endpoints).unwrap()),
+            Json(json_value(endpoints)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1605,7 +1616,7 @@ async fn list_webhook_deliveries_handler(
     {
         Ok(deliveries) => (
             StatusCode::OK,
-            Json(serde_json::to_value(deliveries).unwrap()),
+            Json(json_value(deliveries)),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1769,7 +1780,7 @@ async fn get_settings_handler(
     let settings = state.orchestrator.current_settings().await;
     (
         StatusCode::OK,
-        Json(serde_json::to_value(settings).unwrap()),
+        Json(json_value(settings)),
     )
 }
 
@@ -1799,7 +1810,7 @@ async fn update_settings_handler(
     let settings = state.orchestrator.current_settings().await;
     (
         StatusCode::OK,
-        Json(serde_json::to_value(settings).unwrap()),
+        Json(json_value(settings)),
     )
 }
 
@@ -2426,7 +2437,7 @@ async fn list_terminals_handler(
     }
 
     let list = state.terminal.list();
-    (StatusCode::OK, Json(serde_json::to_value(list).unwrap()))
+    (StatusCode::OK, Json(json_value(list)))
 }
 
 async fn kill_terminal_handler(
