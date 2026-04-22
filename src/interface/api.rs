@@ -204,9 +204,9 @@ pub fn router(state: ApiState) -> Router {
             post(handlers::webhooks::retry_webhook_delivery_handler),
         )
         .route("/v1/webhooks/test", post(handlers::webhooks::test_webhook_handler))
-        .route("/v1/mcp/tools", get(list_mcp_tools_handler))
-        .route("/v1/mcp/tools/call", post(call_mcp_tool_handler))
-        .route("/v1/mcp/servers", get(list_mcp_servers_handler))
+        .route("/v1/mcp/tools", get(handlers::mcp::list_mcp_tools_handler))
+        .route("/v1/mcp/tools/call", post(handlers::mcp::call_mcp_tool_handler))
+        .route("/v1/mcp/servers", get(handlers::mcp::list_mcp_servers_handler))
         .route(
             "/v1/settings",
             get(get_settings_handler).patch(update_settings_handler),
@@ -1515,73 +1515,6 @@ async fn handle_run_ws(
         }
 
         tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-}
-
-// --- MCP ---
-
-async fn list_mcp_tools_handler(State(state): State<ApiState>) -> impl IntoResponse {
-    let tools = state.orchestrator.list_mcp_tools().await;
-    (StatusCode::OK, Json(serde_json::json!(tools)))
-}
-
-async fn list_mcp_servers_handler(State(state): State<ApiState>) -> impl IntoResponse {
-    let servers = state.orchestrator.list_mcp_servers();
-    (StatusCode::OK, Json(serde_json::json!(servers)))
-}
-
-#[derive(Debug, Deserialize)]
-struct CallToolRequest {
-    tool_name: String,
-    #[serde(default = "default_empty_object")]
-    arguments: serde_json::Value,
-}
-
-fn default_empty_object() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-async fn call_mcp_tool_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let req = match serde_json::from_slice::<CallToolRequest>(body.as_ref()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-
-    match state
-        .orchestrator
-        .call_mcp_tool(&req.tool_name, req.arguments)
-        .await
-    {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "tool_name": result.tool_name,
-                "succeeded": result.succeeded,
-                "content": result.content,
-                "error": result.error,
-                "duration_ms": result.duration_ms,
-            })),
-        ),
-        Err(err) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
     }
 }
 
