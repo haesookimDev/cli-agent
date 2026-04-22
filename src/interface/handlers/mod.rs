@@ -4,3 +4,4 @@
 //! share `ApiState` and the `json_value` helper from `crate::interface::api`.
 
 pub mod schedules;
+pub mod webhooks;

@@ -112,27 +112,8 @@ struct CloneRunRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeliveryListQuery {
-    limit: Option<usize>,
-    dead_letter: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
 struct VllmModelsQuery {
     url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisterWebhookRequest {
-    url: String,
-    events: Vec<String>,
-    secret: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TestWebhookRequest {
-    event: String,
-    payload: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,17 +192,18 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/v1/webhooks/endpoints",
-            post(register_webhook_handler).get(list_webhooks_handler),
+            post(handlers::webhooks::register_webhook_handler)
+                .get(handlers::webhooks::list_webhooks_handler),
         )
         .route(
             "/v1/webhooks/deliveries",
-            get(list_webhook_deliveries_handler),
+            get(handlers::webhooks::list_webhook_deliveries_handler),
         )
         .route(
             "/v1/webhooks/deliveries/:delivery_id/retry",
-            post(retry_webhook_delivery_handler),
+            post(handlers::webhooks::retry_webhook_delivery_handler),
         )
-        .route("/v1/webhooks/test", post(test_webhook_handler))
+        .route("/v1/webhooks/test", post(handlers::webhooks::test_webhook_handler))
         .route("/v1/mcp/tools", get(list_mcp_tools_handler))
         .route("/v1/mcp/tools/call", post(call_mcp_tool_handler))
         .route("/v1/mcp/servers", get(list_mcp_servers_handler))
@@ -315,7 +297,7 @@ pub async fn serve(
 /// an error object instead of panicking if serialization fails. Call sites
 /// previously used `serde_json::to_value(x).unwrap()`, which could bring down
 /// the server on a serialization error.
-fn json_value<T: serde::Serialize>(value: T) -> serde_json::Value {
+pub(crate) fn json_value<T: serde::Serialize>(value: T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or_else(|e| {
         tracing::error!("api response serialization failed: {e}");
         serde_json::json!({"error": format!("serialization failed: {e}")})
@@ -1533,170 +1515,6 @@ async fn handle_run_ws(
         }
 
         tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-}
-
-async fn register_webhook_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let req = match serde_json::from_slice::<RegisterWebhookRequest>(body.as_ref()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-
-    match state
-        .orchestrator
-        .register_webhook(req.url.as_str(), req.events.as_slice(), req.secret.as_str())
-        .await
-    {
-        Ok(endpoint) => (
-            StatusCode::CREATED,
-            Json(json_value(endpoint)),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn list_webhooks_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    match state.orchestrator.list_webhooks().await {
-        Ok(endpoints) => (
-            StatusCode::OK,
-            Json(json_value(endpoints)),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn list_webhook_deliveries_handler(
-    State(state): State<ApiState>,
-    Query(query): Query<DeliveryListQuery>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let dead_letter_only = query.dead_letter.unwrap_or(false);
-
-    match state
-        .orchestrator
-        .list_webhook_deliveries(dead_letter_only, limit)
-        .await
-    {
-        Ok(deliveries) => (
-            StatusCode::OK,
-            Json(json_value(deliveries)),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn retry_webhook_delivery_handler(
-    State(state): State<ApiState>,
-    Path(delivery_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let delivery_id = match delivery_id.parse::<i64>() {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-
-    match state.orchestrator.retry_webhook_delivery(delivery_id).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "requeued"})),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn test_webhook_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(err) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err.to_string()})),
-        );
-    }
-
-    let req = match serde_json::from_slice::<TestWebhookRequest>(body.as_ref()) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            );
-        }
-    };
-
-    match state
-        .orchestrator
-        .dispatch_webhook_event(req.event.as_str(), req.payload)
-        .await
-    {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "queued"})),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
     }
 }
 
