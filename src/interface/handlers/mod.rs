@@ -6,6 +6,7 @@
 pub mod cluster;
 pub mod mcp;
 pub mod memory;
+pub mod runs;
 pub mod schedules;
 pub mod sessions;
 pub mod settings;
