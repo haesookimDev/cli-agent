@@ -139,6 +139,70 @@ pub fn is_continuation_command(task: &str) -> bool {
     continuation_markers.iter().any(|kw| lower.contains(kw))
 }
 
+/// Keyword-based fast-path used by `classify_task` before falling through to
+/// the LLM call. Returns `Some(type)` only when the input matches a
+/// high-confidence pattern — anything ambiguous returns `None` so the LLM
+/// still gets consulted.
+///
+/// Addresses the "매번 LLM 호출" half of TODO 2-2.
+pub fn classify_task_fast(task: &str, has_mcp: bool) -> Option<TaskType> {
+    use crate::orchestrator::helpers::contains_word;
+
+    let lower = task.to_lowercase();
+
+    // (a) Explicit external-project URL or verb.
+    let external_kw = ["clone", "github.com", "gitlab.com", "bitbucket.org"];
+    if external_kw.iter().any(|kw| lower.contains(kw))
+        || (lower.contains("https://") && lower.contains(".git"))
+    {
+        return Some(TaskType::ExternalProject);
+    }
+
+    // (b) Clear coding verbs.
+    const CODE_VERBS: &[&str] = &[
+        "fix", "debug", "refactor", "patch", "rewrite", "implement", "bug",
+    ];
+    if CODE_VERBS
+        .iter()
+        .any(|v| contains_word(lower.as_str(), v))
+    {
+        return Some(TaskType::CodeGeneration);
+    }
+
+    // (c) Clear configuration change: config verb + config noun.
+    const CONFIG_VERBS: &[&str] = &[
+        "enable", "disable", "switch", "toggle", "configure", "change", "set",
+    ];
+    const CONFIG_NOUNS: &[&str] = &["setting", "settings", "config", "provider", "backend"];
+    let has_config_verb = CONFIG_VERBS
+        .iter()
+        .any(|v| contains_word(lower.as_str(), v));
+    let has_config_noun = CONFIG_NOUNS
+        .iter()
+        .any(|n| contains_word(lower.as_str(), n));
+    if has_config_verb && has_config_noun {
+        return Some(TaskType::Configuration);
+    }
+
+    // (d) Analysis verbs.
+    if ["analyze", "analysis", "evaluate"]
+        .iter()
+        .any(|v| contains_word(lower.as_str(), v))
+    {
+        return Some(TaskType::Analysis);
+    }
+
+    // (e) Bare tool-noun hit with MCP registered.
+    if has_mcp {
+        let tool_kw = ["mcp", "commit", "branch"];
+        if tool_kw.iter().any(|kw| contains_word(lower.as_str(), kw)) {
+            return Some(TaskType::ToolOperation);
+        }
+    }
+
+    None
+}
+
 pub async fn classify_task(
     task: &str,
     mcp_server_names: &[String],
@@ -160,6 +224,12 @@ pub async fn classify_task(
 
     let has_mcp = !mcp_server_names.is_empty();
     let lower = task.to_lowercase();
+
+    // High-confidence keyword fast-path — skip the LLM call when possible
+    // (TODO 2-2).
+    if let Some(fast) = classify_task_fast(task, has_mcp) {
+        return fast;
+    }
 
     if has_mcp {
         let matches_server = mcp_server_names
@@ -416,6 +486,44 @@ mod tests {
             ),
             TaskType::ExternalProject
         );
+    }
+
+    // --- classify_task_fast (TODO 2-2 fast-path) ---
+
+    #[test]
+    fn fast_path_hits_external_project_for_url() {
+        assert_eq!(
+            classify_task_fast("check https://github.com/a/b.git", false),
+            Some(TaskType::ExternalProject)
+        );
+        assert_eq!(
+            classify_task_fast("clone the repo", false),
+            Some(TaskType::ExternalProject)
+        );
+    }
+
+    #[test]
+    fn fast_path_hits_code_generation_for_fix() {
+        assert_eq!(
+            classify_task_fast("fix the broken parser", false),
+            Some(TaskType::CodeGeneration)
+        );
+    }
+
+    #[test]
+    fn fast_path_requires_verb_plus_noun_for_configuration() {
+        assert_eq!(
+            classify_task_fast("enable the anthropic provider", false),
+            Some(TaskType::Configuration)
+        );
+        // 'provider' alone is ambiguous — return None so the LLM decides.
+        assert_eq!(classify_task_fast("what providers exist", false), None);
+    }
+
+    #[test]
+    fn fast_path_returns_none_for_ambiguous_text() {
+        // Nothing distinctive — skipping the LLM would be unsafe.
+        assert_eq!(classify_task_fast("hello there friend", false), None);
     }
 
     #[test]

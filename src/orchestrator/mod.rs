@@ -44,8 +44,8 @@ use crate::types::{
     NodeTraceState, RepoAnalysis, RepoAnalysisConfig, RunActionEvent, RunActionType,
     RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView, RunRecord,
     RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
-    SessionMemoryItem, TraceEdge, ValidationConfig, WebhookDeliveryRecord, WebhookEndpoint,
-    WorkflowTemplate,
+    SessionMemoryItem, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
+    WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
 
@@ -68,6 +68,10 @@ pub struct Orchestrator {
     repo_analyses: Arc<DashMap<Uuid, RepoAnalysis>>,
     skills: Arc<DashMap<String, WorkflowTemplate>>,
     session_workspace: SessionWorkspaceManager,
+    /// Per-session classification cache for `classify_task` (TODO 2-2).
+    /// Keyed by (session_id, task text); stores the resolved TaskType so
+    /// repeated submissions inside one session skip the LLM call.
+    pub(super) classify_cache: Arc<DashMap<(Uuid, String), TaskType>>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +124,7 @@ impl Orchestrator {
             repo_analyses: Arc::new(DashMap::new()),
             skills,
             session_workspace,
+            classify_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -2355,6 +2360,7 @@ mod tests {
         // Complex/CodeGeneration task should have full graph
         let graph = orchestrator
             .build_graph(
+                Uuid::nil(),
                 "implement a webhook integration endpoint with code",
                 &no_servers,
                 &no_tools,
@@ -2371,7 +2377,16 @@ mod tests {
 
         // SimpleQuery should have minimal graph
         let simple = orchestrator
-            .build_graph("hello world", &no_servers, &no_tools, None, None, None, None)
+            .build_graph(
+                Uuid::nil(),
+                "hello world",
+                &no_servers,
+                &no_tools,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(simple.node("plan").is_some());
@@ -2381,6 +2396,7 @@ mod tests {
         // Analysis task should have analyzer
         let analysis = orchestrator
             .build_graph(
+                Uuid::nil(),
                 "analyze the performance patterns and evaluate metrics",
                 &no_servers,
                 &no_tools,

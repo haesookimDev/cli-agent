@@ -6,6 +6,8 @@
 //! on `Orchestrator` and access its private fields via the submodule
 //! visibility rule.
 
+use uuid::Uuid;
+
 use super::Orchestrator;
 use super::context_builder::trim_for_context;
 use super::task_classifier::{classify_task, is_local_workspace_task};
@@ -227,6 +229,7 @@ impl Orchestrator {
 
     pub(super) async fn build_graph(
         &self,
+        session_id: Uuid,
         task: &str,
         mcp_server_names: &[String],
         mcp_tool_names: &[String],
@@ -235,16 +238,39 @@ impl Orchestrator {
         repo_url: Option<&str>,
         working_dir: Option<&std::path::Path>,
     ) -> anyhow::Result<ExecutionGraph> {
-        let task_type = classify_task(
-            task,
-            mcp_server_names,
-            mcp_tool_names,
-            previous_task_type,
-            &self.router,
-            repo_url,
-            working_dir,
-        )
-        .await;
+        // Session-scoped classification cache — re-submitting the same text
+        // in the same session skips the LLM call entirely (TODO 2-2).
+        // Uuid::nil() is used by unit tests that don't care about caching.
+        let cache_key = (session_id, task.to_string());
+        let task_type = if session_id != Uuid::nil() {
+            if let Some(cached) = self.classify_cache.get(&cache_key).map(|v| *v) {
+                cached
+            } else {
+                let resolved = classify_task(
+                    task,
+                    mcp_server_names,
+                    mcp_tool_names,
+                    previous_task_type,
+                    &self.router,
+                    repo_url,
+                    working_dir,
+                )
+                .await;
+                self.classify_cache.insert(cache_key, resolved);
+                resolved
+            }
+        } else {
+            classify_task(
+                task,
+                mcp_server_names,
+                mcp_tool_names,
+                previous_task_type,
+                &self.router,
+                repo_url,
+                working_dir,
+            )
+            .await
+        };
         let mut graph = ExecutionGraph::new(self.max_graph_depth);
 
         // Planner instructions — include available tools when MCP servers are registered

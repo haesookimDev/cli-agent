@@ -219,6 +219,7 @@ impl Orchestrator {
             None => {
                 let graph_working_dir = self.session_workspace.ensure_session_dir(session_id).await?;
                 self.build_graph(
+                    session_id,
                     req.task.as_str(),
                     &mcp_server_names,
                     &mcp_tool_names,
