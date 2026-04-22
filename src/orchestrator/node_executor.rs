@@ -951,7 +951,25 @@ impl Orchestrator {
                                 )
                                 .await;
 
-                            match mcp.call_tool(&tool_name, arguments).await {
+                            // Wrap call_tool in a hard timeout so a hung MCP server
+                            // can't stall the entire ToolCaller node (TODO 2-7).
+                            const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+                            let call_fut = mcp.call_tool(&tool_name, arguments);
+                            let call_result = match tokio::time::timeout(
+                                MCP_CALL_TIMEOUT,
+                                call_fut,
+                            )
+                            .await
+                            {
+                                Ok(r) => r,
+                                Err(_) => Err(anyhow::anyhow!(
+                                    "MCP call_tool({}) timed out after {:?}",
+                                    tool_name,
+                                    MCP_CALL_TIMEOUT
+                                )),
+                            };
+
+                            match call_result {
                                 Ok(result) => {
                                     let _ = memory
                                         .append_run_action_event(
