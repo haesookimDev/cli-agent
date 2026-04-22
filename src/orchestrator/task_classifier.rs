@@ -56,29 +56,63 @@ pub fn is_local_workspace_task(task: &str) -> bool {
         && !has_explicit_remote_repo_reference(lower.as_str())
 }
 
+/// Decide whether `task` looks like a short follow-up reply that only makes
+/// sense in the context of the previous user turn (so the memory-retrieval
+/// query should be concatenated with the prior message).
+///
+/// Uses verb-vs-referent pivot rather than raw length so independent short
+/// imperatives like "Fix this bug" don't get flagged just because they're
+/// short (TODO 2-5). All keyword checks are word-boundary-aware, so
+/// "commit" no longer matches the "it" referent marker.
 pub fn looks_like_follow_up_task(task: &str) -> bool {
+    use crate::orchestrator::helpers::contains_word;
+
     let lower = task.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
     let token_count = lower.split_whitespace().count();
-    if token_count <= 5 {
-        return true;
+
+    // Words that start a concrete new ask — presence of any of these means
+    // the message is a fresh task, not a contextual follow-up.
+    const FRESH_TASK_VERBS: &[&str] = &[
+        "fix", "add", "remove", "create", "delete", "implement", "write",
+        "refactor", "debug", "test", "run", "build", "deploy", "analyze",
+        "review", "clone", "check", "update", "explain", "show", "list",
+        "수정", "추가", "삭제", "생성", "구현", "작성", "검토", "분석",
+    ];
+    let has_fresh_verb = FRESH_TASK_VERBS
+        .iter()
+        .any(|v| contains_word(lower.as_str(), v));
+    if has_fresh_verb {
+        return false;
     }
 
-    let follow_up_markers = [
-        "그거",
-        "이거",
-        "저거",
-        "거기",
-        "로컬에",
-        "local",
-        "that",
-        "it",
-        "there",
-        "맞아",
-        "응",
-        "계속",
-        "이어서",
+    // Pronouns / demonstratives that only resolve against previous context.
+    const REFERENT_MARKERS: &[&str] = &[
+        "그거", "이거", "저거", "거기", "로컬에",
+        "that", "it", "there", "them",
+        "이어서", "계속",
     ];
-    follow_up_markers.iter().any(|kw| lower.contains(kw))
+    // Bare confirmation / go-ahead signals.
+    const CONFIRMATION_MARKERS: &[&str] = &[
+        "맞아", "응", "네",
+        "yes", "yep", "sure", "ok", "okay",
+    ];
+
+    let has_referent = REFERENT_MARKERS
+        .iter()
+        .any(|m| contains_word(lower.as_str(), m));
+    let has_confirmation = CONFIRMATION_MARKERS
+        .iter()
+        .any(|m| contains_word(lower.as_str(), m));
+
+    // Very short utterance without any verb — treat as follow-up (likely an
+    // acknowledgment or demonstrative).
+    if token_count <= 2 {
+        return true;
+    }
+    has_referent || has_confirmation
 }
 
 /// Detects explicit continuation/execution commands that should inherit
@@ -259,4 +293,39 @@ pub fn classify_task_fallback(task: &str, has_mcp: bool) -> TaskType {
         return TaskType::SimpleQuery;
     }
     TaskType::Complex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_short_imperatives_are_not_followups() {
+        // The TODO 2-5 regression: 3-token fresh task misclassified.
+        assert!(!looks_like_follow_up_task("Fix this bug"));
+        assert!(!looks_like_follow_up_task("Add a button"));
+        assert!(!looks_like_follow_up_task("Clone the repo"));
+        assert!(!looks_like_follow_up_task("수정 해주세요"));
+    }
+
+    #[test]
+    fn confirmations_and_referents_are_followups() {
+        assert!(looks_like_follow_up_task("네"));
+        assert!(looks_like_follow_up_task("yes"));
+        assert!(looks_like_follow_up_task("ok go ahead"));
+        assert!(looks_like_follow_up_task("그거 실행"));
+        assert!(looks_like_follow_up_task("do that one"));
+    }
+
+    #[test]
+    fn substring_it_in_commit_is_not_a_referent() {
+        // Without word boundaries, "it" inside "commit" would have matched.
+        assert!(!looks_like_follow_up_task("commit the changes"));
+    }
+
+    #[test]
+    fn empty_input_is_not_a_followup() {
+        assert!(!looks_like_follow_up_task(""));
+        assert!(!looks_like_follow_up_task("   "));
+    }
 }
