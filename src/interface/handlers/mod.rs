@@ -5,6 +5,7 @@
 
 pub mod mcp;
 pub mod schedules;
+pub mod settings;
 pub mod skills;
 pub mod webhooks;
 pub mod workflows;
