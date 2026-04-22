@@ -4,7 +4,7 @@
 
 Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼의 전반적인 코드 품질, 에이전트 동작 결함, 리팩토링 필요사항을 종합 분석한 결과.
 
-**현재 상태 (최신 커밋 `ada89e5` 기준)**: 빌드 정상, **111개 테스트 통과**, Phase 1/2/3 완료. 7,654줄 모놀리스였던 `orchestrator/mod.rs`는 10개 서브모듈로 분할(mod.rs 2,984줄)되었고, 2,796줄이었던 `interface/api.rs`는 12개 핸들러 모듈로 분할(api.rs 267줄)되었다. 에이전트 휴리스틱 오탐, reviewer 재시도, LLM 분류 fast-path/캐시 등 동작 정확성·성능 개선도 적용됨.
+**현재 상태 (최신 커밋 `74b2089` 기준)**: 빌드 정상, **116개 테스트 통과**, Phase 1/2/3/4 완료. 7,654줄 모놀리스였던 `orchestrator/mod.rs`는 10개 서브모듈로 분할(mod.rs 2,984줄)되었고, 2,796줄이었던 `interface/api.rs`는 12개 핸들러 모듈로 분할(api.rs 267줄)되었다. 에이전트 휴리스틱 오탐, reviewer 재시도, LLM 분류 fast-path/캐시 등 동작 정확성·성능 개선도 적용됨. 남은 중복(프론트엔드 API 설정, gateway 서명 검증, action+progress 페어 호출)도 Phase 4에서 통합.
 
 ---
 
@@ -15,13 +15,13 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | Phase 1 | Critical Fixes (TODO 1-1 ~ 1-7) | ✅ 완료 | 7 |
 | Phase 2 | Core Refactoring (TODO 3-1, 3-2, 3-3) | ✅ 완료 | 21 |
 | Phase 3 | Agent Behavior (TODO 2-1 ~ 2-7) | ✅ 완료 | 7 |
-| Phase 4 | Remaining Refactoring (TODO 3-4 ~ 3-6) | ⏳ 대기 | — |
+| Phase 4 | Remaining Refactoring (TODO 3-4 ~ 3-6) | ✅ 완료 | 3 |
 | Phase 5 | Test Coverage (TODO 5-1 ~ 5-6) | ⏳ 대기 | — |
 | Phase 6 | Infrastructure (TODO 4-1 ~ 4-8) | ⏳ 대기 | — |
 | Phase 7 | Performance (TODO 6-1 ~ 6-7) | ⏳ 대기 | — |
 | 추가 제안 | Workflow / Tracing / Harness (7-1 ~ 9-6) | ⏳ 대기 | — |
 
-**누적 35 commits** · 테스트 87 → 111 (+24)
+**누적 38 commits** · 테스트 87 → 116 (+29)
 
 ---
 
@@ -150,20 +150,17 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - **파일**: `src/runtime/mod.rs` (impl), `src/orchestrator/node_executor.rs` (콜사이트)
 - **적용**: `NodeExecutionResult::{success, failure, failure_with_output}` 연관 함수 3종 추가. 27개 production 생성 중 **19개(70%)**를 헬퍼로 전환. 조건부 `succeeded`/`error` 표현식은 구조 리터럴 유지.
 
-### TODO 3-4: 프론트엔드 API 설정 중복 통합 — ⏳ 대기
-- **파일**: `web/src/lib/api-client.ts:3-5`, `web/src/lib/sse.ts:3-5`, `web/src/hooks/use-terminal-ws.ts:15-17`
-- **문제**: 3곳에서 동일한 `API_KEY`, `API_SECRET`, `API_URL` 하드코딩
-- **수정**: `web/src/lib/config.ts`로 추출하여 단일 소스 관리
+### TODO 3-4: 프론트엔드 API 설정 중복 통합 — ✅ `a1e52f2`
+- **파일**: `web/src/lib/config.ts` (신규), `web/src/lib/api-client.ts`, `web/src/lib/sse.ts`, `web/src/hooks/use-terminal-ws.ts`
+- **적용**: `API_KEY`/`API_SECRET`/`API_URL` 환경변수 기본값을 `web/src/lib/config.ts`로 추출. 3개 파일이 모두 해당 모듈에서 import 하도록 전환. 프론트 빌드 정상, 19개 라우트 유지.
 
-### TODO 3-5: Discord/Slack 게이트웨이 서명 검증 추상화 — ⏳ 대기
-- **파일**: `src/gateway/slack.rs:51-87`, `src/gateway/discord.rs`, `src/webhook/mod.rs:44-80`
-- **문제**: 유사한 서명 검증 로직이 3곳에 분산
-- **수정**: `crypto::SignatureVerifier` 트레이트 도입, HMAC/Ed25519 구현체 분리
+### TODO 3-5: Discord/Slack 게이트웨이 서명 검증 추상화 — ✅ `74b2089`
+- **파일**: `src/crypto.rs` (신규), `src/gateway/slack.rs`, `src/gateway/discord.rs`, `src/webhook/mod.rs`
+- **적용**: `crypto::SignatureVerifier` 트레이트 도입 + `SlackHmacVerifier` / `DiscordEd25519Verifier` 구현체. 공용 프리미티브 `constant_time_eq`·`to_hex`·`hmac_sha256_hex`를 crypto 모듈로 이동 (slack + webhook에 중복 존재하던 `constant_time_eq` 제거). `SlackAdapter::verify_slack_signature`·`DiscordAdapter::verify_discord_signature`는 트레이트 위임. `webhook::sign_payload`도 `hmac_sha256_hex` 경유. 유닛 테스트 5종 추가 (`constant_time_eq`, `hmac_sha256_hex`, Slack accept/stale/tampered).
 
-### TODO 3-6: `record_action_event` + `record_node_progress` 쌍 호출 통합 — ⏳ 대기
-- **현재 위치**: `src/orchestrator/node_executor.rs` (build_run_node_fn 내 ~16회)
-- **문제**: 거의 동일한 payload로 두 함수를 연달아 호출하는 패턴 반복
-- **수정**: `record_node_event()` 통합 헬퍼 도입, 내부에서 양쪽 모두 호출
+### TODO 3-6: `record_action_event` + `record_node_progress` 쌍 호출 통합 — ✅ `3775b09`
+- **파일**: `src/memory/mod.rs` (helper 추가), `src/orchestrator/node_executor.rs` (event_sink), `src/orchestrator/mod.rs` (record_node_progress)
+- **적용**: `MemoryManager::record_node_event(run_id, session_id, event_type, action, actor_type, ...)` 헬퍼 신설. 내부에서 `append_event` + `append_run_action_event`를 순차 호출하고 각 실패는 `tracing::warn!`으로 기록. `build_event_sink`에서 25줄 중복 블록 → 11줄 단일 호출. `record_node_progress`도 동일 헬퍼로 재작성.
 
 ---
 
@@ -554,7 +551,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 1. ~~**Phase 1**: Critical Fixes (TODO 1-1 ~ 1-7)~~ — ✅ 완료
 2. ~~**Phase 2**: Core Refactoring (TODO 3-1, 3-2, 3-3)~~ — ✅ 완료
 3. ~~**Phase 3**: Agent Behavior (TODO 2-1 ~ 2-7)~~ — ✅ 완료
-4. **Phase 4**: Remaining Refactoring (TODO 3-4 ~ 3-6) — 중복 제거
+4. ~~**Phase 4**: Remaining Refactoring (TODO 3-4 ~ 3-6)~~ — ✅ 완료
 5. **Phase 5**: Tests (TODO 5-1 ~ 5-6) — 회귀 방지 (Phase 6/7 전 필수)
 6. **Phase 6**: Infrastructure (TODO 4-1 ~ 4-8) — 운영 안정성
 7. **Phase 7**: Performance (TODO 6-1 ~ 6-7) — 최적화
@@ -588,12 +585,13 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | `src/memory/store.rs` | 2,242 | 마이그레이션 시스템(TODO 4-6), 암호화(TODO 4-8) 남음 |
 | `src/memory/mod.rs` | 610 | 단기 메모리 GC(TODO 4-7) 남음 |
 | `src/terminal/mod.rs` | 241 | Phase 1 poisoning 처리 완료 |
-| `web/src/lib/config.ts` | 신규 | API 설정 통합(TODO 3-4) 남음 |
+| `src/crypto.rs` | 208 | Phase 4 신규: SignatureVerifier 트레이트 + HMAC/Ed25519 구현 |
+| `web/src/lib/config.ts` | 8 | Phase 4 신규: 프론트엔드 API 설정 단일 소스 |
 | `web/src/components/agent-thinking.tsx` | ~600 | 이벤트 정렬(TODO 6-4) / phase indicator(TODO 8-2) 남음 |
 
 ---
 
-## 커밋 레퍼런스 (35 commits)
+## 커밋 레퍼런스 (38 commits)
 
 ### Phase 1 Critical Fixes
 - `2171e4e` fix: Mutex poisoning in terminal scrollback
@@ -617,3 +615,8 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - `e155e7c` fix: verify_completion JSON/prefix/keyword + retry
 - `5be251b` fix: classify_task_fallback context-weighted ladder
 - `ada89e5` perf: classify_task fast-path + session cache
+
+### Phase 4 Remaining Refactoring
+- `a1e52f2` refactor: Consolidate frontend API config into lib/config.ts
+- `3775b09` refactor: Collapse paired session + action event writes
+- `74b2089` refactor: Extract signature verification into crypto module
