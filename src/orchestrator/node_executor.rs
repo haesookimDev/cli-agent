@@ -35,8 +35,7 @@ use crate::context::{ContextChunk, ContextKind, ContextScope};
 use crate::runtime::graph::AgentNode;
 use crate::runtime::{EventSink, NodeExecutionResult, RunNodeFn, RuntimeEvent};
 use crate::types::{
-    AgentRole, RunActionType, RunRequest,
-    SessionEvent, SessionEventType,
+    AgentRole, RunActionType, RunRequest, SessionEventType,
 };
 
 impl Orchestrator {
@@ -1905,33 +1904,18 @@ impl Orchestrator {
                     }
                 };
 
-                if let Err(err) = memory
-                    .append_event(SessionEvent {
-                        session_id,
-                        run_id: Some(run_id),
-                        event_type,
-                        timestamp: Utc::now(),
-                        payload: payload.clone(),
-                    })
-                    .await
-                {
-                    tracing::warn!(%run_id, %session_id, "failed to append session event: {}", err);
-                }
-
-                if let Err(err) = memory
-                    .append_run_action_event(
+                memory
+                    .record_node_event(
                         run_id,
                         session_id,
+                        event_type,
                         action,
-                        Some("runtime"),
+                        "runtime",
                         actor_id,
                         None,
                         payload.clone(),
                     )
-                    .await
-                {
-                    tracing::warn!(%run_id, %session_id, "failed to append run action event: {}", err);
-                }
+                    .await;
 
                 if let Err(err) = webhook.dispatch("run.progress", payload).await {
                     tracing::warn!(%run_id, "webhook dispatch failed: {}", err);

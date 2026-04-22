@@ -104,6 +104,59 @@ impl MemoryManager {
             .await
     }
 
+    /// Record a paired session event + run action event with a shared payload.
+    /// Failures are logged but never propagated.
+    pub async fn record_node_event(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        event_type: SessionEventType,
+        action: RunActionType,
+        actor_type: &str,
+        actor_id: Option<&str>,
+        cause_event_id: Option<&str>,
+        payload: serde_json::Value,
+    ) {
+        if let Err(err) = self
+            .append_event(SessionEvent {
+                session_id,
+                run_id: Some(run_id),
+                event_type,
+                timestamp: Utc::now(),
+                payload: payload.clone(),
+            })
+            .await
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                session_id = %session_id,
+                error = %err,
+                "failed to append session event",
+            );
+        }
+
+        if let Err(err) = self
+            .append_run_action_event(
+                run_id,
+                session_id,
+                action,
+                Some(actor_type),
+                actor_id,
+                cause_event_id,
+                payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                session_id = %session_id,
+                action = ?action,
+                error = %err,
+                "failed to append run action event",
+            );
+        }
+    }
+
     pub async fn list_run_action_events(
         &self,
         run_id: Uuid,

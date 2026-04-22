@@ -777,27 +777,18 @@ impl Orchestrator {
             "details": details,
         });
 
-        let _ = self
-            .memory
-            .append_event(SessionEvent {
+        self.memory
+            .record_node_event(
+                run_id,
                 session_id,
-                run_id: Some(run_id),
-                event_type: SessionEventType::RunProgress,
-                timestamp: Utc::now(),
-                payload: payload.clone(),
-            })
+                SessionEventType::RunProgress,
+                RunActionType::NodeProgress,
+                "node",
+                Some(node_id),
+                None,
+                payload,
+            )
             .await;
-
-        self.record_action_event(
-            run_id,
-            session_id,
-            RunActionType::NodeProgress,
-            Some("node"),
-            Some(node_id),
-            None,
-            payload,
-        )
-        .await;
     }
 
 
