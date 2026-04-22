@@ -243,19 +243,23 @@ pub async fn classify_task(
 }
 
 /// Fast keyword-based fallback when LLM classification is unavailable.
+///
+/// Uses a small precedence ladder instead of naive "first-match wins":
+///   1. Explicit external-project markers (URLs, clone).
+///   2. Coding verbs (fix/debug/bug/refactor/…) — these beat config nouns
+///      so "debugging a settings display bug" no longer routes to
+///      Configuration (TODO 2-3).
+///   3. Configuration: needs a config verb ("change", "enable", …) alongside
+///      a config noun ("setting", "model", …), or a config noun with no
+///      coding verb present.
+///   4. Tool operation (only when MCP is registered).
+///   5. Analysis / interactive / simple / complex — by length + keywords.
 pub fn classify_task_fallback(task: &str, has_mcp: bool) -> TaskType {
+    use crate::orchestrator::helpers::contains_word;
+
     let lower = task.to_lowercase();
 
-    let config_kw = ["setting", "config", "model", "provider", "backend"];
-    if config_kw.iter().any(|kw| lower.contains(kw)) {
-        return TaskType::Configuration;
-    }
-    if has_mcp {
-        let tool_kw = ["mcp", "file", "repo", "commit", "branch", "search"];
-        if tool_kw.iter().any(|kw| lower.contains(kw)) {
-            return TaskType::ToolOperation;
-        }
-    }
+    // (1) External project — strongest signal (URL or explicit verb).
     let external_kw = ["clone", "github.com", "gitlab.com", "bitbucket.org"];
     if external_kw.iter().any(|kw| lower.contains(kw))
         || (lower.contains("https://") && lower.contains(".git"))
@@ -263,7 +267,9 @@ pub fn classify_task_fallback(task: &str, has_mcp: bool) -> TaskType {
         return TaskType::ExternalProject;
     }
 
-    let code_kw = [
+    // (2) Coding verbs — beat config nouns so "fix settings bug" stays
+    // classified as CodeGeneration.
+    const CODE_VERBS: &[&str] = &[
         "code",
         "implement",
         "function",
@@ -271,10 +277,48 @@ pub fn classify_task_fallback(task: &str, has_mcp: bool) -> TaskType {
         "bug",
         "fix",
         "debug",
+        "patch",
+        "rewrite",
     ];
-    if code_kw.iter().any(|kw| lower.contains(kw)) {
+    let has_code_verb = CODE_VERBS
+        .iter()
+        .any(|v| contains_word(lower.as_str(), v));
+    if has_code_verb {
         return TaskType::CodeGeneration;
     }
+
+    // (3) Configuration: need either an explicit config verb, or a bare
+    // config noun when no coding verb was found above.
+    const CONFIG_VERBS: &[&str] = &[
+        "change",
+        "update",
+        "set",
+        "enable",
+        "disable",
+        "switch",
+        "toggle",
+        "configure",
+    ];
+    const CONFIG_NOUNS: &[&str] = &["setting", "settings", "config", "provider", "backend"];
+    let has_config_verb = CONFIG_VERBS
+        .iter()
+        .any(|v| contains_word(lower.as_str(), v));
+    let has_config_noun = CONFIG_NOUNS
+        .iter()
+        .any(|n| contains_word(lower.as_str(), n));
+    if has_config_noun && (has_config_verb || has_bare_model_ref(lower.as_str())) {
+        return TaskType::Configuration;
+    }
+
+    // (4) Tool operation — only when an MCP server is registered.
+    if has_mcp {
+        let tool_kw = ["mcp", "file", "repo", "commit", "branch", "search"];
+        if tool_kw.iter().any(|kw| contains_word(lower.as_str(), kw)) {
+            return TaskType::ToolOperation;
+        }
+    }
+
+    // (5) Analysis vs interactive vs simple/complex.
     let analysis_kw = ["analyze", "analysis", "pattern", "compare", "evaluate"];
     if analysis_kw.iter().any(|kw| lower.contains(kw)) {
         return TaskType::Analysis;
@@ -293,6 +337,13 @@ pub fn classify_task_fallback(task: &str, has_mcp: bool) -> TaskType {
         return TaskType::SimpleQuery;
     }
     TaskType::Complex
+}
+
+/// "Show me the current model" → Configuration (a config read). Only true
+/// if `model` appears as a bare noun, not inside words like `modeling`.
+fn has_bare_model_ref(lower: &str) -> bool {
+    use crate::orchestrator::helpers::contains_word;
+    contains_word(lower, "model")
 }
 
 #[cfg(test)]
@@ -327,5 +378,59 @@ mod tests {
     fn empty_input_is_not_a_followup() {
         assert!(!looks_like_follow_up_task(""));
         assert!(!looks_like_follow_up_task("   "));
+    }
+
+    // --- classify_task_fallback (TODO 2-3) ---
+
+    #[test]
+    fn fix_plus_settings_routes_to_code_generation() {
+        // Regression: the TODO's concrete example.
+        assert_eq!(
+            classify_task_fallback("debugging a settings display bug", false),
+            TaskType::CodeGeneration
+        );
+        assert_eq!(
+            classify_task_fallback("fix the settings page crash", false),
+            TaskType::CodeGeneration
+        );
+    }
+
+    #[test]
+    fn change_plus_settings_stays_configuration() {
+        assert_eq!(
+            classify_task_fallback("change the default model setting", false),
+            TaskType::Configuration
+        );
+        assert_eq!(
+            classify_task_fallback("enable the anthropic provider", false),
+            TaskType::Configuration
+        );
+    }
+
+    #[test]
+    fn external_project_url_wins_over_other_keywords() {
+        assert_eq!(
+            classify_task_fallback(
+                "fix something in https://github.com/a/b.git",
+                false
+            ),
+            TaskType::ExternalProject
+        );
+    }
+
+    #[test]
+    fn tool_operation_requires_mcp() {
+        // Without MCP, 'repo' falls through to simple/complex — not
+        // misclassified as ToolOperation.
+        let no_mcp = classify_task_fallback("search the repo", false);
+        assert!(matches!(
+            no_mcp,
+            TaskType::SimpleQuery | TaskType::Complex
+        ));
+        // With MCP, same task is a ToolOperation.
+        assert_eq!(
+            classify_task_fallback("search the repo", true),
+            TaskType::ToolOperation
+        );
     }
 }
