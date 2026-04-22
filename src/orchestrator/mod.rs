@@ -1250,7 +1250,7 @@ impl Orchestrator {
         cause_event_id: Option<&str>,
         payload: serde_json::Value,
     ) {
-        let _ = self
+        if let Err(e) = self
             .memory
             .append_run_action_event(
                 run_id,
@@ -1261,7 +1261,16 @@ impl Orchestrator {
                 cause_event_id,
                 payload,
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                session_id = %session_id,
+                action = ?action,
+                error = %e,
+                "failed to record action event"
+            );
+        }
     }
 
     async fn record_graph_initialized(
