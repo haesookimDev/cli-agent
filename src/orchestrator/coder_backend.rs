@@ -168,10 +168,21 @@ impl CoderBackend for ClaudeCodeBackend {
             }
         });
 
-        let status = tokio::time::timeout(self.timeout, child.wait())
-            .await
-            .map_err(|_| anyhow::anyhow!("coder session timed out after {:?}", self.timeout))?
-            .map_err(|e| anyhow::anyhow!("process wait failed: {e}"))?;
+        let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(anyhow::anyhow!("process wait failed: {e}")),
+            Err(_) => {
+                if let Err(e) = child.kill().await {
+                    tracing::warn!("failed to kill timed-out claude-code process: {e}");
+                }
+                // reap the zombie so the PID is released
+                let _ = child.wait().await;
+                return Err(anyhow::anyhow!(
+                    "coder session timed out after {:?}",
+                    self.timeout
+                ));
+            }
+        };
 
         let stdout_output = stdout_handle.await.unwrap_or_default();
         let _ = stderr_handle.await;
@@ -283,10 +294,21 @@ impl CoderBackend for CodexBackend {
             }
         });
 
-        let status = tokio::time::timeout(self.timeout, child.wait())
-            .await
-            .map_err(|_| anyhow::anyhow!("coder session timed out after {:?}", self.timeout))?
-            .map_err(|e| anyhow::anyhow!("process wait failed: {e}"))?;
+        let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(anyhow::anyhow!("process wait failed: {e}")),
+            Err(_) => {
+                if let Err(e) = child.kill().await {
+                    tracing::warn!("failed to kill timed-out codex process: {e}");
+                }
+                let _ = child.wait().await;
+                let _ = tokio::fs::remove_file(&output_path).await;
+                return Err(anyhow::anyhow!(
+                    "coder session timed out after {:?}",
+                    self.timeout
+                ));
+            }
+        };
 
         let stdout_output = stdout_handle.await.unwrap_or_default();
         let _ = stderr_handle.await;
