@@ -224,16 +224,32 @@ pub fn router(state: ApiState) -> Router {
             "/v1/terminal/sessions/:id/ws",
             get(handlers::terminal::terminal_ws_handler),
         )
-        .route("/v1/cluster/members", get(list_cluster_members_handler))
+        .route(
+            "/v1/cluster/members",
+            get(handlers::cluster::list_cluster_members_handler),
+        )
         .route(
             "/v1/cluster/runs",
-            post(submit_cluster_run_handler).get(list_cluster_runs_handler),
+            post(handlers::cluster::submit_cluster_run_handler)
+                .get(handlers::cluster::list_cluster_runs_handler),
         )
-        .route("/v1/cluster/runs/:cluster_run_id", get(get_cluster_run_handler))
+        .route(
+            "/v1/cluster/runs/:cluster_run_id",
+            get(handlers::cluster::get_cluster_run_handler),
+        )
         // Team & GitHub activity endpoints
-        .route("/v1/team/members", get(list_team_members_handler))
-        .route("/v1/github/activities", get(list_github_activities_handler))
-        .route("/v1/github/activities/stats", get(github_activity_stats_handler))
+        .route(
+            "/v1/team/members",
+            get(handlers::team::list_team_members_handler),
+        )
+        .route(
+            "/v1/github/activities",
+            get(handlers::team::list_github_activities_handler),
+        )
+        .route(
+            "/v1/github/activities/stats",
+            get(handlers::team::github_activity_stats_handler),
+        )
         .with_state(state)
 }
 
@@ -1141,171 +1157,3 @@ async fn handle_run_ws(
     }
 }
 
-// ── Cluster handlers ──────────────────────────────────────────────────────────
-
-async fn list_cluster_members_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))).into_response();
-    }
-    let names = state.cluster.member_names();
-    Json(serde_json::json!({ "members": names })).into_response()
-}
-
-async fn submit_cluster_run_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, body.as_ref()) {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))).into_response();
-    }
-    let req: ClusterRunRequest = match serde_json::from_slice(body.as_ref()) {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response();
-        }
-    };
-    match state.cluster.submit(req).await {
-        Ok(record) => (StatusCode::CREATED, Json(serde_json::json!(record))).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-async fn list_cluster_runs_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(q): Query<ListQuery>,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))).into_response();
-    }
-    let runs = state.cluster.list(q.limit.unwrap_or(20));
-    Json(serde_json::json!({ "cluster_runs": runs })).into_response()
-}
-
-async fn get_cluster_run_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(cluster_run_id): Path<Uuid>,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))).into_response();
-    }
-    match state.cluster.get(cluster_run_id) {
-        Some(record) => Json(serde_json::json!(record)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "cluster run not found"})),
-        )
-            .into_response(),
-    }
-}
-
-// --- Team & GitHub Activity handlers ---
-
-async fn list_team_members_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
-    }
-
-    // Load team agent definitions from agents/team/ directory.
-    let team_dir = std::path::Path::new("agents/team");
-    let members = crate::agents::agent_loader::load_agents_from_dir(team_dir).await;
-
-    let result: Vec<serde_json::Value> = members
-        .into_iter()
-        .map(|def| {
-            let mut val = serde_json::json!({
-                "name": def.name,
-                "description": def.description,
-                "role": def.role.to_string(),
-                "task_profile": def.task_profile.to_string(),
-                "capabilities": def.capabilities,
-            });
-            if let Some(persona) = &def.persona {
-                val["persona"] = serde_json::to_value(persona).unwrap_or_default();
-            }
-            val
-        })
-        .collect();
-
-    (StatusCode::OK, Json(serde_json::json!(result)))
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubActivityQuery {
-    persona: Option<String>,
-    run_id: Option<String>,
-    limit: Option<i64>,
-}
-
-async fn list_github_activities_handler(
-    State(state): State<ApiState>,
-    Query(query): Query<GitHubActivityQuery>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
-    }
-
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    match state
-        .orchestrator
-        .memory()
-        .store()
-        .list_github_activities(query.persona.as_deref(), query.run_id.as_deref(), limit)
-        .await
-    {
-        Ok(activities) => (StatusCode::OK, Json(serde_json::json!(activities))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
-}
-
-async fn github_activity_stats_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
-    }
-
-    match state
-        .orchestrator
-        .memory()
-        .store()
-        .github_activity_stats()
-        .await
-    {
-        Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
-}
