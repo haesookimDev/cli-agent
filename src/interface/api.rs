@@ -2508,7 +2508,7 @@ async fn handle_terminal_ws(socket: WebSocket, session: Arc<crate::terminal::Ter
     // that no output is duplicated or lost between the snapshot and the live
     // event stream.
     let (scrollback_snapshot, mut events) = {
-        let sb = session.scrollback.lock().unwrap();
+        let sb = session.scrollback.lock().unwrap_or_else(|e| e.into_inner());
         let rx = session.events.subscribe();
         (sb.clone(), rx)
     };

@@ -140,7 +140,7 @@ impl TerminalManager {
                             let data = buf[..n].to_vec();
                             // Hold scrollback lock while appending AND broadcasting
                             // so that a new WS subscriber cannot slip in between.
-                            let mut sb = scrollback.lock().unwrap();
+                            let mut sb = scrollback.lock().unwrap_or_else(|e| e.into_inner());
                             sb.extend_from_slice(&data);
                             if sb.len() > MAX_SCROLLBACK {
                                 let excess = sb.len() - MAX_SCROLLBACK;
