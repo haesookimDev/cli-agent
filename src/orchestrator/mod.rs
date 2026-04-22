@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod coder_backend;
+pub mod context_builder;
 pub mod git_manager;
 pub mod helpers;
 pub mod interactive;
@@ -11,13 +12,15 @@ pub mod task_classifier;
 pub mod tool_augment;
 pub mod validator;
 
+use context_builder::{
+    build_memory_query, build_recent_history_chunks, build_recent_run_summary, trim_for_context,
+};
 use helpers::{
     clean_llm_output, extract_json_object, extract_repo_url_from_text, format_tool_catalog,
     parse_agent_role, parse_tool_calls, summarize_selector_output,
 };
 use task_classifier::{
     classify_task, classify_task_fallback, is_continuation_command, is_local_workspace_task,
-    looks_like_follow_up_task,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1211,7 +1214,7 @@ impl Orchestrator {
                     "[{}:{}]\n{}",
                     r.node_id,
                     r.role,
-                    Self::trim_for_context(r.output.as_str(), 700)
+                    trim_for_context(r.output.as_str(), 700)
                 )
             })
             .collect::<Vec<_>>()
@@ -1262,9 +1265,9 @@ impl Orchestrator {
                  - If an agent failed due to a transient error, retry it with clearer instructions.\n\
                  - If an agent failed due to a design flaw, replace it with a different approach.\n\
                  - Do not wrap the JSON in markdown fences.",
-                Self::trim_for_context(original_task, 1000),
-                Self::trim_for_context(&failed_summary, 800),
-                Self::trim_for_context(&success_summary, 3000),
+                trim_for_context(original_task, 1000),
+                trim_for_context(&failed_summary, 800),
+                trim_for_context(&success_summary, 3000),
             ),
         );
         planner.policy = ExecutionPolicy {
@@ -1311,9 +1314,9 @@ impl Orchestrator {
                  - Reuse the smallest set of sub-agents needed to fully complete the request.\n\
                  - If only one focused step remains, still return a single-item subtasks array.\n\
                  - Do not wrap the JSON in markdown fences.{}",
-                Self::trim_for_context(original_task, 1000),
-                Self::trim_for_context(incomplete_reason, 600),
-                Self::trim_for_context(prior_summary.as_str(), 4000),
+                trim_for_context(original_task, 1000),
+                trim_for_context(incomplete_reason, 600),
+                trim_for_context(prior_summary.as_str(), 4000),
                 local_first_hint,
             ),
         );
@@ -1743,13 +1746,13 @@ impl Orchestrator {
                     tracing::warn!(
                         run_id = %run_id,
                         "Reviewer returned ambiguous output (neither COMPLETE nor INCOMPLETE): {}",
-                        Self::trim_for_context(content, 240)
+                        trim_for_context(content, 240)
                     );
                     (
                         false,
                         format!(
                             "Ambiguous reviewer response: {}",
-                            Self::trim_for_context(content, 240)
+                            trim_for_context(content, 240)
                         ),
                     )
                 }
@@ -1776,115 +1779,6 @@ impl Orchestrator {
         .await;
 
         (is_complete, reason)
-    }
-
-    fn build_memory_query(
-        current_task: &str,
-        recent_messages: &[(i64, String, String, String)],
-    ) -> String {
-        let current = current_task.trim();
-        if current.is_empty() {
-            return String::new();
-        }
-
-        if !looks_like_follow_up_task(current) {
-            return current.to_string();
-        }
-
-        let previous_user_message =
-            recent_messages
-                .iter()
-                .rev()
-                .find_map(|(_, role, content, _)| {
-                    if role == "user" && content.trim() != current {
-                        Some(content.trim().to_string())
-                    } else {
-                        None
-                    }
-                });
-
-        match previous_user_message {
-            Some(prev) if !prev.is_empty() => format!("{current} {prev}"),
-            _ => current.to_string(),
-        }
-    }
-
-    fn build_recent_history_chunks(
-        recent_messages: &[(i64, String, String, String)],
-        current_task: &str,
-    ) -> Vec<ContextChunk> {
-        let current = current_task.trim();
-        let mut selected = Vec::new();
-
-        for (_, role, content, _) in recent_messages.iter().rev() {
-            if role != "user" {
-                continue;
-            }
-            let trimmed = content.trim();
-            if trimmed.is_empty() || trimmed == current {
-                continue;
-            }
-            selected.push(trimmed.to_string());
-            if selected.len() >= 4 {
-                break;
-            }
-        }
-
-        selected.reverse();
-        selected
-            .into_iter()
-            .enumerate()
-            .map(|(idx, content)| ContextChunk {
-                id: format!("history-user-{idx}"),
-                scope: ContextScope::SessionShared,
-                kind: ContextKind::History,
-                content: format!("Previous user message: {content}"),
-                priority: 0.75 - (idx as f64 * 0.03),
-            })
-            .collect()
-    }
-
-    fn build_recent_run_summary(current_run_id: Uuid, runs: &[RunRecord]) -> Option<String> {
-        let previous = runs
-            .iter()
-            .find(|run| run.run_id != current_run_id && !run.outputs.is_empty())?;
-
-        let primary_output = previous
-            .outputs
-            .iter()
-            .find(|o| o.role == AgentRole::Summarizer && !o.output.trim().is_empty())
-            .or_else(|| {
-                previous
-                    .outputs
-                    .iter()
-                    .find(|o| !o.output.trim().is_empty())
-            })?;
-
-        Some(format!(
-            "Previous run task: {}\nPrevious run outcome: {}",
-            Self::trim_for_context(previous.task.as_str(), 220),
-            Self::trim_for_context(primary_output.output.as_str(), 420)
-        ))
-    }
-
-    fn trim_for_context(text: &str, max_chars: usize) -> String {
-        let normalized = text.trim();
-        if normalized.chars().count() <= max_chars {
-            return normalized.to_string();
-        }
-
-        let head_len = max_chars / 2;
-        let tail_len = max_chars.saturating_sub(head_len);
-        let head = normalized.chars().take(head_len).collect::<String>();
-        let tail = normalized
-            .chars()
-            .rev()
-            .take(tail_len)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>();
-        format!("{head}\n... [trimmed] ...\n{tail}")
     }
 
 
@@ -1997,7 +1891,7 @@ impl Orchestrator {
             format!(
                 "{}\n\nPREVIOUS PLAN (from prior run in this session — continue execution from here):\n{}",
                 planner_instructions,
-                Self::trim_for_context(prev_plan, 800)
+                trim_for_context(prev_plan, 800)
             )
         } else {
             planner_instructions
@@ -3477,8 +3371,8 @@ impl Orchestrator {
                     .await
                     .unwrap_or_default();
                 let mut recent_history_chunks =
-                    Self::build_recent_history_chunks(&recent_messages, req.task.as_str());
-                let memory_query = Self::build_memory_query(req.task.as_str(), &recent_messages);
+                    build_recent_history_chunks(&recent_messages, req.task.as_str());
+                let memory_query = build_memory_query(req.task.as_str(), &recent_messages);
                 let memory_hits = memory
                     .retrieve(session_id, memory_query.as_str(), 8)
                     .await
@@ -3488,7 +3382,7 @@ impl Orchestrator {
                     .await
                     .unwrap_or_default();
                 let recent_runs = memory.list_session_runs(session_id, 4).await.unwrap_or_default();
-                let recent_run_summary = Self::build_recent_run_summary(run_id, &recent_runs);
+                let recent_run_summary = build_recent_run_summary(run_id, &recent_runs);
                 let local_workspace_task = is_local_workspace_task(req.task.as_str());
 
                 let mut chunks = vec![
