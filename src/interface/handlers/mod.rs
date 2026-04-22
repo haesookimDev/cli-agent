@@ -8,5 +8,6 @@ pub mod memory;
 pub mod schedules;
 pub mod settings;
 pub mod skills;
+pub mod terminal;
 pub mod webhooks;
 pub mod workflows;
