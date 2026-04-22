@@ -2826,15 +2826,14 @@ impl Orchestrator {
                         });
 
                     let Some(url) = repo_url else {
-                        return Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
-                            model: "repo_analyzer".to_string(),
-                            output: "No repository URL found in request or planner output".to_string(),
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: false,
-                            error: Some("missing repo_url".to_string()),
-                        });
+                        return Ok(NodeExecutionResult::failure_with_output(
+                            node.id,
+                            node.role,
+                            "repo_analyzer",
+                            "No repository URL found in request or planner output".to_string(),
+                            "missing repo_url",
+                            started,
+                        ));
                     };
 
                     orchestrator
@@ -2857,15 +2856,14 @@ impl Orchestrator {
                     {
                         Ok(dir) => dir,
                         Err(e) => {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "repo_analyzer".to_string(),
-                                output: format!("Session workspace setup failed: {}", e),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(format!("workspace setup failed: {}", e)),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "repo_analyzer",
+                                format!("Session workspace setup failed: {}", e),
+                                format!("workspace setup failed: {}", e),
+                                started,
+                            ));
                         }
                     };
 
@@ -2894,15 +2892,14 @@ impl Orchestrator {
                     {
                         Ok(path) => path,
                         Err(e) => {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "repo_analyzer".to_string(),
-                                output: format!("Clone failed: {}", e),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(format!("clone failed: {}", e)),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "repo_analyzer",
+                                format!("Clone failed: {}", e),
+                                format!("clone failed: {}", e),
+                                started,
+                            ));
                         }
                     };
 
@@ -2970,26 +2967,23 @@ impl Orchestrator {
                             });
                             let output = serde_json::to_string(&analysis).unwrap_or_default();
                             repo_analyses.insert(run_id, analysis);
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "repo_analyzer".to_string(),
+                            return Ok(NodeExecutionResult::success(
+                                node.id,
+                                node.role,
+                                "repo_analyzer",
                                 output,
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: true,
-                                error: None,
-                            });
+                                started,
+                            ));
                         }
                         Err(e) => {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "repo_analyzer".to_string(),
-                                output: format!("Analysis failed: {}", e),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(e.to_string()),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "repo_analyzer",
+                                format!("Analysis failed: {}", e),
+                                e.to_string(),
+                                started,
+                            ));
                         }
                     }
                 }
@@ -3005,15 +2999,14 @@ impl Orchestrator {
                     {
                         Ok(dir) => dir,
                         Err(e) => {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "validator".to_string(),
-                                output: format!("Session workspace setup failed: {}", e),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(format!("workspace setup failed: {}", e)),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "validator",
+                                format!("Session workspace setup failed: {}", e),
+                                format!("workspace setup failed: {}", e),
+                                started,
+                            ));
                         }
                     };
                     let instructions = node.instructions.as_str();
@@ -3068,15 +3061,14 @@ impl Orchestrator {
                         use crate::orchestrator::git_manager::GitManager;
 
                         if !GitManager::is_git_repo(&working_dir).await {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "git".to_string(),
-                                output: "Not a git repository".to_string(),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some("working directory is not a git repository".to_string()),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "git",
+                                "Not a git repository".to_string(),
+                                "working directory is not a git repository",
+                                started,
+                            ));
                         }
 
                         let stashed = if validation_config.git_protect_dirty {
@@ -3095,15 +3087,14 @@ impl Orchestrator {
                         }
 
                         if let Err(e) = GitManager::stage_all(&working_dir).await {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "git".to_string(),
-                                output: format!("git stage failed: {e}"),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(e.to_string()),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "git",
+                                format!("git stage failed: {e}"),
+                                e.to_string(),
+                                started,
+                            ));
                         }
 
                         let diff = GitManager::staged_diff(&working_dir)
@@ -3125,15 +3116,14 @@ impl Orchestrator {
                                 if stashed {
                                     let _ = GitManager::stash_pop(&working_dir).await;
                                 }
-                                return Ok(NodeExecutionResult {
-                                    node_id: node.id,
-                                    role: node.role,
-                                    model: "git".to_string(),
-                                    output: format!("git commit failed: {e}"),
-                                    duration_ms: started.elapsed().as_millis(),
-                                    succeeded: false,
-                                    error: Some(e.to_string()),
-                                });
+                                return Ok(NodeExecutionResult::failure_with_output(
+                                    node.id,
+                                    node.role,
+                                    "git",
+                                    format!("git commit failed: {e}"),
+                                    e.to_string(),
+                                    started,
+                                ));
                             }
                         };
 
@@ -3159,20 +3149,18 @@ impl Orchestrator {
                             pushed,
                         });
 
-                        return Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
-                            model: "git".to_string(),
-                            output: serde_json::json!({
+                        return Ok(NodeExecutionResult::success(
+                            node.id,
+                            node.role,
+                            "git",
+                            serde_json::json!({
                                 "commit_hash": commit_hash,
                                 "commit_message": commit_msg,
                                 "pushed": pushed,
                             })
                             .to_string(),
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: true,
-                            error: None,
-                        });
+                            started,
+                        ));
                     }
 
                     // External project validation: use detected commands from repo analysis
@@ -3187,15 +3175,13 @@ impl Orchestrator {
                             };
 
                             if commands.is_empty() {
-                                return Ok(NodeExecutionResult {
-                                    node_id: node.id,
-                                    role: node.role,
-                                    model: "validator".to_string(),
-                                    output: "No commands detected for this phase".to_string(),
-                                    duration_ms: started.elapsed().as_millis(),
-                                    succeeded: true,
-                                    error: None,
-                                });
+                                return Ok(NodeExecutionResult::success(
+                                    node.id,
+                                    node.role,
+                                    "validator",
+                                    "No commands detected for this phase".to_string(),
+                                    started,
+                                ));
                             }
 
                             let results = validator::CommandRunner::run_commands(&commands, &working_dir, timeout).await;
@@ -3219,15 +3205,13 @@ impl Orchestrator {
                                 error: if all_passed { None } else { Some("external validation failed".to_string()) },
                             });
                         } else {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "validator".to_string(),
-                                output: "No repo analysis available".to_string(),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: true,
-                                error: None,
-                            });
+                            return Ok(NodeExecutionResult::success(
+                                node.id,
+                                node.role,
+                                "validator",
+                                "No repo analysis available".to_string(),
+                                started,
+                            ));
                         }
                     }
 
@@ -3296,15 +3280,14 @@ impl Orchestrator {
                     match orchestrator.resolve_run_cli_working_dir(session_id, run_id).await {
                         Ok(dir) => dir,
                         Err(e) => {
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "workspace".to_string(),
-                                output: format!("Session workspace setup failed: {}", e),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(format!("workspace setup failed: {}", e)),
-                            });
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "workspace",
+                                format!("Session workspace setup failed: {}", e),
+                                format!("workspace setup failed: {}", e),
+                                started,
+                            ));
                         }
                     };
 
@@ -3345,15 +3328,14 @@ impl Orchestrator {
                         skill_loader::filter_tools_for_node(&all_tools, &node.mcp_tools)
                     };
                     if available_tools.is_empty() {
-                        return Ok(NodeExecutionResult {
-                            node_id: node.id,
-                            role: node.role,
-                            model: "mcp:none".to_string(),
-                            output: "No MCP tools are available for this tool-caller node".to_string(),
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: false,
-                            error: Some("No allowed MCP tools available".to_string()),
-                        });
+                        return Ok(NodeExecutionResult::failure_with_output(
+                            node.id,
+                            node.role,
+                            "mcp:none",
+                            "No MCP tools are available for this tool-caller node".to_string(),
+                            "No allowed MCP tools available",
+                            started,
+                        ));
                     }
 
                     orchestrator
@@ -3560,17 +3542,16 @@ impl Orchestrator {
                                 (model, output.content)
                             }
                             Err(err) => {
-                                return Ok(NodeExecutionResult {
-                                    node_id: node.id,
-                                    role: node.role,
-                                    model: "unavailable".to_string(),
-                                    output: all_results.join("\n---\n"),
-                                    duration_ms: started.elapsed().as_millis(),
-                                    succeeded: false,
-                                    error: Some(format!(
+                                return Ok(NodeExecutionResult::failure_with_output(
+                                    node.id,
+                                    node.role,
+                                    "unavailable",
+                                    all_results.join("\n---\n"),
+                                    format!(
                                         "LLM tool selection failed at iteration {iteration}: {err}"
-                                    )),
-                                });
+                                    ),
+                                    started,
+                                ));
                             }
                         };
 
@@ -3646,21 +3627,20 @@ impl Orchestrator {
                                 break;
                             }
                             // No prior results — this is a failure
-                            return Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: "mcp:none".to_string(),
-                                output: format!(
+                            return Ok(NodeExecutionResult::failure_with_output(
+                                node.id,
+                                node.role,
+                                "mcp:none",
+                                format!(
                                     "No executable tool calls were parsed.\nRaw selector output:\n{}",
                                     llm_output
                                 ),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(format!(
+                                format!(
                                     "No executable tool calls were parsed from LLM output. Selector output preview: {}",
                                     summarize_selector_output(&llm_output)
-                                )),
-                            });
+                                ),
+                                started,
+                            ));
                         }
 
                         // Execute tool calls for this iteration
@@ -3866,21 +3846,14 @@ impl Orchestrator {
                                 {
                                     Ok(dir) => dir,
                                     Err(e) => {
-                                        return Ok(NodeExecutionResult {
-                                            node_id: node.id,
-                                            role: node.role,
-                                            model: backend_kind.to_string(),
-                                            output: format!(
-                                                "Session workspace setup failed: {}",
-                                                e
-                                            ),
-                                            duration_ms: started.elapsed().as_millis(),
-                                            succeeded: false,
-                                            error: Some(format!(
-                                                "workspace setup failed: {}",
-                                                e
-                                            )),
-                                        });
+                                        return Ok(NodeExecutionResult::failure_with_output(
+                                            node.id,
+                                            node.role,
+                                            backend_kind.to_string(),
+                                            format!("Session workspace setup failed: {}", e),
+                                            format!("workspace setup failed: {}", e),
+                                            started,
+                                        ));
                                     }
                                 };
                                 (working_dir, node_task)
@@ -3924,15 +3897,13 @@ impl Orchestrator {
                                     },
                                 })
                             }
-                            Err(err) => Ok(NodeExecutionResult {
-                                node_id: node.id,
-                                role: node.role,
-                                model: format!("coder:{}", backend_kind),
-                                output: String::new(),
-                                duration_ms: started.elapsed().as_millis(),
-                                succeeded: false,
-                                error: Some(err.to_string()),
-                            }),
+                            Err(err) => Ok(NodeExecutionResult::failure(
+                                node.id,
+                                node.role,
+                                format!("coder:{}", backend_kind),
+                                err.to_string(),
+                                started,
+                            )),
                         };
                     }
                 }
@@ -4293,25 +4264,21 @@ impl Orchestrator {
                             )
                             .await;
 
-                        Ok(NodeExecutionResult {
+                        Ok(NodeExecutionResult::success(
                             node_id,
                             role,
-                            model: current_model,
-                            output: current_output,
-                            duration_ms: started.elapsed().as_millis(),
-                            succeeded: true,
-                            error: None,
-                        })
+                            current_model,
+                            current_output,
+                            started,
+                        ))
                     }
-                    Err(err) => Ok(NodeExecutionResult {
-                        node_id: node.id,
-                        role: node.role,
-                        model: "unavailable".to_string(),
-                        output: String::new(),
-                        duration_ms: started.elapsed().as_millis(),
-                        succeeded: false,
-                        error: Some(err.to_string()),
-                    }),
+                    Err(err) => Ok(NodeExecutionResult::failure(
+                        node.id,
+                        node.role,
+                        "unavailable",
+                        err.to_string(),
+                        started,
+                    )),
                 }
             }
             .boxed()

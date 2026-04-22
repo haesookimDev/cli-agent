@@ -23,6 +23,68 @@ pub struct NodeExecutionResult {
     pub error: Option<String>,
 }
 
+impl NodeExecutionResult {
+    /// Build a successful result, stamping duration_ms from `started`.
+    pub fn success(
+        node_id: String,
+        role: AgentRole,
+        model: impl Into<String>,
+        output: String,
+        started: std::time::Instant,
+    ) -> Self {
+        Self {
+            node_id,
+            role,
+            model: model.into(),
+            output,
+            duration_ms: started.elapsed().as_millis(),
+            succeeded: true,
+            error: None,
+        }
+    }
+
+    /// Build a failed result with an empty output. Callers that need a custom
+    /// output on failure should use `failure_with_output`.
+    pub fn failure(
+        node_id: String,
+        role: AgentRole,
+        model: impl Into<String>,
+        error: impl Into<String>,
+        started: std::time::Instant,
+    ) -> Self {
+        Self {
+            node_id,
+            role,
+            model: model.into(),
+            output: String::new(),
+            duration_ms: started.elapsed().as_millis(),
+            succeeded: false,
+            error: Some(error.into()),
+        }
+    }
+
+    /// Build a failed result that carries a human-readable output message in
+    /// addition to the error string.
+    pub fn failure_with_output(
+        node_id: String,
+        role: AgentRole,
+        model: impl Into<String>,
+        output: String,
+        error: impl Into<String>,
+        started: std::time::Instant,
+    ) -> Self {
+        Self {
+            node_id,
+            role,
+            model: model.into(),
+            output,
+            duration_ms: started.elapsed().as_millis(),
+            succeeded: false,
+            error: Some(error.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEvent {
