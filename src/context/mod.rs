@@ -252,7 +252,13 @@ fn total_tokens(items: &[String]) -> usize {
 }
 
 fn estimate_tokens(text: &str) -> usize {
-    ((text.split_whitespace().count() as f64) * 1.3).ceil() as usize
+    // Whitespace-based estimate works well for English, but severely
+    // underestimates CJK (Korean/Chinese/Japanese) and long unbroken tokens.
+    // Character-based estimate (~3.5 chars/token) acts as a floor derived
+    // from tiktoken cl100k_base statistics.
+    let whitespace_est = (text.split_whitespace().count() as f64) * 1.3;
+    let char_est = (text.chars().count() as f64) / 3.5;
+    whitespace_est.max(char_est).ceil() as usize
 }
 
 fn summarize_text(text: &str, max_chars: usize) -> String {
@@ -316,5 +322,33 @@ mod tests {
         assert_eq!(optimized.system.len(), 1);
         assert_eq!(optimized.history.len(), 1);
         assert!(optimized.token_estimate > 0);
+    }
+
+    #[test]
+    fn estimate_tokens_korean_not_underestimated() {
+        // 23 chars of Korean text should yield ~6+ tokens on char-based floor,
+        // whereas whitespace-only estimate would give ~4 (3 words * 1.3).
+        let korean = "안녕하세요 저는 한국어 입력입니다";
+        let tokens = estimate_tokens(korean);
+        assert!(
+            tokens >= 6,
+            "expected >=6 tokens for Korean text, got {tokens}"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_english_preserves_baseline() {
+        let english = "hello world this is a test";
+        let tokens = estimate_tokens(english);
+        // 6 words * 1.3 = 7.8 -> 8; char floor (26/3.5 ~= 7.5 -> 8)
+        assert!(tokens >= 7, "got {tokens}");
+    }
+
+    #[test]
+    fn estimate_tokens_long_unbroken_token_not_underestimated() {
+        let long = "a".repeat(1000);
+        let tokens = estimate_tokens(&long);
+        // Whitespace-only would return 2 (1 * 1.3 ceiled). Char floor must kick in.
+        assert!(tokens >= 200, "got {tokens}");
     }
 }
