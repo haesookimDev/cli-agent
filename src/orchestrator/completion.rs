@@ -13,8 +13,7 @@ use futures::FutureExt;
 use uuid::Uuid;
 
 use super::Orchestrator;
-use super::context_builder::trim_for_context;
-use super::helpers::extract_json_object;
+use super::helpers::{contains_word, extract_json_object};
 use super::{DYNAMIC_SUBTASK_MAX_PARALLELISM, MAX_DYNAMIC_SUBTASKS_PER_PLAN};
 
 use crate::runtime::graph::{AgentNode, DependencyFailurePolicy, ExecutionPolicy};
@@ -53,61 +52,46 @@ impl Orchestrator {
             .collect::<Vec<_>>()
             .join("\n---\n");
 
-        let review_input = crate::agents::AgentInput {
-            task: format!(
-                "Original request: {}\n\nExecution results:\n{}\n\nDid the execution fully satisfy the original request? Answer COMPLETE if yes, or INCOMPLETE: <reason> if not.",
-                original_task, outputs_summary
-            ),
-            instructions: "Review the execution results against the original request.".to_string(),
-            context: crate::context::OptimizedContext::empty(),
-            dependency_outputs: vec![],
-            brief: crate::types::StructuredBrief {
-                goal: format!("Verify completion of: {}", original_task),
-                constraints: vec![],
-                decisions: vec![],
-                references: vec![],
-            },
-            working_dir: match self.resolve_run_cli_working_dir(session_id, run_id).await {
-                Ok(dir) => Some(dir),
-                Err(err) => {
-                    tracing::warn!("failed to resolve reviewer CLI working dir: {err}");
-                    None
-                }
-            },
-        };
-
-        let review_result = self
-            .agents
-            .run_role(AgentRole::Reviewer, review_input, self.router.clone(), None)
-            .await;
-
-        let (is_complete, reason) = match &review_result {
-            Ok(output) => {
-                let content = output.content.trim();
-                if content.starts_with("COMPLETE") {
-                    (true, "Verified complete".to_string())
-                } else if content.starts_with("INCOMPLETE") {
-                    let reason = content
-                        .strip_prefix("INCOMPLETE:")
-                        .unwrap_or(content)
-                        .trim()
-                        .to_string();
-                    (false, reason)
-                } else {
+        // First attempt: ask for a structured JSON verdict with prefix fallback.
+        let (is_complete, reason) = match self
+            .run_reviewer(run_id, session_id, original_task, &outputs_summary, false)
+            .await
+        {
+            Ok(verdict) => match verdict {
+                VerificationVerdict::Complete => (true, "Verified complete".to_string()),
+                VerificationVerdict::Incomplete(reason) => (false, reason),
+                VerificationVerdict::Ambiguous(preview) => {
+                    // Retry once with a stricter JSON-only prompt before giving up.
                     tracing::warn!(
                         run_id = %run_id,
-                        "Reviewer returned ambiguous output (neither COMPLETE nor INCOMPLETE): {}",
-                        trim_for_context(content, 240)
+                        "Reviewer returned ambiguous output; retrying with strict JSON prompt: {}",
+                        preview
                     );
-                    (
-                        false,
-                        format!(
-                            "Ambiguous reviewer response: {}",
-                            trim_for_context(content, 240)
+                    match self
+                        .run_reviewer(
+                            run_id,
+                            session_id,
+                            original_task,
+                            &outputs_summary,
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(VerificationVerdict::Complete) => {
+                            (true, "Verified complete (on retry)".to_string())
+                        }
+                        Ok(VerificationVerdict::Incomplete(reason)) => (false, reason),
+                        Ok(VerificationVerdict::Ambiguous(retry_preview)) => (
+                            false,
+                            format!(
+                                "Ambiguous reviewer response after retry: {}",
+                                retry_preview
+                            ),
                         ),
-                    )
+                        Err(e) => (false, format!("Reviewer unavailable on retry: {e}")),
+                    }
                 }
-            }
+            },
             Err(e) => (false, format!("Reviewer unavailable: {e}")),
         };
 
@@ -126,6 +110,65 @@ impl Orchestrator {
         .await;
 
         (is_complete, reason)
+    }
+
+    /// Run the Reviewer agent once. `strict` requests JSON-only output with
+    /// no surrounding prose — used on the retry after the first response was
+    /// ambiguous.
+    async fn run_reviewer(
+        &self,
+        run_id: Uuid,
+        session_id: Uuid,
+        original_task: &str,
+        outputs_summary: &str,
+        strict: bool,
+    ) -> anyhow::Result<VerificationVerdict> {
+        let prompt = if strict {
+            format!(
+                "Original request: {}\n\nExecution results:\n{}\n\n\
+                 Respond with ONLY a single JSON object and no other text, like:\n\
+                 {{\"status\": \"complete\", \"reason\": \"...\"}} or \
+                 {{\"status\": \"incomplete\", \"reason\": \"...\"}}. \
+                 No markdown fences, no explanation.",
+                original_task, outputs_summary
+            )
+        } else {
+            format!(
+                "Original request: {}\n\nExecution results:\n{}\n\n\
+                 Did the execution fully satisfy the original request? \
+                 Reply as JSON: {{\"status\": \"complete\"|\"incomplete\", \"reason\": \"...\"}}. \
+                 If your runtime can't produce JSON, fall back to the literal prefix \
+                 \"COMPLETE\" or \"INCOMPLETE: <reason>\".",
+                original_task, outputs_summary
+            )
+        };
+
+        let review_input = crate::agents::AgentInput {
+            task: prompt,
+            instructions: "Review the execution results against the original request.".to_string(),
+            context: crate::context::OptimizedContext::empty(),
+            dependency_outputs: vec![],
+            brief: crate::types::StructuredBrief {
+                goal: format!("Verify completion of: {}", original_task),
+                constraints: vec![],
+                decisions: vec![],
+                references: vec![],
+            },
+            working_dir: match self.resolve_run_cli_working_dir(session_id, run_id).await {
+                Ok(dir) => Some(dir),
+                Err(err) => {
+                    tracing::warn!("failed to resolve reviewer CLI working dir: {err}");
+                    None
+                }
+            },
+        };
+
+        let output = self
+            .agents
+            .run_role(AgentRole::Reviewer, review_input, self.router.clone(), None)
+            .await?;
+
+        Ok(parse_reviewer_verdict(output.content.as_str()))
     }
 
     pub(super) fn inject_git_and_summarize(
@@ -609,5 +652,170 @@ impl Orchestrator {
             }
             .boxed()
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VerificationVerdict {
+    Complete,
+    Incomplete(String),
+    /// Parser couldn't extract a clear verdict. Carries a preview of the raw
+    /// response for logging / retry prompts.
+    Ambiguous(String),
+}
+
+/// Parse Reviewer output into a structured verdict. Tries in order:
+///   1. JSON object with `status: "complete"|"incomplete"` and optional `reason`.
+///   2. Literal prefix `COMPLETE` / `INCOMPLETE: …`.
+///   3. Keyword scan using word-boundary matching.
+///
+/// Returns `Ambiguous` if none of these match, letting the caller retry or
+/// surface the raw preview in the UI.
+fn parse_reviewer_verdict(raw: &str) -> VerificationVerdict {
+    let content = raw.trim();
+    let preview: String = content.chars().take(240).collect();
+    if content.is_empty() {
+        return VerificationVerdict::Ambiguous(String::from("<empty>"));
+    }
+
+    // (1) Try structured JSON.
+    let json_candidate = extract_json_object(content).unwrap_or(content);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_candidate) {
+        if let Some(status_raw) = value.get("status").and_then(|s| s.as_str()) {
+            let reason = value
+                .get("reason")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let status = status_raw.trim().to_lowercase();
+            match status.as_str() {
+                "complete" | "completed" | "success" | "satisfied" | "done" => {
+                    return VerificationVerdict::Complete;
+                }
+                "incomplete" | "not_complete" | "fail" | "failed" | "not_done" => {
+                    return VerificationVerdict::Incomplete(if reason.is_empty() {
+                        "No reason provided".to_string()
+                    } else {
+                        reason
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // (2) Literal prefix match (historical protocol).
+    if content.starts_with("COMPLETE") {
+        return VerificationVerdict::Complete;
+    }
+    if content.starts_with("INCOMPLETE") {
+        let reason = content
+            .strip_prefix("INCOMPLETE:")
+            .unwrap_or(content.strip_prefix("INCOMPLETE").unwrap_or(content))
+            .trim()
+            .to_string();
+        return VerificationVerdict::Incomplete(if reason.is_empty() {
+            "No reason provided".to_string()
+        } else {
+            reason
+        });
+    }
+
+    // (3) Keyword scan as a last resort. Negation phrases ("not complete")
+    // take precedence over the bare "complete" word because they're the more
+    // specific statement about the outcome.
+    let lower = content.to_lowercase();
+    let has_incomplete_phrase = [
+        "incomplete",
+        "not satisfied",
+        "not complete",
+        "not done",
+        "missing",
+    ]
+    .iter()
+    .any(|m| lower.contains(m));
+    if has_incomplete_phrase {
+        return VerificationVerdict::Incomplete(preview);
+    }
+    let has_complete = ["complete", "completed", "satisfied", "success"]
+        .iter()
+        .any(|m| contains_word(lower.as_str(), m));
+    if has_complete {
+        return VerificationVerdict::Complete;
+    }
+    VerificationVerdict::Ambiguous(preview)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_structured_json_complete() {
+        let v = parse_reviewer_verdict(r#"{"status": "complete", "reason": "all good"}"#);
+        assert_eq!(v, VerificationVerdict::Complete);
+    }
+
+    #[test]
+    fn parses_structured_json_incomplete_with_reason() {
+        let v = parse_reviewer_verdict(
+            r#"{"status": "incomplete", "reason": "tests still failing"}"#,
+        );
+        assert_eq!(
+            v,
+            VerificationVerdict::Incomplete("tests still failing".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_json_inside_markdown_fence() {
+        let v = parse_reviewer_verdict(
+            "```json\n{\"status\": \"complete\", \"reason\": \"ok\"}\n```",
+        );
+        assert_eq!(v, VerificationVerdict::Complete);
+    }
+
+    #[test]
+    fn falls_back_to_complete_prefix() {
+        let v = parse_reviewer_verdict("COMPLETE\nEverything looks good.");
+        assert_eq!(v, VerificationVerdict::Complete);
+    }
+
+    #[test]
+    fn falls_back_to_incomplete_prefix_with_reason() {
+        let v = parse_reviewer_verdict("INCOMPLETE: missing the error handler");
+        assert_eq!(
+            v,
+            VerificationVerdict::Incomplete("missing the error handler".to_string())
+        );
+    }
+
+    #[test]
+    fn keyword_scan_picks_incomplete_over_ambiguous() {
+        let v =
+            parse_reviewer_verdict("The run is not complete because the build failed partway.");
+        match v {
+            VerificationVerdict::Incomplete(_) => {}
+            other => panic!("expected Incomplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn truly_ambiguous_output_is_ambiguous() {
+        let v = parse_reviewer_verdict("I think it depends on what you mean by satisfying.");
+        match v {
+            VerificationVerdict::Ambiguous(_) => {}
+            other => panic!("expected Ambiguous, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_output_is_ambiguous() {
+        let v = parse_reviewer_verdict("   ");
+        match v {
+            VerificationVerdict::Ambiguous(_) => {}
+            other => panic!("expected Ambiguous, got {:?}", other),
+        }
     }
 }
