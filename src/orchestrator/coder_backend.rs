@@ -726,4 +726,109 @@ mod tests {
         assert_eq!(result, "한d");
         assert!(buf.is_empty());
     }
+
+    #[tokio::test]
+    async fn detect_changed_files_picks_up_modifications_to_tracked_files() {
+        use std::process::Command as StdCommand;
+        let tmp = make_tmp_dir("coder-backend-modify");
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "test"][..],
+        ] {
+            assert!(StdCommand::new("git")
+                .arg("-C")
+                .arg(&tmp)
+                .args(args)
+                .status()
+                .expect("git init/config")
+                .success());
+        }
+        std::fs::write(tmp.join("file.txt"), "v1").expect("write");
+        for args in [&["add", "."][..], &["commit", "-q", "-m", "init"][..]] {
+            assert!(StdCommand::new("git")
+                .arg("-C")
+                .arg(&tmp)
+                .args(args)
+                .status()
+                .expect("git add/commit")
+                .success());
+        }
+
+        let before = snapshot_working_tree(&tmp).await;
+        assert_eq!(before.as_deref(), Some(""));
+        std::fs::write(tmp.join("file.txt"), "v2").expect("modify");
+
+        let changed = detect_changed_files(&tmp, before.as_deref()).await;
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].path, "file.txt");
+        assert_eq!(changed[0].change_type, "modified");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_code_backend_kills_process_on_timeout() {
+        use std::time::{Duration, Instant};
+        let tmp = make_tmp_dir("coder-backend-timeout");
+        // The backend always passes -p <task> --output-format stream-json plus extra args
+        // to the configured command. Use a stub that ignores all of those and just sleeps.
+        let stub = write_executable_script(&tmp, "stub.sh", "#!/bin/sh\nsleep 30\n");
+        let backend = ClaudeCodeBackend::new(
+            stub.to_string_lossy().into_owned(),
+            vec![],
+            Duration::from_millis(200),
+        );
+
+        let started = Instant::now();
+        let result = backend.run("noop", "", &tmp, Arc::new(|_chunk| {})).await;
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("timeout must surface as Err");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "kill path must short-circuit well before the 30s sleep ({elapsed:?})"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_code_backend_returns_exit_code_for_quick_exit() {
+        use std::time::Duration;
+        let tmp = make_tmp_dir("coder-backend-quickexit");
+        let stub = write_executable_script(&tmp, "stub.sh", "#!/bin/sh\nexit 0\n");
+        let backend = ClaudeCodeBackend::new(
+            stub.to_string_lossy().into_owned(),
+            vec![],
+            Duration::from_secs(5),
+        );
+
+        let result = backend
+            .run("noop", "", &tmp, Arc::new(|_chunk| {}))
+            .await
+            .expect("quick exit must succeed");
+        assert_eq!(result.exit_code, 0);
+        // stub doesn't modify the workspace, but the dir is also not a git repo
+        assert!(result.files_changed.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
