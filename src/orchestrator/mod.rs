@@ -2026,6 +2026,125 @@ mod tests {
         (tmp, memory, orchestrator)
     }
 
+    fn make_node_result(node_id: &str, role: AgentRole, succeeded: bool) -> NodeExecutionResult {
+        NodeExecutionResult {
+            node_id: node_id.to_string(),
+            role,
+            model: "mock:model".to_string(),
+            output: if succeeded {
+                "ok output".to_string()
+            } else {
+                String::new()
+            },
+            duration_ms: 5,
+            succeeded,
+            error: if succeeded {
+                None
+            } else {
+                Some("synthetic failure".to_string())
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_recovery_graph_records_failed_nodes_and_attempt() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("recovery-fail").await;
+
+        let failed_a = make_node_result("coder", AgentRole::Coder, false);
+        let failed_b = make_node_result("validator", AgentRole::Validator, false);
+        let success = make_node_result("plan", AgentRole::Planner, true);
+
+        let graph = orchestrator
+            .build_failure_recovery_graph(
+                "Refactor the orchestrator into smaller modules",
+                &[&failed_a, &failed_b],
+                &[&success],
+                1,
+            )
+            .unwrap();
+
+        let node = graph.node("recovery_plan_1").expect("attempt-numbered planner");
+        assert_eq!(node.role, AgentRole::Planner);
+        // Failed agent IDs must surface in the planner instructions so the LLM has
+        // enough context to plan the rescue.
+        assert!(node.instructions.contains("coder"));
+        assert!(node.instructions.contains("validator"));
+        assert!(node.instructions.contains("synthetic failure"));
+        // Successful prior work is also surfaced so the rescue does not redo it.
+        assert!(node.instructions.contains("plan"));
+        // Single-attempt depth is fine; subsequent attempts must use a different ID.
+        assert!(graph.node("recovery_plan_2").is_none());
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn failure_recovery_graph_attempt_increment_changes_node_id() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("recovery-attempt").await;
+
+        let failed = make_node_result("coder", AgentRole::Coder, false);
+
+        let g1 = orchestrator
+            .build_failure_recovery_graph("task", &[&failed], &[], 1)
+            .unwrap();
+        let g2 = orchestrator
+            .build_failure_recovery_graph("task", &[&failed], &[], 2)
+            .unwrap();
+
+        assert!(g1.node("recovery_plan_1").is_some());
+        assert!(g1.node("recovery_plan_2").is_none());
+        assert!(g2.node("recovery_plan_2").is_some());
+        assert!(g2.node("recovery_plan_1").is_none());
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn completion_followup_graph_local_task_includes_local_first_hint() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("recovery-local").await;
+
+        let prior = make_node_result("plan", AgentRole::Planner, true);
+        let graph = orchestrator
+            .build_completion_followup_graph(
+                "edit the file src/lib.rs in this workspace",
+                "missing CLI binding",
+                std::slice::from_ref(&prior),
+                1,
+            )
+            .unwrap();
+
+        let node = graph.node("replan_plan_1").unwrap();
+        assert!(
+            node.instructions.contains("local-first"),
+            "local-first hint must appear for workspace-rooted tasks"
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn completion_followup_graph_remote_task_omits_local_first_hint() {
+        let (tmp, _memory, orchestrator) = make_test_orchestrator("recovery-remote").await;
+
+        let prior = make_node_result("plan", AgentRole::Planner, true);
+        let graph = orchestrator
+            .build_completion_followup_graph(
+                "https://example.com/repo summarize key APIs",
+                "incomplete summary",
+                std::slice::from_ref(&prior),
+                1,
+            )
+            .unwrap();
+
+        let node = graph.node("replan_plan_1").unwrap();
+        assert!(
+            !node.instructions.contains("local-first"),
+            "remote/URL tasks must not get the local-first hint"
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
     #[test]
     fn workflow_node_to_agent_node_preserves_git_commands() {
         let node = workflow_node_to_agent_node(&WorkflowNodeTemplate {
