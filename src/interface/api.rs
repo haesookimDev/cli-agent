@@ -9,6 +9,7 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use crate::interface::handlers;
+use crate::interface::rate_limit::{self, RateLimitConfig, RateLimiter};
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::cluster::OrchestratorCluster;
 use crate::terminal::TerminalManager;
@@ -233,7 +234,13 @@ pub async fn serve(
         ])
         .allow_headers(Any);
 
-    let mut app = router(state).layer(cors);
+    let limiter = RateLimiter::new(RateLimitConfig::from_env());
+    let mut app = router(state)
+        .layer(axum::middleware::from_fn_with_state(
+            limiter,
+            rate_limit::middleware,
+        ))
+        .layer(cors);
     if let Some(gw) = gateway_router {
         app = app.merge(gw);
     }

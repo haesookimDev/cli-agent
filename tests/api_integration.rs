@@ -17,6 +17,7 @@ use uuid::Uuid;
 use cli_agent::agents::AgentRegistry;
 use cli_agent::context::ContextManager;
 use cli_agent::interface::api::{router, ApiState};
+use cli_agent::interface::rate_limit::{self, RateLimitConfig, RateLimiter};
 use cli_agent::mcp::McpRegistry;
 use cli_agent::memory::MemoryManager;
 use cli_agent::orchestrator::cluster::OrchestratorCluster;
@@ -358,6 +359,30 @@ async fn cancel_unknown_run_does_not_panic_under_concurrency() {
             "unexpected status from concurrent cancel: {status:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn rate_limiter_returns_429_after_capacity_exhausted() {
+    let harness = make_harness().await;
+    let limiter = RateLimiter::new(RateLimitConfig::new(3.0, 0.0));
+    let app = router(harness.state).layer(axum::middleware::from_fn_with_state(
+        limiter,
+        rate_limit::middleware,
+    ));
+
+    let mut allowed = 0u32;
+    let mut throttled = 0u32;
+    for _ in 0..6 {
+        let req = signed_request(&harness.auth, "GET", "/v1/runs/active", b"");
+        let resp = app.clone().oneshot(req).await.unwrap();
+        match resp.status() {
+            StatusCode::OK => allowed += 1,
+            StatusCode::TOO_MANY_REQUESTS => throttled += 1,
+            other => panic!("unexpected status: {other:?}"),
+        }
+    }
+    assert_eq!(allowed, 3, "first three requests within capacity must pass");
+    assert_eq!(throttled, 3, "remaining requests must be throttled");
 }
 
 #[tokio::test]
