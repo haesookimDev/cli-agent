@@ -38,6 +38,9 @@ pub(crate) struct StreamQuery {
     pub poll_ms: Option<u64>,
     pub behavior: Option<bool>,
     pub behavior_limit: Option<usize>,
+    /// Resume from a known sequence number. Lets a reconnecting SSE client
+    /// avoid replaying events it already has.
+    pub after_seq: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,8 +484,9 @@ pub(crate) async fn stream_run_handler(
     let behavior_limit = query.behavior_limit.unwrap_or(2_000).clamp(1, 20_000);
     let orchestrator = state.orchestrator.clone();
 
+    let after_seq = query.after_seq.unwrap_or(0).max(0);
     let event_stream = stream! {
-        let mut last_seq: i64 = 0;
+        let mut last_seq: i64 = after_seq;
         let mut idle_terminal_ticks = 0_u8;
 
         loop {
