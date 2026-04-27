@@ -1,11 +1,11 @@
 use std::net::SocketAddr;
 
-use axum::http::Method;
+use axum::http::{HeaderValue, Method};
 use axum::response::Html;
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use serde::Deserialize;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{Any, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use crate::interface::handlers;
@@ -223,16 +223,7 @@ pub async fn serve(
     state: ApiState,
     gateway_router: Option<Router>,
 ) -> anyhow::Result<()> {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers(Any);
+    let cors = build_cors_layer();
 
     let limiter = RateLimiter::new(RateLimitConfig::from_env());
     let mut app = router(state)
@@ -247,6 +238,61 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Build the CORS layer from `CLI_AGENT_ALLOWED_ORIGINS` (comma-separated
+/// origin URLs). Setting the variable to `*` keeps the wildcard for local
+/// development. When unset the default also opens up to any origin so first
+/// boot still works, but production deploys are expected to set a strict
+/// allowlist (e.g. `https://app.example.com`).
+fn build_cors_layer() -> CorsLayer {
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    let raw = std::env::var("CLI_AGENT_ALLOWED_ORIGINS").unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(Any);
+    }
+
+    let parsed: Vec<HeaderValue> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match HeaderValue::from_str(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("ignoring invalid CORS origin '{s}': {e}");
+                None
+            }
+        })
+        .collect();
+
+    if parsed.is_empty() {
+        tracing::warn!(
+            "CLI_AGENT_ALLOWED_ORIGINS set but no valid origins parsed — falling back to wildcard"
+        );
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(Any);
+    }
+
+    tracing::info!(
+        "CORS allowlist active with {count} origin(s)",
+        count = parsed.len()
+    );
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(parsed))
+        .allow_methods(methods)
+        .allow_headers(Any)
 }
 
 /// Serialize a response payload to `serde_json::Value`, logging and returning
