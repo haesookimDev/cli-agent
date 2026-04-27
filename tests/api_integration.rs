@@ -386,6 +386,36 @@ async fn rate_limiter_returns_429_after_capacity_exhausted() {
 }
 
 #[tokio::test]
+async fn register_webhook_rejects_invalid_url_scheme() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+    let payload = serde_json::json!({
+        "url": "javascript:alert(1)",
+        "events": ["run.started"],
+        "secret": "x",
+    });
+    let body = serde_json::to_vec(&payload).unwrap();
+    let req = signed_request(&harness.auth, "POST", "/v1/webhooks/endpoints", &body);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn register_webhook_rejects_empty_events() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+    let payload = serde_json::json!({
+        "url": "https://example.com/hook",
+        "events": [],
+        "secret": "x",
+    });
+    let body = serde_json::to_vec(&payload).unwrap();
+    let req = signed_request(&harness.auth, "POST", "/v1/webhooks/endpoints", &body);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn list_skills_returns_array() {
     let harness = make_harness().await;
     let app = router(harness.state);

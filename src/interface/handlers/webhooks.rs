@@ -22,6 +22,26 @@ pub(crate) struct RegisterWebhookRequest {
     pub secret: String,
 }
 
+fn validate_webhook_request(req: &RegisterWebhookRequest) -> Result<(), String> {
+    let url = req.url.trim();
+    if url.is_empty() {
+        return Err("url must not be empty".to_string());
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("url must use http or https scheme".to_string());
+    }
+    if req.events.is_empty() {
+        return Err("at least one event must be subscribed".to_string());
+    }
+    if req.events.iter().any(|e| e.trim().is_empty()) {
+        return Err("event names must not be blank".to_string());
+    }
+    if req.secret.trim().is_empty() {
+        return Err("secret must not be empty".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct TestWebhookRequest {
     pub event: String,
@@ -49,6 +69,13 @@ pub(crate) async fn register_webhook_handler(
             );
         }
     };
+
+    if let Err(err) = validate_webhook_request(&req) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        );
+    }
 
     match state
         .orchestrator

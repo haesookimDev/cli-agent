@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method};
 use axum::response::Html;
 use axum::routing::{delete, get, patch, post};
@@ -226,7 +227,12 @@ pub async fn serve(
     let cors = build_cors_layer();
 
     let limiter = RateLimiter::new(RateLimitConfig::from_env());
+    let body_limit_bytes = std::env::var("CLI_AGENT_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2 * 1024 * 1024);
     let mut app = router(state)
+        .layer(DefaultBodyLimit::max(body_limit_bytes))
         .layer(axum::middleware::from_fn_with_state(
             limiter,
             rate_limit::middleware,
