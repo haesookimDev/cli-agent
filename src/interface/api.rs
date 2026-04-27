@@ -233,6 +233,7 @@ pub async fn serve(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2 * 1024 * 1024);
+    let orchestrator_for_shutdown = state.orchestrator.clone();
     let mut app = router(state)
         .layer(DefaultBodyLimit::max(body_limit_bytes))
         .layer(axum::middleware::from_fn_with_state(
@@ -244,8 +245,54 @@ pub async fn serve(
         app = app.merge(gw);
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(orchestrator_for_shutdown))
+        .await?;
     Ok(())
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM, then ask the orchestrator to mark
+/// every in-flight run as cancelling so the run loop has a chance to flush
+/// state before the process exits.
+async fn shutdown_signal(orchestrator: Orchestrator) {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("failed to install Ctrl-C handler: {e}");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => tracing::error!("failed to install SIGTERM handler: {e}"),
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received Ctrl-C — initiating graceful shutdown"),
+        _ = terminate => tracing::info!("received SIGTERM — initiating graceful shutdown"),
+    }
+
+    let active = orchestrator.list_active_runs().await;
+    if !active.is_empty() {
+        tracing::info!(
+            "cancelling {} in-flight run(s) before shutdown",
+            active.len()
+        );
+        for run in active {
+            if let Err(e) = orchestrator.cancel_run(run.run_id).await {
+                tracing::warn!(
+                    run_id = %run.run_id,
+                    "cancel_run during shutdown failed: {e}"
+                );
+            }
+        }
+    }
 }
 
 /// Build the CORS layer from `CLI_AGENT_ALLOWED_ORIGINS` (comma-separated
