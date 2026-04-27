@@ -53,6 +53,8 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/dashboard", get(dashboard_handler))
         .route("/web-client", get(web_client_handler))
+        .route("/health", get(handlers::health::health_handler))
+        .route("/v1/health", get(handlers::health::health_handler))
         .route(
             "/v1/sessions",
             post(handlers::sessions::create_session_handler)

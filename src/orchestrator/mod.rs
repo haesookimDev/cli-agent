@@ -320,6 +320,19 @@ impl Orchestrator {
         active
     }
 
+    /// Active run count for the health check; cheaper than list_active_runs
+    /// because it skips the per-run clone.
+    pub fn active_run_count(&self) -> usize {
+        self.runs
+            .iter()
+            .filter(|kv| matches!(kv.value().status, RunStatus::Running | RunStatus::Queued))
+            .count()
+    }
+
+    pub fn mcp_server_count(&self) -> usize {
+        self.mcp.server_names().len()
+    }
+
     pub async fn get_session_messages(
         &self,
         session_id: Uuid,

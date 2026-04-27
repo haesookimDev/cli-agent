@@ -4,6 +4,7 @@
 //! share `ApiState` and the `json_value` helper from `crate::interface::api`.
 
 pub mod cluster;
+pub mod health;
 pub mod mcp;
 pub mod memory;
 pub mod runs;

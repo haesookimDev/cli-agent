@@ -416,6 +416,29 @@ async fn register_webhook_rejects_empty_events() {
 }
 
 #[tokio::test]
+async fn health_endpoint_unauthenticated_returns_ok_when_db_alive() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+
+    // Health is intentionally unauthenticated so probes don't have to sign.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp.into_body()).await;
+    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(
+        body.get("checks")
+            .and_then(|c| c.get("database"))
+            .and_then(|v| v.as_str()),
+        Some("ok")
+    );
+}
+
+#[tokio::test]
 async fn list_skills_returns_array() {
     let harness = make_harness().await;
     let app = router(harness.state);
