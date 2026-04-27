@@ -168,4 +168,80 @@ mod tests {
         assert!(formatted.contains("result data"));
         assert!(formatted.contains("success=\"true\""));
     }
+
+    #[test]
+    fn extract_tool_calls_skips_malformed_json() {
+        // Two blocks: first malformed, second valid. The malformed one must not
+        // poison the parser — the valid one is still returned.
+        let output = "<tool_call>{not json}</tool_call> later \
+                      <tool_call>{\"tool_name\":\"good\",\"arguments\":{}}</tool_call>";
+        let calls = extract_tool_calls(output);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool_name"], "good");
+    }
+
+    #[test]
+    fn extract_tool_calls_skips_blocks_missing_tool_name() {
+        // JSON parses but lacks the required tool_name key.
+        let output = "<tool_call>{\"arguments\":{\"x\":1}}</tool_call>";
+        assert!(extract_tool_calls(output).is_empty());
+    }
+
+    #[test]
+    fn extract_tool_calls_handles_unterminated_tag() {
+        // No closing tag — extractor must stop, not loop or panic.
+        let output = "<tool_call>{\"tool_name\":\"x\",\"arguments\":{}}";
+        assert!(extract_tool_calls(output).is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_tool_calls_against_empty_registry_returns_failure() {
+        let registry = McpRegistry::new();
+        let calls = vec![serde_json::json!({
+            "tool_name": "filesystem/read_file",
+            "arguments": {"path": "/tmp/none"}
+        })];
+        let results = execute_tool_calls(&calls, &registry, &[]).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].succeeded);
+        assert!(
+            results[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("No MCP server"),
+            "missing-tool errors should surface as error text, not a panic"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_calls_enforces_allowlist() {
+        let registry = McpRegistry::new();
+        let calls = vec![serde_json::json!({
+            "tool_name": "github/create_issue",
+            "arguments": {}
+        })];
+        // Allowlist that doesn't cover the requested tool.
+        let allow = vec!["filesystem/read_file".to_string()];
+        let results = execute_tool_calls(&calls, &registry, &allow).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].succeeded);
+        assert!(
+            results[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("not in allowed list"),
+            "allowlist rejection must surface in the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_registry_call_tool_unknown_returns_error_not_panic() {
+        let registry = McpRegistry::new();
+        let result = registry
+            .call_tool("nonexistent/tool", serde_json::json!({}))
+            .await;
+        assert!(result.is_err(), "unknown tool must return Err");
+    }
 }
