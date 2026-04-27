@@ -1,8 +1,12 @@
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Result, anyhow};
 use axum::http::HeaderMap;
+use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -26,7 +30,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
 }
 
 pub fn hmac_sha256_hex(secret: &[u8], message: &[u8]) -> Result<String> {
-    let mut mac = HmacSha256::new_from_slice(secret)?;
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret)?;
     mac.update(message);
     Ok(to_hex(&mac.finalize().into_bytes()))
 }
@@ -138,6 +142,67 @@ impl SignatureVerifier for DiscordEd25519Verifier {
     }
 }
 
+/// Derive a 32-byte AES-256 key from an arbitrary passphrase. The passphrase
+/// usually comes from `CLI_AGENT_DB_KEY` env var.
+fn derive_key(passphrase: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(passphrase.as_bytes());
+    let out = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out);
+    key
+}
+
+const SECRET_PREFIX: &str = "enc:v1:";
+
+/// Encrypt `plaintext` with AES-256-GCM and return a self-describing string
+/// of the form `enc:v1:<base64(nonce||ciphertext)>`. Decryption is paired
+/// with `decrypt_secret`. Plaintext that is already encrypted is left as-is
+/// so callers can call this idempotently during writes.
+pub fn encrypt_secret(plaintext: &str, passphrase: &str) -> Result<String> {
+    if plaintext.starts_with(SECRET_PREFIX) {
+        return Ok(plaintext.to_string());
+    }
+    let key = derive_key(passphrase);
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| anyhow!("aes key init failed: {e}"))?;
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| anyhow!("aes encrypt failed: {e}"))?;
+    let mut payload = Vec::with_capacity(12 + ciphertext.len());
+    payload.extend_from_slice(&nonce_bytes);
+    payload.extend_from_slice(&ciphertext);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+    Ok(format!("{SECRET_PREFIX}{encoded}"))
+}
+
+/// Inverse of `encrypt_secret`. Strings without the `enc:v1:` prefix are
+/// returned unchanged so legacy plaintext rows keep working until they are
+/// rewritten on the next save.
+pub fn decrypt_secret(stored: &str, passphrase: &str) -> Result<String> {
+    let Some(b64) = stored.strip_prefix(SECRET_PREFIX) else {
+        return Ok(stored.to_string());
+    };
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| anyhow!("base64 decode failed: {e}"))?;
+    if payload.len() < 12 {
+        return Err(anyhow!("encrypted payload shorter than nonce"));
+    }
+    let (nonce_bytes, ciphertext) = payload.split_at(12);
+    let key = derive_key(passphrase);
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| anyhow!("aes key init failed: {e}"))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow!("aes decrypt failed: {e}"))?;
+    Ok(String::from_utf8(plaintext)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +256,47 @@ mod tests {
         headers.insert("X-Slack-Signature", sig.parse().unwrap());
 
         assert!(verifier.verify(&headers, body).is_err());
+    }
+
+    #[test]
+    fn encrypt_then_decrypt_secret_roundtrips() {
+        let pass = "topsecret";
+        let plain = "my-very-secret-webhook-token";
+        let stored = encrypt_secret(plain, pass).unwrap();
+        assert!(stored.starts_with(SECRET_PREFIX));
+        assert_ne!(stored, plain, "stored value must not be plaintext");
+        let recovered = decrypt_secret(&stored, pass).unwrap();
+        assert_eq!(recovered, plain);
+    }
+
+    #[test]
+    fn encrypt_secret_is_idempotent_on_already_encrypted_input() {
+        let pass = "topsecret";
+        let encrypted = encrypt_secret("hello", pass).unwrap();
+        let again = encrypt_secret(&encrypted, pass).unwrap();
+        assert_eq!(encrypted, again);
+    }
+
+    #[test]
+    fn decrypt_secret_passthrough_for_legacy_plaintext() {
+        // Anything without enc:v1: prefix is returned as-is.
+        let plain = "legacy-plain";
+        let recovered = decrypt_secret(plain, "any").unwrap();
+        assert_eq!(recovered, plain);
+    }
+
+    #[test]
+    fn decrypt_secret_fails_with_wrong_passphrase() {
+        let stored = encrypt_secret("hello", "right").unwrap();
+        assert!(decrypt_secret(&stored, "wrong").is_err());
+    }
+
+    #[test]
+    fn encrypt_secret_uses_fresh_nonce() {
+        let pass = "topsecret";
+        let a = encrypt_secret("payload", pass).unwrap();
+        let b = encrypt_secret("payload", pass).unwrap();
+        assert_ne!(a, b, "same plaintext must encrypt to different ciphertexts");
     }
 
     #[test]

@@ -817,10 +817,15 @@ impl SqliteStore {
             id: Uuid::new_v4().to_string(),
             url: url.to_string(),
             events: events.to_vec(),
+            // Encrypt at rest. The plaintext is preserved on the returned
+            // record so callers (e.g. the API response) get the value the
+            // operator actually configured.
             secret: secret.to_string(),
             enabled: true,
             created_at: Utc::now(),
         };
+
+        let stored_secret = crate::crypto::encrypt_secret(secret, &webhook_secret_passphrase())?;
 
         sqlx::query(
             r#"
@@ -831,7 +836,7 @@ impl SqliteStore {
         .bind(endpoint.id.clone())
         .bind(endpoint.url.clone())
         .bind(serde_json::to_string(&endpoint.events)?)
-        .bind(endpoint.secret.clone())
+        .bind(stored_secret)
         .bind(if endpoint.enabled { 1_i64 } else { 0_i64 })
         .bind(endpoint.created_at.to_rfc3339())
         .execute(&self.pool)
@@ -852,17 +857,21 @@ impl SqliteStore {
         .fetch_all(&self.pool)
         .await?;
 
+        let passphrase = webhook_secret_passphrase();
         let mut endpoints = Vec::with_capacity(rows.len());
         for row in rows {
             let events_raw: String = row.get("events");
             let created_at_raw: String = row.get("created_at");
             let created_at = DateTime::parse_from_rfc3339(&created_at_raw)?.with_timezone(&Utc);
+            let stored_secret: String = row.get("secret");
+            let secret = crate::crypto::decrypt_secret(&stored_secret, &passphrase)
+                .unwrap_or(stored_secret);
 
             endpoints.push(WebhookEndpoint {
                 id: row.get("id"),
                 url: row.get("url"),
                 events: serde_json::from_str(&events_raw)?,
-                secret: row.get("secret"),
+                secret,
                 enabled: row.get::<i64, _>("enabled") != 0,
                 created_at,
             });
@@ -1608,6 +1617,13 @@ fn parse_workflow_row(
         updated_at: parse_rfc3339(&r.get::<String, _>("updated_at"))?,
         source: Default::default(),
     })
+}
+
+/// Read the master passphrase used to encrypt webhook secrets at rest. Falls
+/// back to a fixed dev value so local boot still works; production deploys
+/// should set `CLI_AGENT_DB_KEY`.
+fn webhook_secret_passphrase() -> String {
+    std::env::var("CLI_AGENT_DB_KEY").unwrap_or_else(|_| "cli-agent-dev-key".to_string())
 }
 
 fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
