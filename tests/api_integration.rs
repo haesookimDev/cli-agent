@@ -290,6 +290,77 @@ async fn register_then_list_webhook() {
 }
 
 #[tokio::test]
+async fn concurrent_session_creation_does_not_lose_writes() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+    let auth = harness.auth.clone();
+
+    let mut joins = Vec::new();
+    for _ in 0..20 {
+        let app = app.clone();
+        let auth = auth.clone();
+        joins.push(tokio::spawn(async move {
+            let req = signed_request(&auth, "POST", "/v1/sessions", b"");
+            app.oneshot(req).await.unwrap()
+        }));
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    for join in joins {
+        let resp = join.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = read_json(resp.into_body()).await;
+        let id = body
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .expect("session_id present");
+        ids.insert(id);
+    }
+    assert_eq!(ids.len(), 20, "every session must get a unique id");
+
+    let req = signed_request(&auth, "GET", "/v1/sessions?limit=200", b"");
+    let resp = app.oneshot(req).await.unwrap();
+    let body = read_json(resp.into_body()).await;
+    let listed: std::collections::HashSet<String> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.get("session_id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    assert!(
+        ids.is_subset(&listed),
+        "all 20 created session ids must appear in the list response"
+    );
+}
+
+#[tokio::test]
+async fn cancel_unknown_run_does_not_panic_under_concurrency() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+    let auth = harness.auth.clone();
+
+    let mut joins = Vec::new();
+    for _ in 0..16 {
+        let app = app.clone();
+        let auth = auth.clone();
+        let path = format!("/v1/runs/{}/cancel", Uuid::new_v4());
+        joins.push(tokio::spawn(async move {
+            let req = signed_request(&auth, "POST", &path, b"");
+            app.oneshot(req).await.unwrap().status()
+        }));
+    }
+    for join in joins {
+        let status = join.await.unwrap();
+        // Cancel against an unknown run should resolve cleanly — never 5xx.
+        assert!(
+            status.is_success() || status == StatusCode::NOT_FOUND,
+            "unexpected status from concurrent cancel: {status:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn list_skills_returns_array() {
     let harness = make_harness().await;
     let app = router(harness.state);

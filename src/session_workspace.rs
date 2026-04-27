@@ -101,4 +101,54 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }
+
+    #[tokio::test]
+    async fn concurrent_ensure_session_dir_is_idempotent() {
+        let root = std::env::temp_dir().join(format!("workspace-conc-{}", Uuid::new_v4()));
+        let manager = SessionWorkspaceManager::new(root.clone());
+        let session_id = Uuid::new_v4();
+
+        let mut joins = Vec::new();
+        for _ in 0..32 {
+            let mgr = manager.clone();
+            joins.push(tokio::spawn(async move {
+                mgr.ensure_session_dir(session_id).await
+            }));
+        }
+        for join in joins {
+            join.await.unwrap().expect("ensure_session_dir must not race-fail");
+        }
+
+        let dir = manager.session_dir(session_id);
+        assert!(dir.is_dir(), "session dir survives concurrent creation");
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn parallel_sessions_are_isolated() {
+        let root = std::env::temp_dir().join(format!("workspace-isolate-{}", Uuid::new_v4()));
+        let manager = SessionWorkspaceManager::new(root.clone());
+
+        let ids: Vec<Uuid> = (0..8).map(|_| Uuid::new_v4()).collect();
+        let mut joins = Vec::new();
+        for id in ids.iter().copied() {
+            let mgr = manager.clone();
+            joins.push(tokio::spawn(async move {
+                let dir = mgr.ensure_session_dir(id).await.unwrap();
+                tokio::fs::write(dir.join("marker.txt"), id.to_string()).await.unwrap();
+            }));
+        }
+        for join in joins {
+            join.await.unwrap();
+        }
+
+        for id in ids {
+            let marker = manager.session_dir(id).join("marker.txt");
+            let body = tokio::fs::read_to_string(&marker).await.unwrap();
+            assert_eq!(body, id.to_string());
+        }
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
 }
