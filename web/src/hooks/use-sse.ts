@@ -65,8 +65,22 @@ export function useRunSSE(runId: string | null) {
             if (eventType === "action_event") {
               const ev = JSON.parse(data) as RunActionEvent;
               setEvents((prev) => {
-                const next = [...prev, ev];
-                next.sort((a, b) => a.seq - b.seq);
+                // Server emits events in seq order, so the common case is
+                // append. Avoid a full O(n log n) sort on every chunk by
+                // binary-inserting only when the new event is out of order.
+                const last = prev.length === 0 ? null : prev[prev.length - 1];
+                if (last == null || ev.seq >= last.seq) {
+                  return [...prev, ev];
+                }
+                let lo = 0;
+                let hi = prev.length;
+                while (lo < hi) {
+                  const mid = (lo + hi) >>> 1;
+                  if (prev[mid].seq <= ev.seq) lo = mid + 1;
+                  else hi = mid;
+                }
+                const next = prev.slice();
+                next.splice(lo, 0, ev);
                 return next;
               });
             } else if (eventType === "run_terminal") {
