@@ -103,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
 
     let memory =
         Arc::new(MemoryManager::new(cfg.session_dir.clone(), cfg.database_url.as_str()).await?);
+    // Sweep expired short-term memory items every 5 minutes so a long-lived
+    // server doesn't accumulate dead entries for sessions that are never
+    // queried again. The handle is detached on purpose: it ends naturally
+    // when the underlying short_term Arc is the last reference.
+    let _gc_handle = memory.spawn_short_term_gc(std::time::Duration::from_secs(300));
     let router = Arc::new(ModelRouter::new(
         cfg.vllm_base_url.clone(),
         cfg.openai_api_key.clone(),

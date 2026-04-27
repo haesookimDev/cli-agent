@@ -234,6 +234,66 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Sweep expired items out of short_term across every session.
+    /// Returns (items_removed, sessions_emptied). Called by `spawn_short_term_gc`
+    /// on a timer; safe to call directly from tests.
+    pub fn gc_short_term(&self) -> (usize, usize) {
+        let now = Instant::now();
+        let mut removed = 0usize;
+        let mut empty_sessions: Vec<Uuid> = Vec::new();
+
+        for mut kv in self.short_term.iter_mut() {
+            let before = kv.value().len();
+            kv.value_mut().retain(|item| item.expires_at > now);
+            let after = kv.value().len();
+            removed += before - after;
+            if after == 0 {
+                empty_sessions.push(*kv.key());
+            }
+        }
+
+        for key in &empty_sessions {
+            self.short_term.remove(key);
+        }
+        (removed, empty_sessions.len())
+    }
+
+    /// Spawn a tokio task that calls `gc_short_term` every `interval`. The
+    /// task ends when the returned `Arc<MemoryManager>` is dropped (because
+    /// the inner `Arc<DashMap>` is what keeps the loop relevant).
+    pub fn spawn_short_term_gc(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let buckets = self.short_term.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // skip first immediate tick
+            loop {
+                ticker.tick().await;
+                let now = Instant::now();
+                let mut removed = 0usize;
+                let mut empty: Vec<Uuid> = Vec::new();
+                for mut kv in buckets.iter_mut() {
+                    let before = kv.value().len();
+                    kv.value_mut().retain(|item| item.expires_at > now);
+                    let after = kv.value().len();
+                    removed += before - after;
+                    if after == 0 {
+                        empty.push(*kv.key());
+                    }
+                }
+                for key in &empty {
+                    buckets.remove(key);
+                }
+                if removed > 0 || !empty.is_empty() {
+                    tracing::debug!(
+                        removed,
+                        emptied = empty.len(),
+                        "short_term gc swept expired items"
+                    );
+                }
+            }
+        })
+    }
+
     pub async fn remember_short(
         &self,
         session_id: Uuid,
@@ -659,5 +719,48 @@ mod tests {
         let score_high = similarity_score("rust async dag execution", "rust dag");
         let score_low = similarity_score("cat dog bird", "webhook hmac");
         assert!(score_high > score_low);
+    }
+
+    #[tokio::test]
+    async fn gc_short_term_drops_expired_items_and_empty_sessions() {
+        let tmp = std::env::temp_dir().join(format!("memory-gc-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let memory = MemoryManager::new(
+            tmp.join("sessions"),
+            format!("sqlite://{}", tmp.join("db.sqlite").display()).as_str(),
+        )
+        .await
+        .unwrap();
+
+        let alive = Uuid::new_v4();
+        let expiring = Uuid::new_v4();
+
+        // alive: long TTL — survives GC
+        memory
+            .remember_short(alive, "fresh", 0.5, Duration::from_secs(60))
+            .await;
+        // expiring: 1ms TTL — gone after a brief sleep + GC pass
+        memory
+            .remember_short(expiring, "stale", 0.5, Duration::from_millis(1))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (removed, emptied) = memory.gc_short_term();
+        assert_eq!(removed, 1, "exactly one expired item should be swept");
+        assert_eq!(
+            emptied, 1,
+            "the bucket whose only item expired must be removed"
+        );
+
+        assert!(
+            memory.short_term.contains_key(&alive),
+            "alive session bucket survives"
+        );
+        assert!(
+            !memory.short_term.contains_key(&expiring),
+            "expired session bucket is gone"
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }
