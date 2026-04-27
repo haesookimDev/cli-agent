@@ -16,6 +16,20 @@ pub struct SqliteStore {
     pool: SqlitePool,
 }
 
+/// Row payload for `batch_insert_run_action_events`. Identical fields to
+/// `append_run_action_event`'s arguments, just bundled so a Vec can be
+/// queued and flushed together.
+#[derive(Debug, Clone)]
+pub struct RunActionEventInput {
+    pub run_id: Uuid,
+    pub session_id: Uuid,
+    pub action: RunActionType,
+    pub actor_type: Option<String>,
+    pub actor_id: Option<String>,
+    pub cause_event_id: Option<String>,
+    pub payload: serde_json::Value,
+}
+
 impl SqliteStore {
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
         let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
@@ -190,6 +204,52 @@ impl SqliteStore {
             runs.push(serde_json::from_str(&run_json)?);
         }
         Ok(runs)
+    }
+
+    /// Bulk-insert `events` in a single transaction. Used by the high-volume
+    /// token-chunk path to amortize SQLite roundtrips across many rows.
+    pub async fn batch_insert_run_action_events(
+        &self,
+        events: &[RunActionEventInput],
+    ) -> anyhow::Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for ev in events {
+            let event_id = Uuid::new_v4().to_string();
+            let timestamp = Utc::now().to_rfc3339();
+            let payload_raw = serde_json::to_string(&ev.payload)?;
+            sqlx::query(
+                r#"
+                INSERT INTO run_action_events (
+                    event_id,
+                    run_id,
+                    session_id,
+                    timestamp,
+                    action,
+                    actor_type,
+                    actor_id,
+                    cause_event_id,
+                    payload
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+            )
+            .bind(event_id)
+            .bind(ev.run_id.to_string())
+            .bind(ev.session_id.to_string())
+            .bind(timestamp)
+            .bind(ev.action.to_string())
+            .bind(ev.actor_type.as_deref())
+            .bind(ev.actor_id.as_deref())
+            .bind(ev.cause_event_id.as_deref())
+            .bind(payload_raw)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn append_run_action_event(
@@ -1841,6 +1901,56 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("cli-agent-memory-test-{}.db", Uuid::new_v4()));
         format!("sqlite://{}", path.display())
+    }
+
+    #[tokio::test]
+    async fn batch_insert_run_action_events_persists_all_rows() {
+        let store = SqliteStore::connect(temp_db_url().as_str())
+            .await
+            .expect("store");
+        let run_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        store.create_session(session_id).await.expect("create session");
+
+        let inputs: Vec<RunActionEventInput> = (0..7)
+            .map(|i| RunActionEventInput {
+                run_id,
+                session_id,
+                action: RunActionType::NodeTokenChunk,
+                actor_type: Some("runtime".to_string()),
+                actor_id: Some(format!("node-{i}")),
+                cause_event_id: None,
+                payload: serde_json::json!({"i": i}),
+            })
+            .collect();
+
+        store
+            .batch_insert_run_action_events(&inputs)
+            .await
+            .expect("batch insert");
+
+        let listed = store
+            .list_run_action_events(run_id, 100)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 7);
+        // Sequence numbers must be monotonic so the SSE replay order matches
+        // the order the producer queued them.
+        let seqs: Vec<i64> = listed.iter().map(|e| e.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort();
+        assert_eq!(seqs, sorted);
+    }
+
+    #[tokio::test]
+    async fn batch_insert_empty_is_noop() {
+        let store = SqliteStore::connect(temp_db_url().as_str())
+            .await
+            .expect("store");
+        store
+            .batch_insert_run_action_events(&[])
+            .await
+            .expect("empty batch ok");
     }
 
     #[tokio::test]

@@ -1605,23 +1605,69 @@ impl Orchestrator {
         let token_memory = memory.clone();
         let (token_tx, mut token_rx) = mpsc::unbounded_channel::<(String, AgentRole, String)>();
 
+        // High-frequency token chunks were inserted one-row-at-a-time, which
+        // burned a roundtrip per token. Batch them: drain whatever is queued
+        // every 100ms (or up to 50 tokens) into a single multi-row INSERT.
         tokio::spawn(async move {
-            while let Some((node_id, role, token)) = token_rx.recv().await {
-                let _ = token_memory
-                    .append_run_action_event(
-                        run_id,
-                        session_id,
-                        RunActionType::NodeTokenChunk,
-                        Some("runtime"),
-                        Some(node_id.as_str()),
-                        None,
-                        serde_json::json!({
-                            "node_id": node_id,
-                            "role": role,
-                            "token": token,
-                        }),
-                    )
-                    .await;
+            const BATCH_MAX: usize = 50;
+            const FLUSH_MS: u64 = 100;
+            let mut buf: Vec<crate::memory::store::RunActionEventInput> = Vec::with_capacity(BATCH_MAX);
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(FLUSH_MS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    maybe = token_rx.recv() => {
+                        match maybe {
+                            Some((node_id, role, token)) => {
+                                buf.push(crate::memory::store::RunActionEventInput {
+                                    run_id,
+                                    session_id,
+                                    action: RunActionType::NodeTokenChunk,
+                                    actor_type: Some("runtime".to_string()),
+                                    actor_id: Some(node_id.clone()),
+                                    cause_event_id: None,
+                                    payload: serde_json::json!({
+                                        "node_id": node_id,
+                                        "role": role,
+                                        "token": token,
+                                    }),
+                                });
+                                if buf.len() >= BATCH_MAX {
+                                    let batch = std::mem::take(&mut buf);
+                                    if let Err(e) = token_memory
+                                        .store()
+                                        .batch_insert_run_action_events(&batch)
+                                        .await
+                                    {
+                                        tracing::warn!("batch insert (cap) failed: {e}");
+                                    }
+                                }
+                            }
+                            None => {
+                                if !buf.is_empty() {
+                                    let batch = std::mem::take(&mut buf);
+                                    let _ = token_memory
+                                        .store()
+                                        .batch_insert_run_action_events(&batch)
+                                        .await;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if !buf.is_empty() {
+                            let batch = std::mem::take(&mut buf);
+                            if let Err(e) = token_memory
+                                .store()
+                                .batch_insert_run_action_events(&batch)
+                                .await
+                            {
+                                tracing::warn!("batch insert (timer) failed: {e}");
+                            }
+                        }
+                    }
+                }
             }
         });
 
