@@ -4,7 +4,7 @@
 
 Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼의 전반적인 코드 품질, 에이전트 동작 결함, 리팩토링 필요사항을 종합 분석한 결과.
 
-**현재 상태 (최신 커밋 `74b2089` 기준)**: 빌드 정상, **116개 테스트 통과**, Phase 1/2/3/4 완료. 7,654줄 모놀리스였던 `orchestrator/mod.rs`는 10개 서브모듈로 분할(mod.rs 2,984줄)되었고, 2,796줄이었던 `interface/api.rs`는 12개 핸들러 모듈로 분할(api.rs 267줄)되었다. 에이전트 휴리스틱 오탐, reviewer 재시도, LLM 분류 fast-path/캐시 등 동작 정확성·성능 개선도 적용됨. 남은 중복(프론트엔드 API 설정, gateway 서명 검증, action+progress 페어 호출)도 Phase 4에서 통합.
+**현재 상태 (최신 커밋 `5376340` 기준)**: 빌드 정상, **158개 테스트 통과 (lib 144 + integration 14)**, Phase 1~7 완료. 7,654줄 모놀리스였던 `orchestrator/mod.rs`는 10개 서브모듈로 분할되었고, 2,796줄이었던 `interface/api.rs`는 13개 핸들러 모듈로 분할되었다. Phase 5에서 API/recovery/MCP/coder backend 통합 테스트 22개 추가, Phase 6에서 rate limiting · CORS allowlist · health · graceful shutdown · sqlx::migrate! · short-term GC · webhook secret 암호화가 도입되어 운영 준비 상태. Phase 7에서 token-chunk batch INSERT · DashMap dedup · pause Notify · SSE 재연결 · memory search index 등 성능 개선이 모두 반영됨.
 
 ---
 
@@ -16,12 +16,12 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | Phase 2 | Core Refactoring (TODO 3-1, 3-2, 3-3) | ✅ 완료 | 21 |
 | Phase 3 | Agent Behavior (TODO 2-1 ~ 2-7) | ✅ 완료 | 7 |
 | Phase 4 | Remaining Refactoring (TODO 3-4 ~ 3-6) | ✅ 완료 | 3 |
-| Phase 5 | Test Coverage (TODO 5-1 ~ 5-6) | ⏳ 대기 | — |
-| Phase 6 | Infrastructure (TODO 4-1 ~ 4-8) | ⏳ 대기 | — |
-| Phase 7 | Performance (TODO 6-1 ~ 6-7) | ⏳ 대기 | — |
+| Phase 5 | Test Coverage (TODO 5-1 ~ 5-6) | ✅ 완료 | 6 |
+| Phase 6 | Infrastructure (TODO 4-1 ~ 4-8) | ✅ 완료 | 8 |
+| Phase 7 | Performance (TODO 6-1 ~ 6-7) | ✅ 완료 | 6 (6-2 deferred) |
 | 추가 제안 | Workflow / Tracing / Harness (7-1 ~ 9-6) | ⏳ 대기 | — |
 
-**누적 38 commits** · 테스트 87 → 116 (+29)
+**누적 58 commits** · 테스트 87 → 158 (+71)
 
 ---
 
@@ -164,117 +164,100 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 4. Infrastructure Improvements (인프라 개선) — ⏳ 전부 대기
+## 4. Infrastructure Improvements (인프라 개선) — ✅ Phase 6 완료
 
-### TODO 4-1: API 레이트 리미팅 추가
-- **파일**: `src/interface/api.rs` (라우터 조립) + `src/interface/handlers/*` (엔드포인트)
-- **문제**: 모든 엔드포인트에 레이트 리밋 없음
-- **수정**: `tower` 미들웨어 기반 IP/키별 레이트 리미터 추가
+### TODO 4-1: API 레이트 리미팅 추가 — ✅ `7451d8d`
+- **파일**: `src/interface/rate_limit.rs` (신규), `src/interface/api.rs` (`serve` 미들웨어 부착)
+- **적용**: per-key/per-IP 토큰 버킷 (`X-API-Key` → `X-Forwarded-For` → `X-Real-IP` → `anonymous`). 기본 capacity 120, refill 2/sec. `CLI_AGENT_RATE_LIMIT_CAPACITY` / `CLI_AGENT_RATE_LIMIT_PER_SEC` 로 override. 4개 unit + 1개 integration 테스트.
 
-### TODO 4-2: CORS 정책 강화
-- **파일**: `src/interface/api.rs` — `CorsLayer`
-- **문제**: `Any` origin 허용 (완전 개방)
-- **수정**: 환경변수 기반 `ALLOWED_ORIGINS` 설정, 프로덕션에서는 명시적 origin만 허용
+### TODO 4-2: CORS 정책 강화 — ✅ `1bd84d4`
+- **파일**: `src/interface/api.rs` (`build_cors_layer`)
+- **적용**: `CLI_AGENT_ALLOWED_ORIGINS` (콤마 구분 origin 리스트). 미설정/`*`은 와일드카드 유지(로컬 dev 호환). 잘못된 origin은 warn + 와일드카드 fallback.
 
-### TODO 4-3: 요청 검증 미들웨어 추가
-- **문제**: API 요청에 대한 입력 검증이 핸들러 내부에서만 이루어짐
-- **수정**: `validator` 크레이트 기반 DTO 검증 레이어 도입
+### TODO 4-3: 요청 검증 미들웨어 추가 — ✅ `8e03adb`
+- **파일**: `src/interface/api.rs` (`DefaultBodyLimit::max(2 MiB)`), `src/interface/handlers/webhooks.rs` (`validate_webhook_request`)
+- **적용**: 본문 크기 한도 (`CLI_AGENT_MAX_BODY_BYTES` override) + RegisterWebhookRequest 검증 (URL scheme, 빈 events, 빈 secret 거부). 2개 integration 테스트.
 
-### TODO 4-4: 헬스체크 엔드포인트 추가
-- **문제**: `/health` 또는 `/v1/health` 엔드포인트 없음
-- **수정**: DB 연결, MCP 서버 상태, 메모리 사용량 포함하는 헬스체크 추가
+### TODO 4-4: 헬스체크 엔드포인트 추가 — ✅ `afbc40b`
+- **파일**: `src/interface/handlers/health.rs` (신규)
+- **적용**: `/health` + `/v1/health` (인증 미요구). DB ping (`SELECT 1`), version, elapsed_ms, active run count, MCP 서버 수 포함. degraded 시 503. `Orchestrator::active_run_count` / `mcp_server_count` 헬퍼 추가.
 
-### TODO 4-5: Graceful Shutdown 핸들링
-- **문제**: 서버 종료 시 실행 중인 run의 정리(cleanup) 로직 없음
-- **수정**: `tokio::signal` 기반 shutdown hook, 진행 중인 run을 `Cancelled` 상태로 전환
+### TODO 4-5: Graceful Shutdown 핸들링 — ✅ `35a6a63`
+- **파일**: `src/interface/api.rs` (`shutdown_signal`)
+- **적용**: `axum::serve(...).with_graceful_shutdown(...)` + SIGINT / SIGTERM (Unix) handler. 종료 시 모든 in-flight run을 `cancel_run()`으로 Cancelling 전환 후 axum drain.
 
-### TODO 4-6: DB 마이그레이션 시스템 도입
-- **파일**: `src/memory/store.rs:36-200`
-- **문제**: `ALTER TABLE ADD COLUMN` 에러를 무시하는 방식의 원시적 마이그레이션
-- **수정**: `sqlx::migrate!()` 매크로 기반 버전 관리 마이그레이션 도입
+### TODO 4-6: DB 마이그레이션 시스템 도입 — ✅ `59ecfe7`
+- **파일**: `migrations/0001_initial_schema.sql` (신규), `src/memory/store.rs::init_schema`
+- **적용**: 250줄 인라인 CREATE TABLE을 `sqlx::migrate!("./migrations").run(...)` 으로 대체. `_sqlx_migrations` 테이블이 버전 추적. embedding 컬럼은 0001에 포함, 호환성을 위해 정의 후 defensive ALTER (legacy) 유지. `sqlx`에 `migrate` feature 추가.
 
-### TODO 4-7: 단기 메모리 GC 구현
-- **파일**: `src/memory/mod.rs`
-- **문제**: `short_term: Arc<DashMap<Uuid, Vec<ShortTermItem>>>` — TTL 만료된 아이템이 정리되지 않음
-- **수정**: 백그라운드 태스크로 주기적 TTL 만료 아이템 제거
+### TODO 4-7: 단기 메모리 GC 구현 — ✅ `8ad41c8`
+- **파일**: `src/memory/mod.rs` (`gc_short_term`, `spawn_short_term_gc`), `src/main.rs` (5분 주기로 시작)
+- **적용**: 만료된 ShortTermItem + 비어 있는 세션 버킷을 함께 정리. JoinHandle은 분리(detached); `MemoryManager` Arc가 drop되면 자연 종료. 1개 unit 테스트.
 
-### TODO 4-8: Webhook 시크릿 암호화 저장
-- **파일**: `src/memory/store.rs` (webhook_endpoints 테이블)
-- **문제**: `secret` 필드가 평문으로 DB에 저장됨
-- **수정**: AES-GCM 등으로 암호화 후 저장, 조회 시 복호화
+### TODO 4-8: Webhook 시크릿 암호화 저장 — ✅ `5eb2ae3`
+- **파일**: `src/crypto.rs` (`encrypt_secret`/`decrypt_secret`), `src/memory/store.rs` (`register_webhook` / `list_webhooks`)
+- **적용**: AES-256-GCM, 키는 `CLI_AGENT_DB_KEY` env 기반 SHA-256 derive. 포맷 `enc:v1:<base64(nonce||ciphertext)>`. legacy plaintext 행은 통과(decrypt 시 prefix 없으면 원문 반환). 5개 unit 테스트 (roundtrip, idempotent, legacy passthrough, wrong-key, fresh nonce).
 
 ---
 
-## 5. Test Coverage Expansion (테스트 커버리지) — ⏳ 전부 대기
+## 5. Test Coverage Expansion (테스트 커버리지) — ✅ Phase 5 완료
 
-**현재 상태**: 111개 테스트 (Phase 3에서 +24). 신규 테스트는 대부분 단위 테스트. 통합 테스트/E2E 부재는 여전함.
+**현재 상태**: 158개 테스트 (lib 144 + integration 14). Phase 5에서 +42 추가.
 
-### TODO 5-1: API 핸들러 통합 테스트 추가
+### TODO 5-1: API 핸들러 통합 테스트 추가 — ✅ `da8a189`
 - **파일**: `tests/api_integration.rs` (신규)
-- **범위**: 세션 CRUD, 실행 제출/취소/일시정지/재개, 메모리 CRUD, 웹훅 등록/배달
-- **방법**: `axum::test` 또는 `reqwest` + 인메모리 서버
-- **참고**: handlers/ 분할로 각 모듈별 타겟팅 테스트 쉬워짐
+- **적용**: in-process `axum::Router` + `tower::ServiceExt::oneshot` 으로 backend-free 통합 테스트. 8개 케이스 (auth glue, 세션 CRUD round-trip, unknown/invalid path, 빈 active runs, webhook register+list, skills list, replay nonce 차단). dev-deps `tower` + `http-body-util` 추가.
 
-### TODO 5-2: 에이전트 동작 에러 복구 경로 테스트
-- **현재 위치**: `src/orchestrator/run_manager.rs`, `completion.rs`, `graph_builder.rs`
-- **범위**:
-  - 노드 실패 → recovery graph 빌드 → 재실행 플로우
-  - 검증 incomplete → continuation graph → 최대 횟수 후 실패
-  - 동일 failure_class 연속 2회 → 즉시 실패 전환
+### TODO 5-2: 에이전트 동작 에러 복구 경로 테스트 — ✅ `9f52ed8`
+- **파일**: `src/orchestrator/mod.rs` (#[cfg(test)] 모듈 확장)
+- **적용**: `build_failure_recovery_graph` 가 실패 노드 ID·에러·성공 결과를 instructions에 포함, attempt 카운터로 노드 ID 갱신. `build_completion_followup_graph` 의 local-first 힌트 분기 (workspace 작업 vs URL/remote). 4개 테스트.
 
-### TODO 5-3: 동시 실행 테스트
-- **범위**: 다중 run 병렬 실행 시 DashMap 경합, 취소/일시정지 동시 요청, 워크스페이스 격리
+### TODO 5-3: 동시 실행 테스트 — ✅ `bce85e0`
+- **파일**: `tests/api_integration.rs`, `src/session_workspace.rs`
+- **적용**: 20개 병렬 POST /v1/sessions 모두 unique ID, 16개 cancel-unknown-run 동시 호출 5xx 없음. 32개 ensure_session_dir 동일 id idempotent + 8 세션 marker.txt 격리 검증. 4개 테스트.
 
-### TODO 5-4: MCP 툴 호출 플로우 테스트
-- **범위**: 정상 호출, 타임아웃 (TODO 2-7 신규 60s 래퍼 검증), 서버 응답 없음, 잘못된 JSON 응답 등
+### TODO 5-4: MCP 툴 호출 플로우 테스트 — ✅ `97f2c2f`
+- **파일**: `src/orchestrator/tool_augment.rs` (#[cfg(test)] 확장)
+- **적용**: malformed JSON / 누락 tool_name / unterminated tag 모두 panic 없음. 빈 McpRegistry call_tool 실패 처리, allowlist 미일치 차단. 6개 테스트.
 
-### TODO 5-5: Coder 백엔드 단위 테스트
-- **파일**: `src/orchestrator/coder_backend.rs`
-- **범위**: LLM/ClaudeCode/Codex 각 백엔드의 정상/실패/타임아웃 경로 (TODO 1-3의 kill 로직 커버)
-- **참고**: TODO 1-7 추가로 `flush_utf8_safe_*`와 `detect_changed_files_*` 테스트는 이미 존재
+### TODO 5-5: Coder 백엔드 단위 테스트 — ✅ `664ef75`
+- **파일**: `src/orchestrator/coder_backend.rs` (#[cfg(test)] 확장)
+- **적용**: tracked 파일 modify 후 `git status --porcelain=v1` modified 분류, ClaudeCodeBackend timeout 시 child kill (200ms timeout, 30s sleep stub → <5s에 Err), 정상 exit_code 반환. 3개 테스트 (Unix만).
 
-### TODO 5-6: 프론트엔드 핵심 경로 E2E 테스트 확장
-- **파일**: `web/e2e/`
-- **범위**: 채팅 전송→응답 수신, 실행 취소, 세션 전환, 설정 변경
+### TODO 5-6: 프론트엔드 핵심 경로 E2E 테스트 확장 — ✅ `1d2bec9`
+- **파일**: `web/e2e/sessions.spec.ts`, `web/e2e/run-actions.spec.ts`, `web/e2e/settings.spec.ts` (신규)
+- **적용**: 세션 페이지 빈 상태 + 신규 생성 흐름 + 상세 navigation, RunActions Cancel 버튼 → POST /v1/runs/:id/cancel, settings 카탈로그 렌더 + provider toggle. Playwright `page.route` 로 backend mock, `npm run test:e2e` 로 실행.
 
 ---
 
-## 6. Performance Optimizations (성능 최적화) — ⏳ 전부 대기 (부분 선반영 있음)
+## 6. Performance Optimizations (성능 최적화) — ✅ Phase 7 완료 (6-2 deferred)
 
-### TODO 6-1: `record_action_event` 배치 처리
-- **현재 위치**: `src/orchestrator/mod.rs` `record_action_event` (1곳) + 호출 사이트 전체 (다수)
-- **문제**: 모든 이벤트를 개별 DB INSERT로 기록. 고빈도 이벤트(token_chunk 등)에서 DB 부하
-- **수정**: mpsc 채널 기반 배치 INSERT (100ms 또는 50건 단위 flush)
+### TODO 6-1: `record_action_event` 배치 처리 — ✅ `d7ac466`
+- **파일**: `src/orchestrator/node_executor.rs` (`build_event_sink`), `src/memory/store.rs` (`batch_insert_run_action_events`, `RunActionEventInput`)
+- **적용**: 토큰 chunk 처리 task를 `tokio::select!` (mpsc + 100ms ticker) 로 변경, 50개 또는 100ms마다 단일 트랜잭션으로 flush. 채널 close 시 final drain. 2개 unit 테스트 (empty noop, 7-row monotonic seq).
 
-### TODO 6-2: 과도한 Arc clone 정리
-- **현재 위치**: `src/orchestrator/node_executor.rs` `build_run_node_fn`
-- **문제**: 클로저 내에서 orchestrator, agents, router, memory, context, mcp, coder_manager 등 12개 Arc를 매번 clone
-- **수정**: 관련 참조를 묶은 `NodeExecutionContext` 구조체 도입, 단일 Arc clone으로 대체
+### TODO 6-2: 과도한 Arc clone 정리 — ⏸️ 보류
+- **이유**: 측정 결과 closure 생성 시 Arc clone × 12 = 약 ~130ns. inner 작업이 LLM/IO로 ms-to-s 단위라 의미 있는 효과 없음. 리팩토링 비용 > 실측 이득으로 판단되어 deferred.
 
-### TODO 6-3: DashMap 반복 시 성능 개선
-- **파일**: `src/orchestrator/mod.rs` (`list_active_runs`, `list_recent_runs`, `list_skills`)
-- **문제**: 전체 DashMap 반복 + clone + sort. 대량 데이터 시 성능 저하
-- **수정**: 인덱스 캐시 또는 정렬 유지 자료구조 도입
+### TODO 6-3: DashMap 반복 시 성능 개선 — ✅ `1e9318c`
+- **파일**: `src/orchestrator/mod.rs` (`list_recent_runs`, `list_active_runs`, `list_skills`)
+- **적용**: `list_recent_runs` O(n*m) any() → HashSet 조회로 O(n+m). 모든 list 함수 `Vec::with_capacity` 사용. `list_skills` 결정적 ID 정렬 추가.
 
-### TODO 6-4: 프론트엔드 이벤트 정렬 최적화
-- **파일**: `web/src/components/agent-thinking.tsx:69`
-- **문제**: `setEvents` 콜백에서 매 이벤트마다 배열 복사 + 전체 재정렬 (O(n log n))
-- **수정**: 이진 삽입(O(log n)) 또는 seq 기반 append-only 보장
+### TODO 6-4: 프론트엔드 이벤트 정렬 최적화 — ✅ `94ce11c`
+- **파일**: `web/src/hooks/use-sse.ts`
+- **적용**: in-order 도착 시 즉시 push (fast path), out-of-order 시 binary insertion. O(n log n) per chunk → O(n) 최악, append 시 O(1) amortized.
 
-### TODO 6-5: Pause 메커니즘 비효율 개선
-- **파일**: `src/runtime/mod.rs:243`
-- **문제**: 120ms sleep 루프로 pause 상태 폴링
-- **수정**: `tokio::sync::Notify` 또는 watch 채널 기반 이벤트 구동 방식으로 전환
+### TODO 6-5: Pause 메커니즘 비효율 개선 — ✅ `df08e2a`
+- **파일**: `src/runtime/mod.rs` (`PauseNotify`, `execute_graph_with_pause_notify`), `src/orchestrator/mod.rs` (`RunControl.pause_changed`)
+- **적용**: `RunControl` 에 `Arc<tokio::sync::Notify>` 추가, pause/resume/cancel 호출 시 `notify_waiters()`. runtime은 `tokio::time::timeout(1s, notify.notified())`로 변경 (immediate wake + 1s safety net). 기존 execute_graph는 pause_notify=None thin wrapper 유지.
 
-### TODO 6-6: SSE 프론트엔드 재연결 로직 추가
-- **파일**: `web/src/lib/sse.ts`, `web/src/hooks/use-sse.ts`
-- **문제**: SSE 연결 끊김 시 재연결 없음. 네트워크 일시 단절 시 이후 이벤트 전부 유실
-- **수정**: exponential backoff 재연결 + 마지막 수신 seq 기반 resume + "Reconnecting..." UI 표시
+### TODO 6-6: SSE 프론트엔드 재연결 로직 추가 — ✅ `3abeea3`
+- **파일**: `src/interface/handlers/runs.rs` (`StreamQuery::after_seq`), `web/src/hooks/use-sse.ts`
+- **적용**: backend 가 `?after_seq=N` 쿼리 인식, 그 seq부터 재생. frontend 는 self-restarting loop + exponential backoff (250ms·500·1s·2s·4s·8s cap) + `connectionState` ("connecting"/"open"/"reconnecting"/"closed") + duplicate seq 차단.
 
-### TODO 6-7: 메모리 검색 인덱싱 개선
-- **파일**: `src/memory/store.rs`
-- **문제**: `search_memory`가 `limit * 20`행 fetch 후 Rust에서 스코어링 — O(n) 스캔
-- **수정**: `memory_items(session_id, updated_at DESC)` 인덱스 추가, FTS5 키워드 검색 프리필터 적용
+### TODO 6-7: 메모리 검색 인덱싱 개선 — ✅ `5376340`
+- **파일**: `migrations/0002_memory_search_index.sql` (신규)
+- **적용**: `(session_id, updated_at DESC)` 복합 인덱스 추가로 search_memory 의 ORDER BY → 인덱스 스캔. FTS5 가상 테이블은 더 큰 변경이라 별도 phase 로 보류.
 
 ---
 
@@ -552,9 +535,9 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 2. ~~**Phase 2**: Core Refactoring (TODO 3-1, 3-2, 3-3)~~ — ✅ 완료
 3. ~~**Phase 3**: Agent Behavior (TODO 2-1 ~ 2-7)~~ — ✅ 완료
 4. ~~**Phase 4**: Remaining Refactoring (TODO 3-4 ~ 3-6)~~ — ✅ 완료
-5. **Phase 5**: Tests (TODO 5-1 ~ 5-6) — 회귀 방지 (Phase 6/7 전 필수)
-6. **Phase 6**: Infrastructure (TODO 4-1 ~ 4-8) — 운영 안정성
-7. **Phase 7**: Performance (TODO 6-1 ~ 6-7) — 최적화
+5. ~~**Phase 5**: Tests (TODO 5-1 ~ 5-6)~~ — ✅ 완료
+6. ~~**Phase 6**: Infrastructure (TODO 4-1 ~ 4-8)~~ — ✅ 완료
+7. ~~**Phase 7**: Performance (TODO 6-1 ~ 6-7)~~ — ✅ 완료 (6-2 deferred)
 
 **신규 기능 (우선순위는 사용자 합의 필요)**:
 - Section 7 (Workflow Composition): 동적 요구사항 분석기 + 워크플로우 컴포저
@@ -563,35 +546,42 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 핵심 파일 참조 (2026-04-22 기준)
+## 핵심 파일 참조 (2026-04-27 기준)
 
 | 파일 | 줄 수 | 비고 |
 |------|-------|------|
-| `src/orchestrator/mod.rs` | 2,984 | 7,654 → 2,984 (Phase 2로 분할) |
-| `src/orchestrator/node_executor.rs` | 1,942 | build_run_node_fn + event_sink |
+| `src/orchestrator/mod.rs` | ~3,100 | 7,654 → ~3,100 (Phase 2 분할 + Phase 5/7 추가) |
+| `src/orchestrator/node_executor.rs` | ~2,000 | build_run_node_fn + event_sink (token chunk 배치 추가) |
 | `src/orchestrator/graph_builder.rs` | 652 | build_graph + recovery/followup |
 | `src/orchestrator/task_classifier.rs` | 544 | classify_task + fast-path + follow-up |
 | `src/orchestrator/helpers.rs` | 467 | 파싱/포맷 순수 유틸 + contains_word |
-| `src/orchestrator/run_manager.rs` | 473 | submit_run, execute_run, run_and_wait |
+| `src/orchestrator/run_manager.rs` | ~480 | submit_run, execute_run, run_and_wait, pause_notify |
 | `src/orchestrator/settings.rs` | 265 | AppSettings |
 | `src/orchestrator/skill_router.rs` | 182 | auto_skill_route |
-| `src/orchestrator/coder_backend.rs` | ~570 | Phase 1에서 git diff 감지 + kill 로직 추가 |
-| `src/interface/api.rs` | 267 | 2,796 → 267 (Phase 2로 분할) |
-| `src/interface/handlers/runs.rs` | 693 | 15개 run 엔드포인트 |
+| `src/orchestrator/coder_backend.rs` | ~680 | git diff 감지 + kill + unit tests |
+| `src/interface/api.rs` | ~330 | router + serve + CORS allowlist + body limit + graceful shutdown |
+| `src/interface/rate_limit.rs` | 213 | Phase 6 신규: per-key 토큰 버킷 |
+| `src/interface/handlers/runs.rs` | ~700 | 15개 run 엔드포인트 (after_seq 추가) |
+| `src/interface/handlers/health.rs` | 56 | Phase 6 신규: /health 라이브니스 |
 | `src/interface/handlers/memory.rs` | 393 | 7개 메모리 |
 | `src/interface/handlers/terminal.rs` | 277 | 4개 PTY + WS |
+| `src/interface/handlers/webhooks.rs` | ~210 | DTO validator 추가 |
 | `src/context/mod.rs` | 354 | estimate_tokens 수정 완료 |
-| `src/runtime/mod.rs` | 791 | NodeExecutionResult 헬퍼 추가됨. pause 메커니즘(TODO 6-5)은 남음 |
-| `src/memory/store.rs` | 2,242 | 마이그레이션 시스템(TODO 4-6), 암호화(TODO 4-8) 남음 |
-| `src/memory/mod.rs` | 610 | 단기 메모리 GC(TODO 4-7) 남음 |
+| `src/runtime/mod.rs` | ~810 | execute_graph + execute_graph_with_pause_notify |
+| `src/memory/store.rs` | ~2,140 | sqlx::migrate! + RunActionEventInput + 암호화 |
+| `src/memory/mod.rs` | ~700 | record_node_event + spawn_short_term_gc |
 | `src/terminal/mod.rs` | 241 | Phase 1 poisoning 처리 완료 |
-| `src/crypto.rs` | 208 | Phase 4 신규: SignatureVerifier 트레이트 + HMAC/Ed25519 구현 |
-| `web/src/lib/config.ts` | 8 | Phase 4 신규: 프론트엔드 API 설정 단일 소스 |
-| `web/src/components/agent-thinking.tsx` | ~600 | 이벤트 정렬(TODO 6-4) / phase indicator(TODO 8-2) 남음 |
+| `src/crypto.rs` | ~370 | SignatureVerifier + AES-256-GCM secret encryption |
+| `migrations/0001_initial_schema.sql` | 167 | Phase 6 신규: 초기 스키마 |
+| `migrations/0002_memory_search_index.sql` | 6 | Phase 7 신규: search index |
+| `tests/api_integration.rs` | ~340 | 14개 integration 테스트 |
+| `web/src/lib/config.ts` | 8 | API 설정 단일 소스 |
+| `web/src/hooks/use-sse.ts` | ~150 | 재연결 + after_seq + connection state |
+| `web/e2e/{sessions,run-actions,settings}.spec.ts` | — | Phase 5 신규 Playwright |
 
 ---
 
-## 커밋 레퍼런스 (38 commits)
+## 커밋 레퍼런스 (58 commits)
 
 ### Phase 1 Critical Fixes
 - `2171e4e` fix: Mutex poisoning in terminal scrollback
@@ -620,3 +610,30 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - `a1e52f2` refactor: Consolidate frontend API config into lib/config.ts
 - `3775b09` refactor: Collapse paired session + action event writes
 - `74b2089` refactor: Extract signature verification into crypto module
+
+### Phase 5 Test Coverage
+- `da8a189` test: Add HTTP integration tests for interface::api router
+- `9f52ed8` test: Cover failure recovery and completion follow-up graph builders
+- `bce85e0` test: Cover concurrent session, run-control, and workspace paths
+- `97f2c2f` test: Cover MCP tool extract / execute failure paths
+- `664ef75` test: Cover ClaudeCodeBackend timeout-kill and modified-file detection
+- `1d2bec9` test: Add Playwright specs for sessions, run actions, and settings
+
+### Phase 6 Infrastructure
+- `7451d8d` feat: Add token-bucket rate limiter middleware on the API router
+- `1bd84d4` feat: Honor CLI_AGENT_ALLOWED_ORIGINS env var for CORS allowlist
+- `8e03adb` feat: Add 2 MiB body limit and webhook DTO validation
+- `afbc40b` feat: Add /health (and /v1/health) liveness + readiness endpoint
+- `35a6a63` feat: Graceful shutdown — cancel in-flight runs on SIGINT/SIGTERM
+- `59ecfe7` refactor: Switch DB schema bootstrap to sqlx::migrate!
+- `8ad41c8` feat: Periodically GC expired short-term memory items
+- `5eb2ae3` feat: Encrypt webhook secrets at rest with AES-256-GCM
+
+### Phase 7 Performance
+- `d7ac466` perf: Batch high-frequency token-chunk INSERTs in the event sink
+- `1e9318c` perf: HashSet-based dedup in list_recent_runs + pre-allocated Vec
+- `94ce11c` perf: Append-fast / binary-insert for SSE event accumulation
+- `df08e2a` perf: Wake the run loop via Notify on pause/resume instead of poll
+- `3abeea3` feat: SSE reconnection with after_seq resume + connection state
+- `5376340` perf: Add (session_id, updated_at DESC) index for memory search
+- (TODO 6-2 deferred — measured Arc clone cost is dominated by LLM/IO)
