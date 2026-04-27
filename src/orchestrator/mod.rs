@@ -165,7 +165,12 @@ impl Orchestrator {
     }
 
     pub fn list_skills(&self) -> Vec<WorkflowTemplate> {
-        self.skills.iter().map(|e| e.value().clone()).collect()
+        let mut out: Vec<WorkflowTemplate> = Vec::with_capacity(self.skills.len());
+        for kv in self.skills.iter() {
+            out.push(kv.value().clone());
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
     }
 
     pub fn get_skill(&self, id: &str) -> Option<WorkflowTemplate> {
@@ -296,10 +301,15 @@ impl Orchestrator {
 
     pub async fn list_recent_runs(&self, limit: usize) -> anyhow::Result<Vec<RunRecord>> {
         let mut runs = self.memory.list_recent_runs(limit).await?;
+        // O(n*m) "is this id already there?" check replaced with a HashSet
+        // lookup so a busy server with many in-memory runs doesn't quadratic.
+        let known: std::collections::HashSet<Uuid> =
+            runs.iter().map(|r| r.run_id).collect();
+        runs.reserve(self.runs.len());
         for kv in self.runs.iter() {
-            let run = kv.value().clone();
-            if !runs.iter().any(|r| r.run_id == run.run_id) {
-                runs.push(run);
+            let run = kv.value();
+            if !known.contains(&run.run_id) {
+                runs.push(run.clone());
             }
         }
 
@@ -309,7 +319,7 @@ impl Orchestrator {
     }
 
     pub async fn list_active_runs(&self) -> Vec<RunRecord> {
-        let mut active = Vec::new();
+        let mut active = Vec::with_capacity(self.runs.len());
         for kv in self.runs.iter() {
             let run = kv.value();
             if matches!(run.status, RunStatus::Running | RunStatus::Queued) {
