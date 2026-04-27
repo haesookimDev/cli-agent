@@ -78,6 +78,9 @@ pub struct Orchestrator {
 struct RunControl {
     cancel_requested: Arc<AtomicBool>,
     pause_requested: Arc<AtomicBool>,
+    /// Fired when the pause state changes (paused→resumed or cancel requested)
+    /// so the runtime loop can wake immediately instead of polling every 120ms.
+    pause_changed: Arc<tokio::sync::Notify>,
 }
 
 const MAX_COMPLETION_CONTINUATIONS: u8 = 2;
@@ -505,6 +508,8 @@ impl Orchestrator {
             return Ok(false);
         };
         control.cancel_requested.store(true, Ordering::Relaxed);
+        // Wake the runtime loop in case it was parked on the pause Notify.
+        control.pause_changed.notify_waiters();
         drop(control);
 
         if let Some(mut run) = self.runs.get_mut(&run_id) {
@@ -538,6 +543,7 @@ impl Orchestrator {
             return Ok(false);
         };
         control.pause_requested.store(true, Ordering::Relaxed);
+        control.pause_changed.notify_waiters();
         drop(control);
 
         if let Some(mut run) = self.runs.get_mut(&run_id) {
@@ -571,6 +577,7 @@ impl Orchestrator {
             return Ok(false);
         };
         control.pause_requested.store(false, Ordering::Relaxed);
+        control.pause_changed.notify_waiters();
         let cancelling = control.cancel_requested.load(Ordering::Relaxed);
         drop(control);
 
@@ -1241,6 +1248,7 @@ impl Orchestrator {
             RunControl {
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 pause_requested: Arc::new(AtomicBool::new(false)),
+                pause_changed: Arc::new(tokio::sync::Notify::new()),
             },
         );
         let run_id_text = run_id.to_string();

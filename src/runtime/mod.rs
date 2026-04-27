@@ -222,6 +222,11 @@ pub type OnNodeCompletedFn = Arc<
 pub type EventSink = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
 pub type ShouldCancelFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type ShouldPauseFn = Arc<dyn Fn() -> bool + Send + Sync>;
+/// Optional wakeup signal fired whenever the run's pause/cancel state
+/// changes. Lets the run loop park on `notified()` instead of polling
+/// `should_pause` every 120ms. Backward-compatible: when None the loop
+/// falls back to the old fixed-interval poll.
+pub type PauseNotify = Arc<tokio::sync::Notify>;
 
 #[derive(Debug, Clone)]
 pub struct AgentRuntime {
@@ -237,12 +242,34 @@ impl AgentRuntime {
 
     pub async fn execute_graph(
         &self,
+        graph: ExecutionGraph,
+        run_node: RunNodeFn,
+        on_completed: OnNodeCompletedFn,
+        on_event: Option<EventSink>,
+        should_cancel: Option<ShouldCancelFn>,
+        should_pause: Option<ShouldPauseFn>,
+    ) -> anyhow::Result<Vec<NodeExecutionResult>> {
+        self.execute_graph_with_pause_notify(
+            graph,
+            run_node,
+            on_completed,
+            on_event,
+            should_cancel,
+            should_pause,
+            None,
+        )
+        .await
+    }
+
+    pub async fn execute_graph_with_pause_notify(
+        &self,
         mut graph: ExecutionGraph,
         run_node: RunNodeFn,
         on_completed: OnNodeCompletedFn,
         on_event: Option<EventSink>,
         should_cancel: Option<ShouldCancelFn>,
         should_pause: Option<ShouldPauseFn>,
+        pause_notify: Option<PauseNotify>,
     ) -> anyhow::Result<Vec<NodeExecutionResult>> {
         let mut outputs: HashMap<String, NodeExecutionResult> = HashMap::new();
         let mut running: HashSet<String> = HashSet::new();
@@ -310,7 +337,18 @@ impl AgentRuntime {
                     break;
                 }
                 if pause_requested {
-                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    if let Some(notify) = pause_notify.as_ref() {
+                        // Cap the wait so a missed wakeup still re-checks
+                        // within 1s, but normal resume_run -> notify_waiters
+                        // resolves immediately.
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            notify.notified(),
+                        )
+                        .await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(120)).await;
+                    }
                     continue;
                 }
 

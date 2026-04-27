@@ -78,6 +78,7 @@ impl Orchestrator {
             RunControl {
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 pause_requested: Arc::new(AtomicBool::new(false)),
+                pause_changed: Arc::new(tokio::sync::Notify::new()),
             },
         );
         let run_id_text = run_id.to_string();
@@ -147,6 +148,10 @@ impl Orchestrator {
             .get(&run_id)
             .map(|c| c.pause_requested.clone())
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let pause_notify = self
+            .controls
+            .get(&run_id)
+            .map(|c| c.pause_changed.clone());
         self.set_running(run_id).await?;
 
         if cancel_flag.load(Ordering::Relaxed) {
@@ -295,13 +300,14 @@ impl Orchestrator {
             }
             let outputs = self
                 .runtime
-                .execute_graph(
+                .execute_graph_with_pause_notify(
                     current_graph,
                     run_node.clone(),
                     on_complete.clone(),
                     Some(event_sink.clone()),
                     Some(should_cancel.clone()),
                     Some(should_pause.clone()),
+                    pause_notify.clone(),
                 )
                 .await;
 
