@@ -21,6 +21,52 @@ pub struct NodeExecutionResult {
     pub duration_ms: u128,
     pub succeeded: bool,
     pub error: Option<String>,
+    /// Sum of provider-reported token usage for this node. None when the
+    /// underlying provider didn't surface a usage block (CLI backends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<crate::types::TokenUsage>,
+}
+
+#[cfg(test)]
+mod token_usage_tests {
+    use super::*;
+
+    #[test]
+    fn success_with_usage_attaches_token_counts() {
+        let started = std::time::Instant::now();
+        let usage = crate::types::TokenUsage {
+            input_tokens: 42,
+            output_tokens: 17,
+        };
+        let result = NodeExecutionResult::success_with_usage(
+            "n1".to_string(),
+            crate::types::AgentRole::Planner,
+            "anthropic:claude-sonnet-4",
+            "ok".to_string(),
+            Some(usage),
+            started,
+        );
+        assert!(result.succeeded);
+        let got = result.token_usage.expect("token usage attached");
+        assert_eq!(got.input_tokens, 42);
+        assert_eq!(got.output_tokens, 17);
+        assert_eq!(got.total(), 59);
+    }
+
+    #[test]
+    fn token_usage_merge_sums_pairs() {
+        let a = crate::types::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+        };
+        let b = crate::types::TokenUsage {
+            input_tokens: 3,
+            output_tokens: 7,
+        };
+        let m = a.merge(&b);
+        assert_eq!(m.input_tokens, 13);
+        assert_eq!(m.output_tokens, 12);
+    }
 }
 
 impl NodeExecutionResult {
@@ -40,7 +86,23 @@ impl NodeExecutionResult {
             duration_ms: started.elapsed().as_millis(),
             succeeded: true,
             error: None,
+            token_usage: None,
         }
+    }
+
+    /// Like `success`, but stamps token_usage so the trace UI can surface
+    /// per-node consumption.
+    pub fn success_with_usage(
+        node_id: String,
+        role: AgentRole,
+        model: impl Into<String>,
+        output: String,
+        usage: Option<crate::types::TokenUsage>,
+        started: std::time::Instant,
+    ) -> Self {
+        let mut result = Self::success(node_id, role, model, output, started);
+        result.token_usage = usage;
+        result
     }
 
     /// Build a failed result with an empty output. Callers that need a custom
@@ -60,6 +122,7 @@ impl NodeExecutionResult {
             duration_ms: started.elapsed().as_millis(),
             succeeded: false,
             error: Some(error.into()),
+            token_usage: None,
         }
     }
 
@@ -81,6 +144,7 @@ impl NodeExecutionResult {
             duration_ms: started.elapsed().as_millis(),
             succeeded: false,
             error: Some(error.into()),
+            token_usage: None,
         }
     }
 }
@@ -99,6 +163,8 @@ pub enum RuntimeEvent {
         duration_ms: u128,
         output_preview: String,
         output_truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_usage: Option<crate::types::TokenUsage>,
     },
     NodeFailed {
         node_id: String,
@@ -387,6 +453,7 @@ impl AgentRuntime {
                                 duration_ms: ok.duration_ms,
                                 output_preview,
                                 output_truncated,
+                                token_usage: ok.token_usage,
                             });
                         }
 
@@ -474,6 +541,7 @@ impl AgentRuntime {
                             duration_ms: 0,
                             succeeded: false,
                             error: Some(err.to_string()),
+                            token_usage: None,
                         };
                         outputs.insert(node.id.clone(), failed.clone());
 
@@ -746,6 +814,7 @@ mod tests {
                         duration_ms: 1,
                         succeeded: true,
                         error: None,
+                        token_usage: None,
                     })
                 }
                 .boxed()
@@ -798,6 +867,7 @@ mod tests {
                         duration_ms: 0,
                         succeeded: false,
                         error: Some("boom".to_string()),
+                        token_usage: None,
                     })
                 } else {
                     Ok(NodeExecutionResult {
@@ -808,6 +878,7 @@ mod tests {
                         duration_ms: 0,
                         succeeded: true,
                         error: None,
+                        token_usage: None,
                     })
                 }
             }

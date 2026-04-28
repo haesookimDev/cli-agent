@@ -319,6 +319,7 @@ impl Orchestrator {
                             duration_ms: started.elapsed().as_millis(),
                             succeeded: all_passed,
                             error,
+                            token_usage: None,
                         });
                     }
 
@@ -469,6 +470,7 @@ impl Orchestrator {
                                 duration_ms: started.elapsed().as_millis(),
                                 succeeded: all_passed,
                                 error: if all_passed { None } else { Some("external validation failed".to_string()) },
+                                token_usage: None,
                             });
                         } else {
                             return Ok(NodeExecutionResult::success(
@@ -539,6 +541,7 @@ impl Orchestrator {
                         duration_ms: started.elapsed().as_millis(),
                         succeeded: all_passed,
                         error,
+                        token_usage: None,
                     });
                 }
 
@@ -1095,6 +1098,7 @@ impl Orchestrator {
                         } else {
                             Some("One or more tool calls failed".to_string())
                         },
+                        token_usage: None,
                     });
                 }
 
@@ -1207,6 +1211,7 @@ impl Orchestrator {
                                     } else {
                                         None
                                     },
+                                    token_usage: None,
                                 })
                             }
                             Err(err) => Ok(NodeExecutionResult::failure(
@@ -1492,6 +1497,10 @@ impl Orchestrator {
                         // Tool augmentation: if LLM output contains <tool_call> tags, execute and re-query
                         let mut current_output = output.content.clone();
                         let mut current_model = output.model.clone();
+                        // Accumulate token usage across the initial call and any
+                        // tool-augmentation followups so the node-level result
+                        // reflects the full cost.
+                        let mut accumulated_usage: Option<crate::types::TokenUsage> = output.usage;
                         for _tool_round in 0..tool_augment::MAX_TOOL_ROUNDS {
                             let tool_calls = tool_augment::extract_tool_calls(&current_output);
                             if tool_calls.is_empty() {
@@ -1534,6 +1543,12 @@ impl Orchestrator {
                                 Ok(followup) => {
                                     current_output = followup.content;
                                     current_model = followup.model;
+                                    if let Some(u) = followup.usage {
+                                        accumulated_usage = Some(match accumulated_usage {
+                                            Some(prev) => prev.merge(&u),
+                                            None => u,
+                                        });
+                                    }
                                 }
                                 Err(_) => break,
                             }
@@ -1553,6 +1568,7 @@ impl Orchestrator {
                                     "node_id": node_id.clone(),
                                     "role": role,
                                     "model": model.clone(),
+                                    "token_usage": accumulated_usage,
                                 }),
                             )
                             .await;
@@ -1576,11 +1592,12 @@ impl Orchestrator {
                             )
                             .await;
 
-                        Ok(NodeExecutionResult::success(
+                        Ok(NodeExecutionResult::success_with_usage(
                             node_id,
                             role,
                             current_model,
                             current_output,
+                            accumulated_usage,
                             started,
                         ))
                     }
@@ -1707,6 +1724,7 @@ impl Orchestrator {
                         duration_ms,
                         output_preview,
                         output_truncated,
+                        token_usage,
                     } => serde_json::json!({
                         "node_id": node_id,
                         "role": role,
@@ -1715,6 +1733,7 @@ impl Orchestrator {
                         "duration_ms": duration_ms,
                         "output_preview": output_preview,
                         "output_truncated": output_truncated,
+                        "token_usage": token_usage,
                     }),
                     RuntimeEvent::NodeFailed {
                         node_id,

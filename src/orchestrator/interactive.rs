@@ -308,6 +308,7 @@ pub async fn execute_react_loop(
         } else {
             Some(format!("Did not converge in {max_iterations} iterations"))
         },
+        token_usage: None,
     }
 }
 

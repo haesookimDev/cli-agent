@@ -2074,6 +2074,7 @@ mod tests {
             } else {
                 Some("synthetic failure".to_string())
             },
+            token_usage: None,
         }
     }
 
@@ -2358,6 +2359,7 @@ mod tests {
         let (result, _skip) = on_completed(
             AgentNode::new("plan", AgentRole::Planner, "plan"),
             NodeExecutionResult {
+                token_usage: None,
                 node_id: "plan".to_string(),
                 role: AgentRole::Planner,
                 model: "mock:model".to_string(),
@@ -2461,6 +2463,7 @@ mod tests {
         let (result, _skip) = on_completed(
             AgentNode::new("plan", AgentRole::Planner, "plan"),
             NodeExecutionResult {
+                token_usage: None,
                 node_id: "plan".to_string(),
                 role: AgentRole::Planner,
                 model: "mock:model".to_string(),
@@ -2617,6 +2620,7 @@ mod tests {
                     duration_ms: 10,
                     succeeded: true,
                     error: None,
+                    token_usage: None,
                 }],
                 1,
             )

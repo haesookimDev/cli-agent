@@ -23,10 +23,14 @@ pub struct AgentInput {
     pub working_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentOutput {
     pub model: String,
     pub content: String,
+    /// Token usage reported by the upstream provider for this single
+    /// inference call. `None` when the provider doesn't expose a usage
+    /// block (e.g. CLI backends).
+    pub usage: Option<crate::types::TokenUsage>,
 }
 
 #[async_trait]
@@ -141,6 +145,7 @@ impl AgentRegistry {
         Ok(AgentOutput {
             model: format!("{}:{}", inference.provider, inference.model_id),
             content: inference.output,
+            usage: inference.usage,
         })
     }
 }
@@ -203,6 +208,7 @@ impl SubAgent for BuiltinAgent {
         Ok(AgentOutput {
             model: format!("{}:{}", inference.provider, inference.model_id),
             content: inference.output,
+            usage: inference.usage,
         })
     }
 }
