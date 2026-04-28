@@ -309,6 +309,30 @@ pub struct AgentExecutionRecord {
     pub error: Option<String>,
 }
 
+/// Per-inference token accounting reported by the upstream LLM provider.
+/// `Option<TokenUsage>` is propagated through InferenceResult → AgentOutput
+/// → NodeExecutionResult → RuntimeEvent::NodeCompleted so trace UIs and
+/// HarnessMetrics can compute cumulative usage. Providers that don't surface
+/// a usage block (e.g. CLI backend) leave the field as None.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u32 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    pub fn merge(&self, other: &TokenUsage) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub run_id: Uuid,

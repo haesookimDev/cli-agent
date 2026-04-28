@@ -32,6 +32,7 @@ struct CacheEntry {
     provider: ProviderKind,
     created_at: Instant,
     ttl_secs: u64,
+    usage: Option<crate::types::TokenUsage>,
 }
 
 impl CacheEntry {
@@ -137,6 +138,10 @@ pub struct InferenceResult {
     pub model_id: String,
     pub output: String,
     pub used_fallback: bool,
+    /// Token usage reported by the provider when available. None for the
+    /// CLI backend and any other path that doesn't surface a usage block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::types::TokenUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +404,7 @@ impl ModelRouter {
                         model_id: entry.model_id.clone(),
                         output: entry.output.clone(),
                         used_fallback: false,
+                        usage: entry.usage,
                     },
                 ));
             } else {
@@ -437,7 +443,7 @@ impl ModelRouter {
                 .generate(&model, prompt, working_dir, cli_output.as_ref())
                 .await
             {
-                Ok(output) => {
+                Ok((output, usage)) => {
                     // Store in cache
                     self.cache.insert(
                         hash,
@@ -447,6 +453,7 @@ impl ModelRouter {
                             provider: model.provider,
                             created_at: Instant::now(),
                             ttl_secs: Self::cache_ttl_secs(profile),
+                            usage,
                         },
                     );
 
@@ -457,6 +464,7 @@ impl ModelRouter {
                             model_id: model.model_id,
                             output,
                             used_fallback: !first,
+                            usage,
                         },
                     ));
                 }
@@ -546,7 +554,7 @@ impl ModelRouter {
                 )
                 .await
             {
-                Ok(output) => {
+                Ok((output, usage)) => {
                     // Store in cache
                     let hash = Self::prompt_hash(profile, prompt, working_dir);
                     self.cache.insert(
@@ -557,6 +565,7 @@ impl ModelRouter {
                             provider: model.provider,
                             created_at: Instant::now(),
                             ttl_secs: Self::cache_ttl_secs(profile),
+                            usage,
                         },
                     );
 
@@ -567,6 +576,7 @@ impl ModelRouter {
                             model_id: model.model_id,
                             output,
                             used_fallback: !first,
+                            usage,
                         },
                     ));
                 }
@@ -690,7 +700,7 @@ impl ProviderClient {
         prompt: &str,
         working_dir: Option<&Path>,
         cli_output: Option<&CliOutputCallback>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         if self.disabled.contains(&model.provider) {
             return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
         }
@@ -703,15 +713,23 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.generate_anthropic(model, prompt).await,
             ProviderKind::Gemini => self.generate_gemini(model, prompt).await,
             ProviderKind::Vllm => self.generate_vllm(model, prompt).await,
-            ProviderKind::ClaudeCode => {
-                self.generate_claude_code(prompt, working_dir, cli_output).await
-            }
-            ProviderKind::Codex => self.generate_codex(prompt, working_dir, cli_output).await,
-            ProviderKind::Mock => Ok(mock_inference(model, prompt)),
+            ProviderKind::ClaudeCode => self
+                .generate_claude_code(prompt, working_dir, cli_output)
+                .await
+                .map(|s| (s, None)),
+            ProviderKind::Codex => self
+                .generate_codex(prompt, working_dir, cli_output)
+                .await
+                .map(|s| (s, None)),
+            ProviderKind::Mock => Ok((mock_inference(model, prompt), None)),
         }
     }
 
-    async fn generate_openai(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_openai(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let api_key = self
             .openai_api_key
             .as_deref()
@@ -735,13 +753,19 @@ impl ProviderClient {
         }
 
         let body: serde_json::Value = resp.json().await?;
-        body["choices"][0]["message"]["content"]
+        let content = body["choices"][0]["message"]["content"]
             .as_str()
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("unexpected OpenAI response format"))
+            .ok_or_else(|| anyhow::anyhow!("unexpected OpenAI response format"))?;
+        let usage = parse_openai_usage(&body["usage"]);
+        Ok((content, usage))
     }
 
-    async fn generate_anthropic(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_anthropic(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let api_key = self
             .anthropic_api_key
             .as_deref()
@@ -768,13 +792,19 @@ impl ProviderClient {
         }
 
         let body: serde_json::Value = resp.json().await?;
-        body["content"][0]["text"]
+        let content = body["content"][0]["text"]
             .as_str()
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic response format"))
+            .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic response format"))?;
+        let usage = parse_anthropic_usage(&body["usage"]);
+        Ok((content, usage))
     }
 
-    async fn generate_gemini(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_gemini(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let api_key = self
             .gemini_api_key
             .as_deref()
@@ -801,13 +831,19 @@ impl ProviderClient {
         }
 
         let body: serde_json::Value = resp.json().await?;
-        body["candidates"][0]["content"]["parts"][0]["text"]
+        let content = body["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("unexpected Gemini response format"))
+            .ok_or_else(|| anyhow::anyhow!("unexpected Gemini response format"))?;
+        let usage = parse_gemini_usage(&body["usageMetadata"]);
+        Ok((content, usage))
     }
 
-    async fn generate_vllm(&self, model: &ModelSpec, prompt: &str) -> anyhow::Result<String> {
+    async fn generate_vllm(
+        &self,
+        model: &ModelSpec,
+        prompt: &str,
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let base_url = self.vllm_base_url.read().unwrap().clone();
         let endpoint = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
 
@@ -829,10 +865,14 @@ impl ProviderClient {
         }
 
         let body: serde_json::Value = resp.json().await?;
-        body["choices"][0]["message"]["content"]
+        let content = body["choices"][0]["message"]["content"]
             .as_str()
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("unexpected vLLM response format"))
+            .ok_or_else(|| anyhow::anyhow!("unexpected vLLM response format"))?;
+        // vLLM speaks the OpenAI completions format, including the same
+        // `usage` block shape.
+        let usage = parse_openai_usage(&body["usage"]);
+        Ok((content, usage))
     }
 
     fn cli_provider(&self, provider: ProviderKind) -> anyhow::Result<CliProviderConfig> {
@@ -1050,7 +1090,7 @@ impl ProviderClient {
         working_dir: Option<&Path>,
         on_token: &TokenCallback,
         cli_output: Option<&CliOutputCallback>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         if self.disabled.contains(&model.provider) {
             return Err(anyhow::anyhow!("provider {} is disabled", model.provider));
         }
@@ -1065,16 +1105,16 @@ impl ProviderClient {
             ProviderKind::Anthropic => self.stream_anthropic(model, prompt, on_token).await,
             ProviderKind::Gemini => self.stream_gemini(model, prompt, on_token).await,
             ProviderKind::ClaudeCode | ProviderKind::Codex => {
-                let output = self.generate(model, prompt, working_dir, cli_output).await?;
+                let (output, usage) = self.generate(model, prompt, working_dir, cli_output).await?;
                 if !output.is_empty() {
                     on_token(&output);
                 }
-                Ok(output)
+                Ok((output, usage))
             }
             ProviderKind::Mock => {
                 let output = mock_inference(model, prompt);
                 on_token(&output);
-                Ok(output)
+                Ok((output, None))
             }
         }
     }
@@ -1085,7 +1125,7 @@ impl ProviderClient {
         model: &ModelSpec,
         prompt: &str,
         on_token: &TokenCallback,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let base_url = if model.provider == ProviderKind::Vllm {
             let vllm_url = self.vllm_base_url.read().unwrap().clone();
             format!("{}/v1/chat/completions", vllm_url.trim_end_matches('/'))
@@ -1097,6 +1137,9 @@ impl ProviderClient {
             "model": model.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "stream": true,
+            // Ask the server to include a final usage block. OpenAI honors
+            // this since 2024-04; vLLM ignores unknown options.
+            "stream_options": {"include_usage": true},
         }));
 
         if model.provider == ProviderKind::OpenAi {
@@ -1118,6 +1161,7 @@ impl ProviderClient {
         let mut stream = resp.bytes_stream();
         let mut buf = Vec::<u8>::new();
         let mut done = false;
+        let mut usage: Option<crate::types::TokenUsage> = None;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
@@ -1146,6 +1190,9 @@ impl ProviderClient {
                             full_output.push_str(delta);
                         }
                     }
+                    if let Some(u) = parse_openai_usage(&val["usage"]) {
+                        usage = Some(u);
+                    }
                 }
             }
             if done {
@@ -1153,7 +1200,7 @@ impl ProviderClient {
             }
         }
 
-        Ok(full_output)
+        Ok((full_output, usage))
     }
 
     /// Anthropic streaming
@@ -1162,7 +1209,7 @@ impl ProviderClient {
         model: &ModelSpec,
         prompt: &str,
         on_token: &TokenCallback,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let api_key = self
             .anthropic_api_key
             .as_deref()
@@ -1192,6 +1239,9 @@ impl ProviderClient {
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
         let mut buf = Vec::<u8>::new();
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+        let mut saw_usage = false;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
@@ -1218,11 +1268,25 @@ impl ProviderClient {
                             }
                         }
                     }
+                    // Anthropic emits message_start (with input_tokens) and
+                    // message_delta (with output_tokens in usage block).
+                    if let Some(u) = read_token_count(&val["message"]["usage"], "input_tokens") {
+                        input_tokens = input_tokens.max(u);
+                        saw_usage = true;
+                    }
+                    if let Some(u) = read_token_count(&val["usage"], "output_tokens") {
+                        output_tokens = output_tokens.max(u);
+                        saw_usage = true;
+                    }
                 }
             }
         }
 
-        Ok(full_output)
+        let usage = saw_usage.then_some(crate::types::TokenUsage {
+            input_tokens,
+            output_tokens,
+        });
+        Ok((full_output, usage))
     }
 
     /// Gemini streaming
@@ -1231,7 +1295,7 @@ impl ProviderClient {
         model: &ModelSpec,
         prompt: &str,
         on_token: &TokenCallback,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let api_key = self
             .gemini_api_key
             .as_deref()
@@ -1260,6 +1324,7 @@ impl ProviderClient {
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
         let mut buf = Vec::<u8>::new();
+        let mut usage: Option<crate::types::TokenUsage> = None;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
@@ -1285,11 +1350,14 @@ impl ProviderClient {
                             full_output.push_str(text);
                         }
                     }
+                    if let Some(u) = parse_gemini_usage(&val["usageMetadata"]) {
+                        usage = Some(u);
+                    }
                 }
             }
         }
 
-        Ok(full_output)
+        Ok((full_output, usage))
     }
 }
 
@@ -1341,6 +1409,90 @@ fn mock_inference(model: &ModelSpec, prompt: &str) -> String {
         "[provider={} model={}] {}",
         model.provider, model.model_id, summary
     )
+}
+
+fn read_token_count(value: &serde_json::Value, key: &str) -> Option<u32> {
+    value.get(key).and_then(|v| v.as_u64()).map(|v| v.min(u32::MAX as u64) as u32)
+}
+
+/// OpenAI / vLLM `usage` block: `{prompt_tokens, completion_tokens, total_tokens}`.
+fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::types::TokenUsage> {
+    if !usage.is_object() {
+        return None;
+    }
+    let input = read_token_count(usage, "prompt_tokens")?;
+    let output = read_token_count(usage, "completion_tokens").unwrap_or(0);
+    Some(crate::types::TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+    })
+}
+
+/// Anthropic Messages API `usage` block: `{input_tokens, output_tokens}`.
+fn parse_anthropic_usage(usage: &serde_json::Value) -> Option<crate::types::TokenUsage> {
+    if !usage.is_object() {
+        return None;
+    }
+    let input = read_token_count(usage, "input_tokens")?;
+    let output = read_token_count(usage, "output_tokens").unwrap_or(0);
+    Some(crate::types::TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+    })
+}
+
+/// Gemini `usageMetadata` block:
+/// `{promptTokenCount, candidatesTokenCount, totalTokenCount}`.
+fn parse_gemini_usage(usage: &serde_json::Value) -> Option<crate::types::TokenUsage> {
+    if !usage.is_object() {
+        return None;
+    }
+    let input = read_token_count(usage, "promptTokenCount")?;
+    let output = read_token_count(usage, "candidatesTokenCount").unwrap_or(0);
+    Some(crate::types::TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+    })
+}
+
+#[cfg(test)]
+mod usage_parser_tests {
+    use super::*;
+
+    #[test]
+    fn openai_usage_parse() {
+        let v = serde_json::json!({"prompt_tokens": 12, "completion_tokens": 34});
+        let u = parse_openai_usage(&v).unwrap();
+        assert_eq!(u.input_tokens, 12);
+        assert_eq!(u.output_tokens, 34);
+    }
+
+    #[test]
+    fn anthropic_usage_parse() {
+        let v = serde_json::json!({"input_tokens": 5, "output_tokens": 7});
+        let u = parse_anthropic_usage(&v).unwrap();
+        assert_eq!(u.input_tokens, 5);
+        assert_eq!(u.output_tokens, 7);
+    }
+
+    #[test]
+    fn gemini_usage_parse() {
+        let v = serde_json::json!({
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 200,
+            "totalTokenCount": 300,
+        });
+        let u = parse_gemini_usage(&v).unwrap();
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 200);
+    }
+
+    #[test]
+    fn missing_usage_returns_none() {
+        assert!(parse_openai_usage(&serde_json::Value::Null).is_none());
+        assert!(parse_anthropic_usage(&serde_json::json!({})).is_none());
+        assert!(parse_gemini_usage(&serde_json::Value::Null).is_none());
+    }
 }
 
 fn provider_for_cli_backend(backend: CliModelBackendKind) -> ProviderKind {
