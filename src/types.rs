@@ -366,7 +366,7 @@ impl RunRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StructuredBrief {
     pub goal: String,
     pub constraints: Vec<String>,

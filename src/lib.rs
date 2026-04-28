@@ -6,6 +6,7 @@ pub mod context;
 pub mod crypto;
 pub mod gateway;
 pub mod github_ops;
+pub mod harness;
 pub mod interface;
 pub mod mcp;
 pub mod memory;

@@ -67,7 +67,7 @@ impl TokenBudget {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OptimizedContext {
     pub system: Vec<String>,
     pub instructions: Vec<String>,

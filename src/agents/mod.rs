@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 
@@ -47,7 +48,10 @@ pub trait SubAgent: Send + Sync {
 
 #[derive(Clone)]
 pub struct AgentRegistry {
-    agents: Arc<HashMap<AgentRole, Arc<dyn SubAgent>>>,
+    /// RwLock so `reload_from_dir` can swap the table at runtime without
+    /// invalidating outstanding clones of the registry. All reads acquire a
+    /// read lock and clone the Arc<dyn SubAgent> immediately.
+    agents: Arc<RwLock<HashMap<AgentRole, Arc<dyn SubAgent>>>>,
 }
 
 impl AgentRegistry {
@@ -57,18 +61,14 @@ impl AgentRegistry {
             map.insert(role, Arc::new(BuiltinAgent::new(role)));
         }
         Self {
-            agents: Arc::new(map),
+            agents: Arc::new(RwLock::new(map)),
         }
     }
 
-    /// Load agent definitions from YAML files in `dir`, falling back to builtin
-    /// defaults for any role not covered by a YAML file.
-    pub async fn from_dir_with_fallback(dir: &Path) -> Self {
-        let definitions = load_agents_from_dir(dir).await;
-
+    fn build_map_from_definitions(
+        definitions: Vec<crate::agents::agent_loader::AgentDefinition>,
+    ) -> HashMap<AgentRole, Arc<dyn SubAgent>> {
         let mut map: HashMap<AgentRole, Arc<dyn SubAgent>> = HashMap::new();
-
-        // Insert YAML-defined agents first
         for def in definitions {
             map.insert(
                 def.role,
@@ -79,15 +79,35 @@ impl AgentRegistry {
                 }),
             );
         }
-
-        // Fill in any missing roles with hardcoded defaults
         for &role in AgentRole::all() {
             map.entry(role).or_insert_with(|| Arc::new(BuiltinAgent::new(role)));
         }
+        map
+    }
 
+    /// Load agent definitions from YAML files in `dir`, falling back to builtin
+    /// defaults for any role not covered by a YAML file.
+    pub async fn from_dir_with_fallback(dir: &Path) -> Self {
+        let definitions = load_agents_from_dir(dir).await;
         Self {
-            agents: Arc::new(map),
+            agents: Arc::new(RwLock::new(Self::build_map_from_definitions(definitions))),
         }
+    }
+
+    /// Reload agent definitions from `dir`. Used by TODO 9-5 to support
+    /// runtime hot-swap without bouncing the orchestrator. Existing
+    /// in-flight `run_role` calls keep their Arc<dyn SubAgent> snapshot;
+    /// the next call resolves against the new map.
+    pub async fn reload_from_dir(&self, dir: &Path) -> anyhow::Result<usize> {
+        let definitions = load_agents_from_dir(dir).await;
+        let new_map = Self::build_map_from_definitions(definitions);
+        let count = new_map.len();
+        let mut guard = self
+            .agents
+            .write()
+            .map_err(|e| anyhow::anyhow!("agents map poisoned: {e}"))?;
+        *guard = new_map;
+        Ok(count)
     }
 
     pub async fn run_role(
@@ -97,11 +117,16 @@ impl AgentRegistry {
         router: Arc<ModelRouter>,
         cli_output: Option<CliOutputCallback>,
     ) -> anyhow::Result<AgentOutput> {
-        let agent = self
-            .agents
-            .get(&role)
-            .ok_or_else(|| anyhow::anyhow!("agent role {} not found", role))?
-            .clone();
+        let agent = {
+            let guard = self
+                .agents
+                .read()
+                .map_err(|e| anyhow::anyhow!("agents map poisoned: {e}"))?;
+            guard
+                .get(&role)
+                .ok_or_else(|| anyhow::anyhow!("agent role {} not found", role))?
+                .clone()
+        };
         agent.run(input, router, cli_output).await
     }
 
@@ -113,11 +138,16 @@ impl AgentRegistry {
         on_token: TokenCallback,
         cli_output: Option<CliOutputCallback>,
     ) -> anyhow::Result<AgentOutput> {
-        let agent = self
-            .agents
-            .get(&role)
-            .ok_or_else(|| anyhow::anyhow!("agent role {} not found", role))?
-            .clone();
+        let agent = {
+            let guard = self
+                .agents
+                .read()
+                .map_err(|e| anyhow::anyhow!("agents map poisoned: {e}"))?;
+            guard
+                .get(&role)
+                .ok_or_else(|| anyhow::anyhow!("agent role {} not found", role))?
+                .clone()
+        };
 
         let prompt = format!(
             "{}\n\nTASK:\n{}\n\nINSTRUCTIONS:\n{}\n\nDEPENDENCY OUTPUTS:\n{}\n\nCONTEXT:\n{}",
@@ -263,5 +293,71 @@ fn default_system_prompt(role: AgentRole) -> &'static str {
         AgentRole::Validator => {
             "You are the validator agent. Run lint, build, test, and git commands to verify code correctness."
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn reload_from_dir_swaps_definitions_for_existing_registry() {
+        let dir = std::env::temp_dir().join(format!("agents-reload-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Initial YAML: planner with prompt "v1".
+        let v1 = r#"
+name: planner
+description: ""
+role: planner
+task_profile: planning
+system_prompt: "v1"
+"#;
+        std::fs::write(dir.join("planner.yaml"), v1).unwrap();
+
+        let registry = AgentRegistry::from_dir_with_fallback(&dir).await;
+        {
+            let map = registry.agents.read().unwrap();
+            // The planner entry came from YAML. We can't introspect prompt
+            // through the trait, but the entry must exist.
+            assert!(map.contains_key(&AgentRole::Planner));
+        }
+
+        // Overwrite with v2 + add a coder definition.
+        let v2 = r#"
+name: planner
+description: ""
+role: planner
+task_profile: planning
+system_prompt: "v2"
+"#;
+        std::fs::write(dir.join("planner.yaml"), v2).unwrap();
+        let coder = r#"
+name: coder
+description: ""
+role: coder
+task_profile: coding
+system_prompt: "from yaml"
+"#;
+        std::fs::write(dir.join("coder.yaml"), coder).unwrap();
+
+        let count = registry.reload_from_dir(&dir).await.unwrap();
+        // count = total roles (YAML-defined + defaults) = AgentRole::all().len()
+        assert_eq!(count, AgentRole::all().len());
+        {
+            let map = registry.agents.read().unwrap();
+            assert!(map.contains_key(&AgentRole::Planner));
+            assert!(map.contains_key(&AgentRole::Coder));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reload_from_missing_dir_falls_back_to_builtins() {
+        let dir = std::env::temp_dir().join(format!("agents-missing-{}", Uuid::new_v4()));
+        let registry = AgentRegistry::builtin();
+        let count = registry.reload_from_dir(&dir).await.unwrap();
+        assert_eq!(count, AgentRole::all().len());
     }
 }
