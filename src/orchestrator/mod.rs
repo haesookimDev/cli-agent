@@ -1581,6 +1581,8 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::VerificationStarted
             | RunActionType::VerificationComplete
             | RunActionType::ReplanTriggered
+            | RunActionType::RecoveryPhaseStarted
+            | RunActionType::RecoveryPhaseCompleted
             | RunActionType::TerminalSuggested
             | RunActionType::CoderSessionStarted
             | RunActionType::CoderSessionCompleted

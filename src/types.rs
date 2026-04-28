@@ -456,6 +456,13 @@ pub enum RunActionType {
     VerificationStarted,
     VerificationComplete,
     ReplanTriggered,
+    /// Run loop is about to enter a recovery / continuation cycle. Carries
+    /// `attempt`, `max_attempts`, `mode` (failure_recovery|completion_continuation),
+    /// and a `reason` string in its payload.
+    RecoveryPhaseStarted,
+    /// Recovery / continuation cycle finished. Carries `attempt` and `outcome`
+    /// (succeeded|exhausted|failed) so the trace UI can collapse paired events.
+    RecoveryPhaseCompleted,
     TerminalSuggested,
     CoderSessionStarted,
     CoderSessionCompleted,
@@ -501,6 +508,8 @@ impl Display for RunActionType {
             RunActionType::VerificationStarted => "verification_started",
             RunActionType::VerificationComplete => "verification_complete",
             RunActionType::ReplanTriggered => "replan_triggered",
+            RunActionType::RecoveryPhaseStarted => "recovery_phase_started",
+            RunActionType::RecoveryPhaseCompleted => "recovery_phase_completed",
             RunActionType::TerminalSuggested => "terminal_suggested",
             RunActionType::CoderSessionStarted => "coder_session_started",
             RunActionType::CoderSessionCompleted => "coder_session_completed",

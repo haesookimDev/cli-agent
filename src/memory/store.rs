@@ -1740,6 +1740,8 @@ fn parse_run_action(value: &str) -> anyhow::Result<RunActionType> {
         "verification_started" => RunActionType::VerificationStarted,
         "verification_complete" => RunActionType::VerificationComplete,
         "replan_triggered" => RunActionType::ReplanTriggered,
+        "recovery_phase_started" => RunActionType::RecoveryPhaseStarted,
+        "recovery_phase_completed" => RunActionType::RecoveryPhaseCompleted,
         "terminal_suggested" => RunActionType::TerminalSuggested,
         "coder_session_started" => RunActionType::CoderSessionStarted,
         "coder_session_completed" => RunActionType::CoderSessionCompleted,
@@ -1895,6 +1897,26 @@ mod tests {
             parse_run_action("interactive_step").unwrap(),
             RunActionType::InteractiveStep
         ));
+        assert!(matches!(
+            parse_run_action("recovery_phase_started").unwrap(),
+            RunActionType::RecoveryPhaseStarted
+        ));
+        assert!(matches!(
+            parse_run_action("recovery_phase_completed").unwrap(),
+            RunActionType::RecoveryPhaseCompleted
+        ));
+    }
+
+    #[test]
+    fn recovery_phase_action_types_round_trip_to_string() {
+        assert_eq!(
+            RunActionType::RecoveryPhaseStarted.to_string(),
+            "recovery_phase_started"
+        );
+        assert_eq!(
+            RunActionType::RecoveryPhaseCompleted.to_string(),
+            "recovery_phase_completed"
+        );
     }
 
     fn temp_db_url() -> String {

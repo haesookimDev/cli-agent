@@ -330,6 +330,21 @@ impl Orchestrator {
 
                     if !stage_succeeded {
                         if failure_retries >= MAX_FAILURE_RETRIES {
+                            self.record_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::RecoveryPhaseCompleted,
+                                Some("orchestrator"),
+                                Some("failure_recovery"),
+                                None,
+                                serde_json::json!({
+                                    "attempt": failure_retries,
+                                    "max_attempts": MAX_FAILURE_RETRIES,
+                                    "mode": "failure_recovery",
+                                    "outcome": "exhausted",
+                                }),
+                            )
+                            .await;
                             self.finish_run(
                                 run_id,
                                 RunStatus::Failed,
@@ -348,6 +363,21 @@ impl Orchestrator {
                         let succeeded: Vec<&NodeExecutionResult> =
                             accumulated_results.iter().filter(|r| r.succeeded).collect();
 
+                        let recovery_payload = serde_json::json!({
+                            "attempt": failure_retries,
+                            "failed_nodes": failed.iter().map(|r| r.node_id.as_str()).collect::<Vec<_>>(),
+                            "mode": "failure_recovery",
+                            "max_attempts": MAX_FAILURE_RETRIES,
+                            "reason": failed
+                                .iter()
+                                .filter_map(|r| r.error.as_deref())
+                                .next()
+                                .unwrap_or("stage failure"),
+                        });
+                        // Backwards-compatible: keep ReplanTriggered for any
+                        // existing dashboards that subscribe to it, but ALSO
+                        // emit the structured RecoveryPhaseStarted so the new
+                        // trace UI can show "재계획 시도 N/MAX" inline.
                         self.record_action_event(
                             run_id,
                             session_id,
@@ -355,12 +385,17 @@ impl Orchestrator {
                             Some("orchestrator"),
                             Some("failure_recovery"),
                             None,
-                            serde_json::json!({
-                                "attempt": failure_retries,
-                                "failed_nodes": failed.iter().map(|r| r.node_id.as_str()).collect::<Vec<_>>(),
-                                "mode": "failure_recovery",
-                                "max_attempts": MAX_FAILURE_RETRIES,
-                            }),
+                            recovery_payload.clone(),
+                        )
+                        .await;
+                        self.record_action_event(
+                            run_id,
+                            session_id,
+                            RunActionType::RecoveryPhaseStarted,
+                            Some("orchestrator"),
+                            Some("failure_recovery"),
+                            None,
+                            recovery_payload,
                         )
                         .await;
 
@@ -397,12 +432,65 @@ impl Orchestrator {
                         .verify_completion(run_id, session_id, &req.task, &accumulated_results)
                         .await;
                     if verified {
+                        // If we got here after at least one recovery / continuation
+                        // cycle, report it as resolved so dashboards can pair the
+                        // started/completed events.
+                        if failure_retries > 0 {
+                            self.record_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::RecoveryPhaseCompleted,
+                                Some("orchestrator"),
+                                Some("failure_recovery"),
+                                None,
+                                serde_json::json!({
+                                    "attempt": failure_retries,
+                                    "max_attempts": MAX_FAILURE_RETRIES,
+                                    "mode": "failure_recovery",
+                                    "outcome": "succeeded",
+                                }),
+                            )
+                            .await;
+                        }
+                        if continuation_attempts > 0 {
+                            self.record_action_event(
+                                run_id,
+                                session_id,
+                                RunActionType::RecoveryPhaseCompleted,
+                                Some("reviewer"),
+                                Some("continuation"),
+                                None,
+                                serde_json::json!({
+                                    "attempt": continuation_attempts,
+                                    "max_attempts": MAX_COMPLETION_CONTINUATIONS,
+                                    "mode": "completion_continuation",
+                                    "outcome": "succeeded",
+                                }),
+                            )
+                            .await;
+                        }
                         self.finish_run(run_id, RunStatus::Succeeded, accumulated_results, None)
                             .await?;
                         break;
                     }
 
                     if continuation_attempts >= MAX_COMPLETION_CONTINUATIONS {
+                        self.record_action_event(
+                            run_id,
+                            session_id,
+                            RunActionType::RecoveryPhaseCompleted,
+                            Some("reviewer"),
+                            Some("continuation"),
+                            None,
+                            serde_json::json!({
+                                "attempt": continuation_attempts,
+                                "max_attempts": MAX_COMPLETION_CONTINUATIONS,
+                                "mode": "completion_continuation",
+                                "outcome": "exhausted",
+                                "reason": reason,
+                            }),
+                        )
+                        .await;
                         self.finish_run(
                             run_id,
                             RunStatus::Failed,
@@ -418,6 +506,12 @@ impl Orchestrator {
 
                     continuation_attempts += 1;
                     let continuation_reason = reason.clone();
+                    let continuation_payload = serde_json::json!({
+                        "attempt": continuation_attempts,
+                        "reason": continuation_reason,
+                        "mode": "completion_continuation",
+                        "max_attempts": MAX_COMPLETION_CONTINUATIONS,
+                    });
                     self.record_action_event(
                         run_id,
                         session_id,
@@ -425,12 +519,17 @@ impl Orchestrator {
                         Some("reviewer"),
                         Some("continuation"),
                         None,
-                        serde_json::json!({
-                            "attempt": continuation_attempts,
-                            "reason": continuation_reason,
-                            "mode": "completion_continuation",
-                            "max_attempts": MAX_COMPLETION_CONTINUATIONS,
-                        }),
+                        continuation_payload.clone(),
+                    )
+                    .await;
+                    self.record_action_event(
+                        run_id,
+                        session_id,
+                        RunActionType::RecoveryPhaseStarted,
+                        Some("reviewer"),
+                        Some("continuation"),
+                        None,
+                        continuation_payload,
                     )
                     .await;
 
