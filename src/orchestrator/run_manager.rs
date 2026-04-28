@@ -238,6 +238,31 @@ impl Orchestrator {
         };
         self.record_graph_initialized(run_id, session_id, &graph, "initial")
             .await;
+
+        // Shadow-mode requirement analysis (TODO 7-1). Heuristic only —
+        // doesn't change graph behavior, just records its read for the
+        // trace UI. Pull the cached TaskType so we stay in sync with the
+        // classifier we just ran.
+        let primary = self
+            .classify_cache
+            .get(&(session_id, req.task.clone()))
+            .map(|v| *v)
+            .unwrap_or(crate::types::TaskType::SimpleQuery);
+        let analysis = super::requirement_analyzer::analyze(req.task.as_str(), primary);
+        self.record_action_event(
+            run_id,
+            session_id,
+            RunActionType::SubtaskPlanned,
+            Some("orchestrator"),
+            Some("requirement_analyzer"),
+            None,
+            serde_json::json!({
+                "analyzer": "shadow_v1",
+                "requirement": analysis,
+            }),
+        )
+        .await;
+
         self.record_action_event(
             run_id,
             session_id,

@@ -9,6 +9,7 @@ pub mod interactive;
 pub mod node_executor;
 pub mod prompt_composer;
 pub mod repo_analyzer;
+pub mod requirement_analyzer;
 pub mod run_manager;
 pub mod settings;
 pub mod skill_loader;
