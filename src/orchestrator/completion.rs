@@ -258,6 +258,40 @@ impl Orchestrator {
                         .and_then(|json_str| serde_json::from_str::<SubtaskPlan>(json_str).ok())
                         .or_else(|| serde_json::from_str::<SubtaskPlan>(&result.output).ok());
                     if let Some(plan) = plan_result {
+                        let static_ids = {
+                            let guard = static_node_ids
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            guard.clone()
+                        };
+                        if let Err(reason) = validate_subtask_plan(
+                            &plan,
+                            &static_ids,
+                            MAX_DYNAMIC_SUBTASKS_PER_PLAN,
+                        ) {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                node_id = %node.id,
+                                reason = %reason,
+                                "rejecting Planner SubtaskPlan due to structural validation",
+                            );
+                            let _ = memory
+                                .append_run_action_event(
+                                    run_id,
+                                    session_id,
+                                    RunActionType::SubtaskPlanned,
+                                    Some("orchestrator"),
+                                    Some(node.id.as_str()),
+                                    None,
+                                    serde_json::json!({
+                                        "rejected": true,
+                                        "reason": reason,
+                                    }),
+                                )
+                                .await;
+                            return Ok((dynamic_nodes, Vec::new()));
+                        }
+
                         if !plan.subtasks.is_empty() {
                             let subtasks: Vec<_> = plan
                                 .subtasks
@@ -747,9 +781,223 @@ fn parse_reviewer_verdict(raw: &str) -> VerificationVerdict {
     VerificationVerdict::Ambiguous(preview)
 }
 
+/// Validate a SubtaskPlan before injecting its subtasks into the graph.
+/// Catches the failure modes the Planner LLM is most likely to produce:
+///
+/// - duplicate subtask ids
+/// - empty subtask id or empty instructions+description
+/// - dependency that points to a subtask that doesn't exist (and isn't an
+///   existing static node id)
+/// - cycles inside the new subtasks
+/// - subtask count exceeding `max_subtasks` (orchestrator's hard cap)
+///
+/// Returns `Err` with a single human-readable reason on the first violation.
+pub(super) fn validate_subtask_plan(
+    plan: &SubtaskPlan,
+    static_node_ids: &[String],
+    max_subtasks: usize,
+) -> Result<(), String> {
+    if plan.subtasks.is_empty() {
+        return Err("plan has no subtasks".to_string());
+    }
+    if plan.subtasks.len() > max_subtasks {
+        return Err(format!(
+            "plan has {} subtasks, exceeding cap of {}",
+            plan.subtasks.len(),
+            max_subtasks
+        ));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for s in &plan.subtasks {
+        if s.id.trim().is_empty() {
+            return Err("subtask id must not be blank".to_string());
+        }
+        if s.instructions.trim().is_empty() && s.description.trim().is_empty() {
+            return Err(format!(
+                "subtask `{}` has neither instructions nor description",
+                s.id
+            ));
+        }
+        if !seen.insert(s.id.clone()) {
+            return Err(format!("duplicate subtask id `{}`", s.id));
+        }
+    }
+
+    let known_static: std::collections::HashSet<&str> =
+        static_node_ids.iter().map(|s| s.as_str()).collect();
+    let known_subtasks: std::collections::HashSet<&str> =
+        plan.subtasks.iter().map(|s| s.id.as_str()).collect();
+
+    for s in &plan.subtasks {
+        for dep in &s.dependencies {
+            let trimmed = dep.trim();
+            if trimmed.is_empty() {
+                return Err(format!(
+                    "subtask `{}` lists a blank dependency",
+                    s.id
+                ));
+            }
+            if !known_static.contains(trimmed) && !known_subtasks.contains(trimmed) {
+                return Err(format!(
+                    "subtask `{}` depends on unknown node `{}`",
+                    s.id, trimmed
+                ));
+            }
+        }
+    }
+
+    // Cycle detection inside the subtask subgraph using iterative DFS.
+    let adj: std::collections::HashMap<&str, Vec<&str>> = plan
+        .subtasks
+        .iter()
+        .map(|s| {
+            (
+                s.id.as_str(),
+                s.dependencies
+                    .iter()
+                    .map(|d| d.as_str())
+                    .filter(|d| known_subtasks.contains(d))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Pending,
+        Visiting,
+        Done,
+    }
+    let mut state: std::collections::HashMap<&str, Mark> = adj
+        .keys()
+        .copied()
+        .map(|k| (k, Mark::Pending))
+        .collect();
+    for &start in adj.keys() {
+        if state[start] != Mark::Pending {
+            continue;
+        }
+        let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+        state.insert(start, Mark::Visiting);
+        while let Some(&(node, idx)) = stack.last() {
+            let neighbours = adj.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+            if idx >= neighbours.len() {
+                state.insert(node, Mark::Done);
+                stack.pop();
+                continue;
+            }
+            let next = neighbours[idx];
+            // Advance the parent's iterator before recursing.
+            *stack.last_mut().unwrap() = (node, idx + 1);
+            match state.get(next).copied().unwrap_or(Mark::Pending) {
+                Mark::Visiting => {
+                    return Err(format!(
+                        "subtask plan contains a cycle reaching `{}`",
+                        next
+                    ));
+                }
+                Mark::Done => {}
+                Mark::Pending => {
+                    state.insert(next, Mark::Visiting);
+                    stack.push((next, 0));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{SubtaskDefinition, SubtaskPlan};
+
+    fn subtask(id: &str, deps: &[&str]) -> SubtaskDefinition {
+        SubtaskDefinition {
+            id: id.to_string(),
+            description: format!("desc {id}"),
+            agent_role: AgentRole::Coder,
+            dependencies: deps.iter().map(|s| s.to_string()).collect(),
+            mcp_tools: vec![],
+            instructions: format!("do {id}"),
+        }
+    }
+
+    #[test]
+    fn validate_subtask_plan_rejects_empty_plan() {
+        let plan = SubtaskPlan { subtasks: vec![] };
+        assert!(validate_subtask_plan(&plan, &[], 50).is_err());
+    }
+
+    #[test]
+    fn validate_subtask_plan_rejects_duplicate_ids() {
+        let plan = SubtaskPlan {
+            subtasks: vec![subtask("a", &[]), subtask("a", &[])],
+        };
+        let err = validate_subtask_plan(&plan, &[], 50).unwrap_err();
+        assert!(err.contains("duplicate"));
+    }
+
+    #[test]
+    fn validate_subtask_plan_rejects_unknown_dependency() {
+        let plan = SubtaskPlan {
+            subtasks: vec![subtask("a", &["nope"])],
+        };
+        let err = validate_subtask_plan(&plan, &["plan".to_string()], 50).unwrap_err();
+        assert!(err.contains("unknown node"));
+    }
+
+    #[test]
+    fn validate_subtask_plan_accepts_static_dependency() {
+        let plan = SubtaskPlan {
+            subtasks: vec![subtask("a", &["plan"])],
+        };
+        validate_subtask_plan(&plan, &["plan".to_string()], 50).unwrap();
+    }
+
+    #[test]
+    fn validate_subtask_plan_detects_cycle() {
+        let plan = SubtaskPlan {
+            subtasks: vec![subtask("a", &["b"]), subtask("b", &["a"])],
+        };
+        let err = validate_subtask_plan(&plan, &[], 50).unwrap_err();
+        assert!(err.contains("cycle"));
+    }
+
+    #[test]
+    fn validate_subtask_plan_rejects_blank_id() {
+        let plan = SubtaskPlan {
+            subtasks: vec![subtask("", &[])],
+        };
+        let err = validate_subtask_plan(&plan, &[], 50).unwrap_err();
+        assert!(err.contains("blank"));
+    }
+
+    #[test]
+    fn validate_subtask_plan_rejects_when_over_cap() {
+        let subtasks: Vec<SubtaskDefinition> = (0..6)
+            .map(|i| subtask(&format!("s{i}"), &[]))
+            .collect();
+        let plan = SubtaskPlan { subtasks };
+        let err = validate_subtask_plan(&plan, &[], 5).unwrap_err();
+        assert!(err.contains("exceeding cap"));
+    }
+
+    #[test]
+    fn validate_subtask_plan_accepts_diamond_dag() {
+        // a → b, a → c, b → d, c → d  (no cycle)
+        let plan = SubtaskPlan {
+            subtasks: vec![
+                subtask("a", &[]),
+                subtask("b", &["a"]),
+                subtask("c", &["a"]),
+                subtask("d", &["b", "c"]),
+            ],
+        };
+        validate_subtask_plan(&plan, &[], 50).unwrap();
+    }
 
     #[test]
     fn parses_structured_json_complete() {
