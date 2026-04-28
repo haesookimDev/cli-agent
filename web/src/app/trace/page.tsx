@@ -10,6 +10,7 @@ import { getLastRunId, setLastRunId } from "@/lib/session-store";
 import { StatusBadge } from "@/components/status-badge";
 import { DagGraph } from "@/components/trace/dag-graph";
 import { EventTimeline } from "@/components/trace/event-timeline";
+import { SubtaskTree } from "@/components/trace/subtask-tree";
 import type { AgentRole, NodeTraceState, RunTrace } from "@/lib/types";
 
 const VALID_ROLES: AgentRole[] = [
@@ -326,6 +327,18 @@ function TraceContent() {
                 </tbody>
               </table>
             </div>
+          </div>
+
+          {/* Subtask Tree */}
+          <div className="rounded-xl border border-slate-200 bg-white p-5">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Subtask Hierarchy
+            </h3>
+            <SubtaskTree
+              nodes={liveNodes}
+              edges={data.graph.edges}
+              events={live ? events : data.events}
+            />
           </div>
 
           {/* Event Timeline */}
