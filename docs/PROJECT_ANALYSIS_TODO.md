@@ -4,7 +4,7 @@
 
 Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼의 전반적인 코드 품질, 에이전트 동작 결함, 리팩토링 필요사항을 종합 분석한 결과.
 
-**현재 상태 (최신 커밋 `5376340` 기준)**: 빌드 정상, **158개 테스트 통과 (lib 144 + integration 14)**, Phase 1~7 완료. 7,654줄 모놀리스였던 `orchestrator/mod.rs`는 10개 서브모듈로 분할되었고, 2,796줄이었던 `interface/api.rs`는 13개 핸들러 모듈로 분할되었다. Phase 5에서 API/recovery/MCP/coder backend 통합 테스트 22개 추가, Phase 6에서 rate limiting · CORS allowlist · health · graceful shutdown · sqlx::migrate! · short-term GC · webhook secret 암호화가 도입되어 운영 준비 상태. Phase 7에서 token-chunk batch INSERT · DashMap dedup · pause Notify · SSE 재연결 · memory search index 등 성능 개선이 모두 반영됨.
+**현재 상태 (최신 커밋 `3ce2a2a` 기준)**: 빌드 정상, **193개 테스트 통과 (lib 179 + integration 14)**, Phase 1~7 완료 + Stage I~IV (Section 7~9 사전 슬라이스) 완료. Stage I에서 토큰 사용량 추적이 InferenceResult → AgentOutput → NodeExecutionResult → RuntimeEvent 전 경로로 흐르고, RecoveryPhaseStarted/Completed 이벤트로 재계획 사이클이 가시화됨. Stage II에서 trace 페이지 DAG가 SSE로 실시간 갱신되고, 채팅에 phase/progress/recovery alert + subtask tree가 추가됨. Stage III에서 SubtaskPlan 구조 검증 + 휴리스틱 RequirementAnalyzer (shadow mode) + WorkflowComposer.chain_skills 가 추가됨. Stage IV에서 AgentHarness sidecar + HarnessMetrics 스냅샷 + AgentRegistry 핫 리로드가 도입됨 (orchestrator 호출 경로 변경 없음).
 
 ---
 
@@ -19,9 +19,13 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | Phase 5 | Test Coverage (TODO 5-1 ~ 5-6) | ✅ 완료 | 6 |
 | Phase 6 | Infrastructure (TODO 4-1 ~ 4-8) | ✅ 완료 | 8 |
 | Phase 7 | Performance (TODO 6-1 ~ 6-7) | ✅ 완료 | 6 (6-2 deferred) |
-| 추가 제안 | Workflow / Tracing / Harness (7-1 ~ 9-6) | ⏳ 대기 | — |
+| Stage I | Tracing 백엔드 (TODO 8-4 + 8-5) | ✅ 완료 | 3 |
+| Stage II | Tracing 프론트 (TODO 8-1 + 8-2 + 8-3) | ✅ 완료 | 3 |
+| Stage III | Workflow 백엔드 (TODO 7-3 + 7-1 + 7-2 chain) | ✅ 완료 | 3 |
+| Stage IV | Harness sidecar (TODO 9-1 + 9-4 + 9-5) | ✅ 완료 | 1 |
+| 보류 | TODO 7-4 GUI · 9-2 SubAgentManager · 9-3 메시지 버스 · 9-6 orchestrator 전환 · 8-4 비용 추정 가격표 | ⏸️ 사용자 합의 후 | — |
 
-**누적 58 commits** · 테스트 87 → 158 (+71)
+**누적 70 commits** · 테스트 87 → 193 (+106)
 
 ---
 
@@ -261,7 +265,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 7. Workflow Composition & Requirement Analyzer — ⏳ 전부 대기 (신규 기능)
+## 7. Workflow Composition & Requirement Analyzer — ✅ Stage III 슬라이스 완료 (7-4 보류)
 
 ### 현재 상태
 - 워크플로우는 `skills/*.yaml`에 정적 DAG로 정의 (7개 스킬)
@@ -270,55 +274,22 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - 사용자 요구사항 분석 → 동적 워크플로우 구성 경로 없음
 - SubtaskPlan은 Planner LLM 출력에 전적으로 의존, 구조적 검증 부재
 
-### TODO 7-1: 사용자 요구사항 분석기 (Requirement Analyzer) 도입
-- **파일**: `src/orchestrator/requirement_analyzer.rs` (신규)
-- **문제**: 현재 `classify_task()`는 단순히 TaskType 하나로 분류할 뿐, 사용자 요구의 복합성/제약조건/우선순위를 구조적으로 분석하지 않음
-- **설계**:
-  ```rust
-  pub struct RequirementAnalysis {
-      pub primary_intent: TaskType,
-      pub sub_intents: Vec<TaskType>,        // 복합 요구 분해
-      pub constraints: Vec<Constraint>,       // 시간, 도구, 언어 등 제약
-      pub required_capabilities: Vec<String>, // 필요한 MCP 도구/에이전트 역할
-      pub priority: Priority,                 // 긴급도
-      pub estimated_complexity: Complexity,   // simple/moderate/complex
-      pub context_requirements: Vec<String>,  // 필요한 선행 컨텍스트
-  }
-  ```
-- **동작**: classify_task 호출 전에 1차 분석 → 복합 요구 시 자동으로 multi-phase 워크플로우 생성
-- **관련 파일**: `src/orchestrator/task_classifier.rs`, `graph_builder.rs`
+### TODO 7-1: 사용자 요구사항 분석기 (Requirement Analyzer) — ✅ shadow mode (`36e5586`)
+- **파일**: `src/orchestrator/requirement_analyzer.rs` (신규), `src/orchestrator/run_manager.rs` (shadow 호출)
+- **적용**: 휴리스틱-only `analyze(task, primary)` → `RequirementAnalysis { primary_intent, sub_intents, required_capabilities, priority, estimated_complexity, context_requirements }`. classify_task 결과를 echo + 단어 수/키워드 기반으로 보조 정보 산출. shadow mode: SubtaskPlanned 액션 이벤트로만 기록되고 build_graph 동작은 변경 없음. LLM 기반 promotion은 follow-up.
+- **테스트**: 8 단위 (simple/long/complex promotion, urgent priority, github/git 캐퍼빌리티, local_repo 컨텍스트, 복합 의도)
 
-### TODO 7-2: 동적 워크플로우 컴포저 (Workflow Composer)
+### TODO 7-2: 동적 워크플로우 컴포저 (Workflow Composer) — ✅ chain_skills 슬라이스 (`2728564`)
 - **파일**: `src/orchestrator/workflow_composer.rs` (신규)
-- **문제**: 현재 `build_graph()`는 TaskType별 고정 그래프만 생성. 사용자 요구에 맞는 커스텀 워크플로우를 런타임에 조합할 수 없음
-- **설계**:
-  ```rust
-  pub struct WorkflowComposer {
-      skill_registry: Arc<DashMap<String, WorkflowTemplate>>,
-      agent_registry: AgentRegistry,
-  }
-  impl WorkflowComposer {
-      /// RequirementAnalysis 기반으로 최적 워크플로우 자동 구성
-      pub async fn compose(&self, analysis: &RequirementAnalysis, available_tools: &[McpToolDefinition]) -> ExecutionGraph;
-      /// 기존 스킬 템플릿들을 체이닝하여 복합 워크플로우 생성
-      pub fn chain_skills(&self, skill_ids: &[&str], params: HashMap<String, String>) -> anyhow::Result<ExecutionGraph>;
-      /// 사용자 자연어 → 워크플로우 YAML 생성 (LLM 지원)
-      pub async fn generate_from_description(&self, description: &str, router: &ModelRouter) -> anyhow::Result<WorkflowTemplate>;
-  }
-  ```
-- **핵심**: 고정 그래프 패턴(SimpleQuery, Analysis, CodeGeneration 등)을 컴포저블 빌딩 블록으로 전환
+- **적용**: `chain_skills(skills, params, name, description)` 만 1차 구현. 노드 ID `{skill_id}__{node_id}` 네임스페이스, 내부 의존성 재작성, 다음 스킬의 root를 이전 스킬의 terminal에 자동 연결, 파라미터 dedup. `compose(analysis)`/`generate_from_description(LLM)` 은 후속 phase.
+- **테스트**: 4 단위 (네임스페이스, 파라미터 dedup, 빈 입력 거부, 다이아몬드 terminal)
 
-### TODO 7-3: SubtaskPlan 구조적 검증 레이어
-- **현재 위치**: `src/orchestrator/completion.rs` (on_completed 내 SubtaskPlan 파싱)
-- **문제**: Planner LLM이 생성한 SubtaskPlan JSON을 파싱만 하고 구조적 검증 없이 실행. 순환 의존, 없는 역할 참조, 과도한 서브태스크 등 검증 부재 (단, `MAX_DYNAMIC_SUBTASKS_PER_PLAN=50` 하드캡은 이미 존재)
-- **수정**:
-  - 의존성 DAG 유효성 검사 (순환 탐지)
-  - agent_role 존재 여부 확인
-  - mcp_tools 가용성 확인
-  - 서브태스크 수 / 깊이 제한 적용
-  - 검증 실패 시 Planner에 에러 피드백 + 재생성 요청
+### TODO 7-3: SubtaskPlan 구조적 검증 레이어 — ✅ `1dd1513`
+- **파일**: `src/orchestrator/completion.rs` (`validate_subtask_plan` + on_completed 호출)
+- **적용**: 빈 plan / 캡 초과 / 중복 ID / 빈 필드 / 모르는 의존성 / 사이클 (반복 DFS) 검출. 검증 실패 시 SubtaskPlanned 액션 이벤트 `{rejected: true, reason}` 으로 기록 후 plan 무시.
+- **테스트**: 8 단위 (empty/duplicate/unknown-dep/blank-id/cap-exceeded/cycle/static-dep/diamond DAG)
 
-### TODO 7-4: 워크플로우 템플릿 UI — 시각적 편집기
+### TODO 7-4: 워크플로우 템플릿 UI — 시각적 편집기 (⏸️ 보류)
 - **파일**: `web/src/app/workflows/` (확장)
 - **문제**: 현재 워크플로우 페이지는 목록/실행만 지원. DAG 기반 시각적 편집 불가
 - **수정**:
@@ -330,7 +301,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 8. Agent Execution Tracing & Chat Visibility — ⏳ 전부 대기
+## 8. Agent Execution Tracing & Chat Visibility — ✅ Stage I/II 완료 (8-4 가격표 follow-up)
 
 ### 현재 상태
 - `RuntimeEvent` 13종 이벤트가 `EventSink` 콜백으로 발행됨
@@ -346,51 +317,29 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - recovery/continuation 루프 진행 상태 채팅에서 미표시
 - 토큰 사용량/비용 실시간 추적 없음
 
-### TODO 8-1: 실시간 DAG 상태 스트리밍
-- **파일**: `web/src/components/trace/dag-graph.tsx`, `web/src/hooks/use-sse.ts`
-- **문제**: DAG 그래프가 API 폴링 기반으로만 업데이트. 실행 중 노드 상태 변화가 실시간 반영 안 됨
-- **수정**:
-  - SSE `action_event`에서 `node_started`/`node_completed`/`node_failed` 이벤트를 DAG 노드 상태에 즉시 반영
-  - 노드 색상/애니메이션으로 실행 중(pulse), 성공(green), 실패(red) 시각적 표시
-  - 동적으로 추가되는 서브태스크 노드를 DAG에 실시간 삽입
+### TODO 8-1: 실시간 DAG 상태 스트리밍 — ✅ `0364081`
+- **파일**: `web/src/app/trace/page.tsx` (`useRunSSE` overlay), `web/src/components/trace/dag-graph.tsx`
+- **적용**: trace 페이지가 Live ON일 때 useRunSSE를 켜서 `node_started/completed/failed/skipped/dynamic_node_added` 이벤트를 폴링한 스냅샷 위에 overlay. dynamic_node_added는 placeholder로 즉시 삽입. Live 버튼은 SSE connectionState에 따라 "Reconnecting…" 표시.
 
-### TODO 8-2: 채팅 내 에이전트 실행 진행 인라인 카드
-- **파일**: `web/src/components/agent-thinking.tsx` (확장)
-- **문제**: 현재 `AgentThinking`은 노드별 토큰/툴콜만 표시. 전체 실행 흐름(classify → build_graph → execute → verify → replan) 가시화 부족
-- **수정**:
-  - **Phase Indicator**: 현재 어떤 단계인지 표시 (분류 → 그래프 빌드 → 실행 → 검증 → [재계획])
-  - **Progress Bar**: 전체 노드 수 대비 완료 노드 수 진행률
-  - **Recovery Alert Card**: replan/recovery 발생 시 이유와 함께 인라인 알림 카드
-  - **Data Flow Card**: 선행 노드 출력 → 현재 노드 입력 데이터 흐름 요약
+### TODO 8-2: 채팅 내 에이전트 실행 진행 인라인 카드 — ✅ `b3b0a51`
+- **파일**: `web/src/components/agent-thinking.tsx` 확장, `web/src/lib/types.ts`
+- **적용**: phase pill (준비/그래프 빌드/실행/검증/재계획/완료) + progress bar (completed/total) + amber recovery alert card (recovery_phase_started ↔ completed) + 누적 token tally. RunActionType union에 recovery_phase_started/completed 추가. Data Flow Card 는 보류 (별도 phase).
 
-### TODO 8-3: 서브태스크 계층 트리 뷰
-- **파일**: `web/src/components/trace/subtask-tree.tsx` (신규)
-- **문제**: Planner가 SubtaskPlan으로 동적 서브태스크를 생성하면, 이것이 flat list로만 표시되어 계층 구조를 알 수 없음
-- **수정**:
-  - 트리 뷰 컴포넌트: 원본 그래프 노드 → 동적 서브태스크 → 추가 동적 노드 계층 표시
-  - 각 서브태스크의 상태(pending/running/succeeded/failed) 표시
-  - 서브태스크 클릭 시 해당 노드의 상세 출력/툴콜 확장
+### TODO 8-3: 서브태스크 계층 트리 뷰 — ✅ `4fda187`
+- **파일**: `web/src/components/trace/subtask-tree.tsx` (신규), `web/src/app/trace/page.tsx` (배치)
+- **적용**: dynamic_node_added 의 `from` 필드 (없으면 첫 의존성) 기준으로 부모-자식 트리 구성. static 노드는 top-level, dynamic 은 sub pill 표시. status color · role · duration 표시. Live ON 시 SSE 이벤트 사용.
 
-### TODO 8-4: 노드별 토큰 사용량 및 비용 실시간 추적
-- **파일**: `src/runtime/mod.rs` (RuntimeEvent 확장), `src/router/mod.rs` (추론 결과에 토큰 수 포함)
-- **문제**: 노드별/전체 run의 토큰 사용량, 추정 비용을 추적하는 메커니즘 없음
-- **수정**:
-  - `InferenceResult`에 `input_tokens`, `output_tokens` 필드 추가
-  - `NodeExecutionResult`에 `token_usage: Option<TokenUsage>` 추가
-  - `RuntimeEvent::NodeCompleted`에 토큰 사용량 포함
-  - 프론트엔드에서 누적 토큰/비용 표시 위젯
+### TODO 8-4: 노드별 토큰 사용량 및 비용 실시간 추적 — ✅ `6bed393` `d294302` (가격표는 follow-up)
+- **파일**: `src/router/mod.rs`, `src/agents/mod.rs`, `src/runtime/mod.rs`, `src/orchestrator/node_executor.rs`, `web/src/components/agent-thinking.tsx`
+- **적용**: 모든 provider (OpenAI/vLLM/Anthropic/Gemini) 의 usage 블록을 `Option<TokenUsage>` 로 추출. InferenceResult → AgentOutput → NodeExecutionResult → RuntimeEvent::NodeCompleted 까지 전파. 캐시 항목에도 보존. ModelSelected 페이로드에 누적 usage 포함. 프론트엔드 phase 배너에 누적 tokens 표시. **비용 추정 (가격표 + 단가 환산) 은 별도 phase**: env / pricing.yaml 위치, exposure 단위 (run/session/cluster) 결정 필요.
 
-### TODO 8-5: 검증/재계획 루프 트레이싱 강화
-- **현재 위치**: `src/orchestrator/run_manager.rs` (verify → replan 루프)
-- **문제**: continuation/recovery 루프의 진행 상태가 `ReplanTriggered` 이벤트 하나로만 기록. 몇 번째 시도인지, 왜 재계획인지 채팅에서 직관적으로 보이지 않음
-- **수정**:
-  - 새 이벤트 타입: `RunActionType::RecoveryPhaseStarted`, `RecoveryPhaseCompleted`
-  - 페이로드에 `attempt`, `max_attempts`, `reason`, `mode(failure_recovery|completion_continuation)` 포함
-  - 채팅 UI에 "재계획 시도 2/2: 검증 실패 — 미완성 항목 존재" 같은 명시적 상태 표시
+### TODO 8-5: 검증/재계획 루프 트레이싱 강화 — ✅ `a39df71`
+- **파일**: `src/types.rs` (RunActionType), `src/memory/store.rs` (parser), `src/orchestrator/run_manager.rs` (emit), `src/orchestrator/mod.rs` (trace match arm), `web/src/components/agent-thinking.tsx`
+- **적용**: `RunActionType::RecoveryPhaseStarted` / `RecoveryPhaseCompleted` 신설. failure_recovery + completion_continuation 양쪽 사이클에서 ReplanTriggered 와 함께 Started 발행, 종료 시점 (succeeded/exhausted) 에 Completed 발행. 채팅 UI 가 "재계획 시도 N/MAX" 형태로 inline 표시.
 
 ---
 
-## 9. Harness Engineering & Sub-Agent Management — ⏳ 전부 대기 (신규 설계)
+## 9. Harness Engineering & Sub-Agent Management — ✅ Stage IV 슬라이스 (9-2/9-3/9-6 보류)
 
 ### 현재 상태
 - `AgentRegistry`가 11개 역할 에이전트를 관리 (YAML 설정 가능)
@@ -400,10 +349,10 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - 서브에이전트 라이프사이클 관리 없음 (생성→실행→종료가 일회성)
 - 에이전트 간 직접 통신 불가 (오직 의존성 출력을 통한 간접 전달)
 
-### TODO 9-1: Agent Harness 추상 레이어 도입
-- **파일**: `src/harness/mod.rs` (신규 모듈)
-- **문제**: 현재 에이전트 실행은 `AgentRegistry.run_role()` → LLM 호출 → 결과 반환의 단순 파이프라인. 에이전트의 라이프사이클(초기화, 실행, 중간 상태 보고, 재시도, 정리)을 관리하는 하네스 계층 없음
-- **설계**:
+### TODO 9-1: Agent Harness 추상 레이어 도입 — ✅ sidecar (`3ce2a2a`)
+- **파일**: `src/harness/mod.rs` (신규)
+- **적용**: `AgentHarness::{spawn, send, status, terminate, session_tree, sessions}` + `AgentSession { status, total_usage, iteration_count, parent_session, child_sessions, last_output }`. 내부에서 기존 `AgentRegistry::run_role` 을 호출하는 sidecar 형태로, orchestrator 호출 경로는 변경 없음. 4 unit 테스트 (실패 spawn 도 row 기록, unknown send 거부, terminate, session_tree 재귀 빌드). compact_context / context_budget 은 follow-up.
+- **원래 설계 참고**:
   ```rust
   /// 에이전트 하네스: 에이전트 실행의 전체 라이프사이클을 관리
   pub struct AgentHarness {
@@ -443,7 +392,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   ```
 - **핵심 가치**: 에이전트를 일회성 함수 호출이 아닌 상태를 가진 세션으로 관리
 
-### TODO 9-2: 서브에이전트 스포닝 및 계층 관리
+### TODO 9-2: 서브에이전트 스포닝 및 계층 관리 — ⏸️ 보류
 - **파일**: `src/harness/sub_agent.rs` (신규)
 - **문제**: 현재 Planner가 SubtaskPlan을 생성하면 `on_completed`에서 그래프 노드로만 추가. 서브에이전트의 부모-자식 관계, 결과 집약, 실패 전파를 체계적으로 관리하지 않음
 - **설계**:
@@ -471,7 +420,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   ```
 - **기존 연동**: `completion.rs::build_on_completed_fn`의 SubtaskPlan 처리 로직을 SubAgentManager로 위임
 
-### TODO 9-3: 에이전트 간 메시지 버스
+### TODO 9-3: 에이전트 간 메시지 버스 — ⏸️ 보류 (use case 합의 필요)
 - **파일**: `src/harness/message_bus.rs` (신규)
 - **문제**: 에이전트 간 통신이 오직 dependency_outputs (선행 노드 출력)으로만 가능. 실행 중 에이전트가 다른 에이전트에 질문하거나 피드백을 주고받을 수 없음
 - **설계**:
@@ -480,10 +429,10 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   - 수신 에이전트의 컨텍스트에 메시지 자동 주입
   - 타임아웃 및 메시지 큐 크기 제한
 
-### TODO 9-4: 하네스 수준 관측성 (Observability)
+### TODO 9-4: 하네스 수준 관측성 (Observability) — ✅ snapshot 슬라이스 (`3ce2a2a`)
 - **파일**: `src/harness/metrics.rs` (신규)
-- **문제**: 현재 관측은 `RunActionEvent` 기록에 한정. 에이전트 세션 수준의 메트릭(토큰 소비율, 응답 지연, 재시도율, 컨텍스트 활용도) 부재
-- **수정**:
+- **적용**: `HarnessMetrics::snapshot(&AgentHarness)` — sessions DashMap 을 walk 해서 status별 count, total_iterations, total_tokens, sub_agent_depth, per_role rollup 산출. API 엔드포인트 (`GET /v1/harness/metrics`) + 프론트엔드 위젯은 follow-up.
+- **원래 설계 참고**:
   ```rust
   pub struct HarnessMetrics {
       pub active_sessions: usize,
@@ -498,15 +447,11 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   ```
 - **노출**: API 엔드포인트 `GET /v1/harness/metrics` + 프론트엔드 대시보드 위젯
 
-### TODO 9-5: 에이전트 역할 동적 확장 — 런타임 에이전트 등록
+### TODO 9-5: 에이전트 역할 동적 확장 — ✅ on-demand reload (`3ce2a2a`)
 - **파일**: `src/agents/mod.rs` (AgentRegistry 확장)
-- **문제**: 현재 `AgentRegistry`는 초기화 시 11개 고정 역할만 등록. 런타임에 새 역할 추가/수정 불가
-- **수정**:
-  - `register_role(&self, role_config: AgentRoleConfig) -> anyhow::Result<()>` 메서드 추가
-  - API 엔드포인트 `POST /v1/agents/roles` 로 동적 역할 등록
-  - YAML 핫 리로드: `agents/` 디렉토리 감시 → 변경 시 자동 재로드
+- **적용**: `agents` 필드를 `Arc<RwLock<HashMap<...>>>` 로 전환, `reload_from_dir(&self, dir)` 신설 — YAML 디렉토리 재읽기 후 hashmap 교체. 실행 중 Arc 클론은 invalidate 되지 않음. API 엔드포인트 노출 + filesystem watch 자동 reload 는 follow-up. 2 unit 테스트 (성공 reload, 누락 디렉토리 fallback).
 
-### TODO 9-6: 하네스 기반 실행 흐름으로 orchestrator 전환
+### TODO 9-6: 하네스 기반 실행 흐름으로 orchestrator 전환 — ⏸️ 보류 (breaking, 별도 phase)
 - **현재 위치**: `src/orchestrator/run_manager.rs` (execute_run), `node_executor.rs` (build_run_node_fn)
 - **문제**: 현재 `build_run_node_fn`이 직접 `agents.run_role()`을 호출. 하네스 계층을 거치지 않아 세션 관리, 컨텍스트 축적, 계층 추적 등이 불가능
 - **수정**:
@@ -538,11 +483,17 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 5. ~~**Phase 5**: Tests (TODO 5-1 ~ 5-6)~~ — ✅ 완료
 6. ~~**Phase 6**: Infrastructure (TODO 4-1 ~ 4-8)~~ — ✅ 완료
 7. ~~**Phase 7**: Performance (TODO 6-1 ~ 6-7)~~ — ✅ 완료 (6-2 deferred)
+8. ~~**Stage I**: Tracing 백엔드 (TODO 8-4 + 8-5)~~ — ✅ 완료
+9. ~~**Stage II**: Tracing 프론트 (TODO 8-1 + 8-2 + 8-3)~~ — ✅ 완료
+10. ~~**Stage III**: Workflow 백엔드 (TODO 7-3 + 7-1 + 7-2 chain)~~ — ✅ 완료
+11. ~~**Stage IV**: Harness sidecar (TODO 9-1 + 9-4 + 9-5)~~ — ✅ 완료
 
-**신규 기능 (우선순위는 사용자 합의 필요)**:
-- Section 7 (Workflow Composition): 동적 요구사항 분석기 + 워크플로우 컴포저
-- Section 8 (Tracing): 실시간 DAG 스트리밍 + 서브태스크 트리 + 토큰/비용 추적
-- Section 9 (Harness): 에이전트 세션 라이프사이클 관리 + 메시지 버스
+**보류 — 사용자 합의 후 별도 phase**:
+- TODO 7-4 (워크플로우 시각 편집기, react-flow 의존성)
+- TODO 8-4 가격표 (per-token 비용 환산, env 또는 pricing.yaml 위치 결정 필요)
+- TODO 9-2 SubAgentManager (계층 결과 집약, 9-6 에 종속)
+- TODO 9-3 메시지 버스 (use case 합의 필요)
+- TODO 9-6 orchestrator 의 harness 전환 (breaking, 별도 phase 합의 필요)
 
 ---
 
@@ -578,10 +529,16 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | `web/src/lib/config.ts` | 8 | API 설정 단일 소스 |
 | `web/src/hooks/use-sse.ts` | ~150 | 재연결 + after_seq + connection state |
 | `web/e2e/{sessions,run-actions,settings}.spec.ts` | — | Phase 5 신규 Playwright |
+| `src/orchestrator/requirement_analyzer.rs` | ~190 | Stage III 신규: 휴리스틱 분석기 (shadow mode) |
+| `src/orchestrator/workflow_composer.rs` | ~280 | Stage III 신규: chain_skills |
+| `src/harness/mod.rs` | ~310 | Stage IV 신규: AgentHarness sidecar |
+| `src/harness/metrics.rs` | ~180 | Stage IV 신규: HarnessMetrics snapshot |
+| `web/src/components/trace/subtask-tree.tsx` | ~210 | Stage II 신규: 서브태스크 계층 트리 |
+| `docs/SECTION_7_9_PREP.md` | 238 | Section 7~9 사전 정리 브리프 |
 
 ---
 
-## 커밋 레퍼런스 (58 commits)
+## 커밋 레퍼런스 (70 commits)
 
 ### Phase 1 Critical Fixes
 - `2171e4e` fix: Mutex poisoning in terminal scrollback
@@ -637,3 +594,22 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - `3abeea3` feat: SSE reconnection with after_seq resume + connection state
 - `5376340` perf: Add (session_id, updated_at DESC) index for memory search
 - (TODO 6-2 deferred — measured Arc clone cost is dominated by LLM/IO)
+
+### Stage I Tracing 백엔드 (TODO 8-4 + 8-5)
+- `e0f310d` docs: Add Section 7~9 prep brief
+- `6bed393` feat: Capture provider token usage on InferenceResult
+- `d294302` feat: Propagate token usage through Agent → Node → RuntimeEvent
+- `a39df71` feat: Emit RecoveryPhaseStarted/Completed action events around recovery loop
+
+### Stage II Tracing 프론트 (TODO 8-1 + 8-2 + 8-3)
+- `0364081` feat: Live SSE overlay on the trace DAG graph
+- `b3b0a51` feat: Phase indicator + progress bar + recovery alert in AgentThinking
+- `4fda187` feat: SubtaskTree component for the trace page
+
+### Stage III Workflow 백엔드 (TODO 7-3 + 7-1 + 7-2 chain)
+- `1dd1513` feat: Validate Planner SubtaskPlan structurally before applying
+- `36e5586` feat: Heuristic RequirementAnalyzer (shadow mode, TODO 7-1)
+- `2728564` feat: WorkflowComposer.chain_skills sequential composer
+
+### Stage IV Harness sidecar (TODO 9-1 + 9-4 + 9-5)
+- `3ce2a2a` feat: AgentHarness sidecar + HarnessMetrics + AgentRegistry hot reload
