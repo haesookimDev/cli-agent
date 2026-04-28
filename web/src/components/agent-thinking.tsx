@@ -191,6 +191,97 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Phase / progress / recovery summaries                              */
+/* ------------------------------------------------------------------ */
+
+type PhaseKey =
+  | "preparing"
+  | "graph_init"
+  | "running"
+  | "verifying"
+  | "recovery"
+  | "done";
+
+const phaseLabel: Record<PhaseKey, string> = {
+  preparing: "준비 중",
+  graph_init: "그래프 빌드",
+  running: "실행 중",
+  verifying: "검증 중",
+  recovery: "재계획",
+  done: "완료",
+};
+
+interface RecoveryAlert {
+  attempt: number;
+  maxAttempts: number;
+  mode: string;
+  reason: string;
+}
+
+interface RunSummary {
+  phase: PhaseKey;
+  totalTokens: number;
+  recovery: RecoveryAlert | null;
+  hadRunFinished: boolean;
+}
+
+function summarizeRun(events: RunActionEvent[]): RunSummary {
+  let phase: PhaseKey = "preparing";
+  let totalTokens = 0;
+  let recovery: RecoveryAlert | null = null;
+  let hadRunFinished = false;
+
+  for (const ev of events) {
+    const p = ev.payload as Record<string, unknown>;
+    switch (ev.action) {
+      case "graph_initialized":
+        phase = "graph_init";
+        break;
+      case "node_started":
+      case "node_token_chunk":
+      case "model_selected":
+        if (phase !== "verifying" && phase !== "recovery") phase = "running";
+        break;
+      case "verification_started":
+        phase = "verifying";
+        break;
+      case "recovery_phase_started":
+        recovery = {
+          attempt: Number(p.attempt ?? 0) || 0,
+          maxAttempts: Number(p.max_attempts ?? 0) || 0,
+          mode: typeof p.mode === "string" ? p.mode : "recovery",
+          reason: typeof p.reason === "string" ? p.reason : "",
+        };
+        phase = "recovery";
+        break;
+      case "recovery_phase_completed":
+        recovery = null;
+        if (typeof p.outcome === "string" && p.outcome === "succeeded") {
+          phase = "running";
+        }
+        break;
+      case "run_finished":
+      case "graph_completed":
+        phase = "done";
+        hadRunFinished = true;
+        break;
+    }
+    if (ev.action === "node_completed" || ev.action === "model_selected") {
+      const usage = p.token_usage as
+        | { input_tokens?: number; output_tokens?: number }
+        | undefined;
+      if (usage) {
+        totalTokens +=
+          (Number(usage.input_tokens) || 0) +
+          (Number(usage.output_tokens) || 0);
+      }
+    }
+  }
+
+  return { phase, totalTokens, recovery, hadRunFinished };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main component                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -201,6 +292,10 @@ interface Props {
 
 export function AgentThinking({ events, isRunning }: Props) {
   const timeline = useMemo(() => buildNodeTimeline(events), [events]);
+  const summary = useMemo(() => summarizeRun(events), [events]);
+  const totalNodes = timeline.length;
+  const completedNodes = timeline.filter((n) => n.status !== "active").length;
+  const showProgress = totalNodes > 0 && (isRunning || !summary.hadRunFinished);
 
   if (timeline.length === 0) {
     if (!isRunning) return null;
@@ -226,6 +321,58 @@ export function AgentThinking({ events, isRunning }: Props) {
 
   return (
     <div className="space-y-3">
+      {/* Phase + progress + recovery banner */}
+      {(showProgress || summary.recovery || summary.totalTokens > 0) && (
+        <div className="mx-4 space-y-2">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="rounded-full bg-teal-100 px-2 py-0.5 font-medium text-teal-700">
+                {phaseLabel[summary.phase]}
+              </span>
+              {showProgress && (
+                <span className="text-slate-500">
+                  {completedNodes}/{totalNodes} 노드
+                </span>
+              )}
+            </div>
+            {summary.totalTokens > 0 && (
+              <span className="font-mono text-[11px] text-slate-500">
+                tokens: {summary.totalTokens.toLocaleString()}
+              </span>
+            )}
+          </div>
+          {showProgress && totalNodes > 0 && (
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className="h-full bg-teal-500 transition-all"
+                style={{
+                  width: `${Math.min(100, Math.round((completedNodes / totalNodes) * 100))}%`,
+                }}
+              />
+            </div>
+          )}
+          {summary.recovery && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <div className="font-medium">
+                {summary.recovery.mode === "completion_continuation"
+                  ? "검증 결과 미완성 — 추가 실행 중"
+                  : "재계획 시도 중"}{" "}
+                ({summary.recovery.attempt}
+                {summary.recovery.maxAttempts > 0
+                  ? `/${summary.recovery.maxAttempts}`
+                  : ""}
+                )
+              </div>
+              {summary.recovery.reason && (
+                <div className="mt-1 line-clamp-2 text-amber-800/80">
+                  {summary.recovery.reason}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Step cards (non-summarizer) */}
       <div className="space-y-2 px-4">
         {/* Completed steps → collapsed cards */}

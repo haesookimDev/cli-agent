@@ -10,6 +10,7 @@ export type RunActionType =
   | "model_selected" | "run_finished" | "webhook_dispatched"
   | "mcp_tool_called" | "node_token_chunk" | "subtask_planned"
   | "verification_started" | "verification_complete" | "replan_triggered"
+  | "recovery_phase_started" | "recovery_phase_completed"
   | "terminal_suggested"
   | "coder_session_started" | "coder_session_completed"
   | "validation_passed" | "validation_failed" | "git_commit_created"
