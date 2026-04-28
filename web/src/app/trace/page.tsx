@@ -1,15 +1,36 @@
 "use client";
 
-import { Suspense, useState, useCallback, useEffect } from "react";
+import { Suspense, useState, useCallback, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiGet } from "@/lib/api-client";
 import { useInterval } from "@/hooks/use-interval";
+import { useRunSSE } from "@/hooks/use-sse";
 import { getLastRunId, setLastRunId } from "@/lib/session-store";
 import { StatusBadge } from "@/components/status-badge";
 import { DagGraph } from "@/components/trace/dag-graph";
 import { EventTimeline } from "@/components/trace/event-timeline";
-import type { RunTrace } from "@/lib/types";
+import type { AgentRole, NodeTraceState, RunTrace } from "@/lib/types";
+
+const VALID_ROLES: AgentRole[] = [
+  "planner",
+  "extractor",
+  "coder",
+  "summarizer",
+  "fallback",
+  "tool_caller",
+  "analyzer",
+  "reviewer",
+  "scheduler",
+  "config_manager",
+  "validator",
+];
+
+function parseRole(raw: unknown): AgentRole | null {
+  return typeof raw === "string" && VALID_ROLES.includes(raw as AgentRole)
+    ? (raw as AgentRole)
+    : null;
+}
 
 function TraceContent() {
   const searchParams = useSearchParams();
@@ -57,6 +78,87 @@ function TraceContent() {
 
   useInterval(fetchData, live ? 1200 : null);
 
+  // Live SSE overlay — applies node_started/completed/failed/skipped/dynamic_node_added
+  // events between trace polls so the DAG reacts immediately instead of waiting
+  // 1.2s for the next /trace request.
+  const liveRunId = live ? runId : null;
+  const { events, connectionState } = useRunSSE(liveRunId);
+
+  const liveNodes: NodeTraceState[] = useMemo(() => {
+    const base = data?.graph.nodes ?? [];
+    if (!live || events.length === 0) return base;
+    const overlay = new Map<string, Partial<NodeTraceState>>();
+    const dynamicNodes: NodeTraceState[] = [];
+    for (const ev of events) {
+      const p = ev.payload as Record<string, unknown>;
+      const nodeId =
+        (p.node_id as string | undefined) ??
+        (ev.actor_id ?? "");
+      if (!nodeId) continue;
+      const role = parseRole(p.role);
+      switch (ev.action) {
+        case "node_started":
+          overlay.set(nodeId, {
+            ...(overlay.get(nodeId) ?? {}),
+            status: "running",
+            started_at: ev.timestamp,
+            role: role ?? overlay.get(nodeId)?.role ?? null,
+          });
+          break;
+        case "node_completed":
+          overlay.set(nodeId, {
+            ...(overlay.get(nodeId) ?? {}),
+            status: "succeeded",
+            finished_at: ev.timestamp,
+            duration_ms: (p.duration_ms as number | undefined) ?? null,
+            model: (p.model as string | undefined) ?? null,
+          });
+          break;
+        case "node_failed":
+          overlay.set(nodeId, {
+            ...(overlay.get(nodeId) ?? {}),
+            status: "failed",
+            finished_at: ev.timestamp,
+          });
+          break;
+        case "node_skipped":
+          overlay.set(nodeId, {
+            ...(overlay.get(nodeId) ?? {}),
+            status: "skipped",
+          });
+          break;
+        case "dynamic_node_added":
+          if (!base.some((n) => n.node_id === nodeId)) {
+            dynamicNodes.push({
+              node_id: nodeId,
+              role: role,
+              status: "pending",
+              started_at: null,
+              finished_at: null,
+              duration_ms: null,
+              retries: 0,
+              model: null,
+              dependencies: ((p.dependencies as string[] | undefined) ?? [])
+                .filter((d) => typeof d === "string"),
+            });
+          }
+          break;
+      }
+    }
+    const merged = base.map((n) => ({
+      ...n,
+      ...overlay.get(n.node_id),
+    }));
+    return [...merged, ...dynamicNodes];
+  }, [data?.graph.nodes, events, live]);
+
+  const liveActiveNodes = useMemo(() => {
+    if (!live) return data?.graph.active_nodes ?? [];
+    return liveNodes
+      .filter((n) => n.status === "running")
+      .map((n) => n.node_id);
+  }, [data?.graph.active_nodes, liveNodes, live]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -82,7 +184,13 @@ function TraceContent() {
               : "border-slate-300 text-slate-600 hover:bg-slate-50"
           }`}
         >
-          {live ? "Live ON" : "Live OFF"}
+          {live
+            ? connectionState === "open"
+              ? "Live ON"
+              : connectionState === "reconnecting"
+                ? "Reconnecting…"
+                : "Live ON"
+            : "Live OFF"}
         </button>
       </div>
 
@@ -148,9 +256,9 @@ function TraceContent() {
               Dependency Graph
             </h3>
             <DagGraph
-              nodes={data.graph.nodes}
+              nodes={liveNodes}
               edges={data.graph.edges}
-              activeNodes={data.graph.active_nodes}
+              activeNodes={liveActiveNodes}
             />
           </div>
 
