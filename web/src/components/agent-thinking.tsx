@@ -22,6 +22,8 @@ interface NodeTimeline {
   coderOutput: string;
   coderBackend: string | null;
   progress: Array<{ stage: string | null; message: string }>;
+  dependencies: string[];
+  outputPreview: string | null;
 }
 
 const roleLabels: Record<string, string> = {
@@ -75,6 +77,8 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
         coderOutput: "",
         coderBackend: null,
         progress: [],
+        dependencies: [],
+        outputPreview: null,
       };
       nodes.set(id, node);
       order.push(id);
@@ -86,6 +90,34 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
 
   for (const ev of events) {
     const p = ev.payload as Record<string, unknown>;
+
+    if (ev.action === "graph_initialized") {
+      const items = p.nodes;
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (typeof item !== "object" || item == null) continue;
+          const itemRec = item as Record<string, unknown>;
+          const nodeId =
+            typeof itemRec.id === "string" ? itemRec.id.trim() : "";
+          if (!nodeId) continue;
+          const role =
+            typeof itemRec.role === "string" ? itemRec.role : null;
+          const node = ensureNode(nodeId, role);
+          if (node) {
+            const deps = itemRec.dependencies;
+            if (Array.isArray(deps)) {
+              const seen = new Set(node.dependencies);
+              for (const d of deps) {
+                if (typeof d === "string" && d.trim() && !seen.has(d)) {
+                  node.dependencies.push(d);
+                  seen.add(d);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
 
     if (ev.action === "node_started") {
       const nodeId = ((p.node_id as string) ?? ev.actor_id ?? "").trim();
@@ -171,10 +203,14 @@ function buildNodeTimeline(events: RunActionEvent[]): NodeTimeline[] {
 
         const outputPreview = (p.output_preview as string) ?? "";
         const outputTruncated = p.output_truncated === true;
-        if (outputPreview && node.tokens.trim().length === 0) {
-          node.tokens = outputTruncated
-            ? `${outputPreview}\n\n...[truncated]`
-            : outputPreview;
+        if (outputPreview) {
+          // Stash a short preview for the data-flow card on downstream nodes.
+          node.outputPreview = outputPreview;
+          if (node.tokens.trim().length === 0) {
+            node.tokens = outputTruncated
+              ? `${outputPreview}\n\n...[truncated]`
+              : outputPreview;
+          }
         }
       }
     }
@@ -303,6 +339,18 @@ interface Props {
 export function AgentThinking({ events, isRunning }: Props) {
   const timeline = useMemo(() => buildNodeTimeline(events), [events]);
   const summary = useMemo(() => summarizeRun(events), [events]);
+  // Map node_id → output preview for the data-flow card. Built from the
+  // same timeline so dependency rendering stays in sync.
+  const previewByNode = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const n of timeline) {
+      const preview =
+        n.outputPreview ??
+        (n.tokens.trim() ? n.tokens.trim().slice(0, 200) : null);
+      if (preview) map.set(n.nodeId, preview);
+    }
+    return map;
+  }, [timeline]);
   const totalNodes = timeline.length;
   const completedNodes = timeline.filter((n) => n.status !== "active").length;
   const showProgress = totalNodes > 0 && (isRunning || !summary.hadRunFinished);
@@ -396,18 +444,29 @@ export function AgentThinking({ events, isRunning }: Props) {
       <div className="space-y-2 px-4">
         {/* Completed steps → collapsed cards */}
         {completedSteps.map((node) => (
-          <CompletedNodeCard key={node.nodeId} node={node} />
+          <CompletedNodeCard
+            key={node.nodeId}
+            node={node}
+            previewByNode={previewByNode}
+          />
         ))}
 
         {/* Active steps → parallel if multiple */}
         {activeSteps.length > 1 ? (
           <div className="grid grid-cols-2 gap-3">
             {activeSteps.map((node) => (
-              <ActiveNodePanel key={node.nodeId} node={node} />
+              <ActiveNodePanel
+                key={node.nodeId}
+                node={node}
+                previewByNode={previewByNode}
+              />
             ))}
           </div>
         ) : activeSteps.length === 1 ? (
-          <ActiveNodePanel node={activeSteps[0]} />
+          <ActiveNodePanel
+            node={activeSteps[0]}
+            previewByNode={previewByNode}
+          />
         ) : null}
 
         {/* Waiting for next step */}
@@ -431,7 +490,41 @@ export function AgentThinking({ events, isRunning }: Props) {
 /*  Completed node → collapsible card                                  */
 /* ------------------------------------------------------------------ */
 
-function CompletedNodeCard({ node }: { node: NodeTimeline }) {
+function DataFlowCard({
+  node,
+  previewByNode,
+}: {
+  node: NodeTimeline;
+  previewByNode: Map<string, string>;
+}) {
+  const upstream = node.dependencies
+    .map((dep) => ({ id: dep, preview: previewByNode.get(dep) ?? null }))
+    .filter((d) => d.preview !== null);
+  if (upstream.length === 0) return null;
+  return (
+    <div className="mt-1 rounded-md border border-slate-100 bg-slate-50/60 px-2 py-1.5 text-[11px] text-slate-600">
+      <span className="font-medium text-slate-500">Inputs from</span>{" "}
+      {upstream.map((u, i) => (
+        <span key={u.id}>
+          {i > 0 && <span className="text-slate-300"> · </span>}
+          <span className="font-mono text-slate-700">{u.id}</span>
+          <span className="text-slate-400">
+            : {u.preview!.replace(/\s+/g, " ").slice(0, 80)}
+            {u.preview!.length > 80 ? "…" : ""}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function CompletedNodeCard({
+  node,
+  previewByNode,
+}: {
+  node: NodeTimeline;
+  previewByNode: Map<string, string>;
+}) {
   const [open, setOpen] = useState(false);
   const isFailed = node.status === "failed";
   const role = node.role ?? node.nodeId;
@@ -512,6 +605,7 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
 
       {open && (
         <div className="border-t border-slate-100 px-3 py-3">
+          <DataFlowCard node={node} previewByNode={previewByNode} />
           {node.toolCalls.length > 0 && (
             <div className="mb-3 space-y-2">
               {node.toolCalls.map((tc, i) => (
@@ -570,7 +664,13 @@ function CompletedNodeCard({ node }: { node: NodeTimeline }) {
 /*  Active node → streaming panel with markdown                        */
 /* ------------------------------------------------------------------ */
 
-function ActiveNodePanel({ node }: { node: NodeTimeline }) {
+function ActiveNodePanel({
+  node,
+  previewByNode,
+}: {
+  node: NodeTimeline;
+  previewByNode: Map<string, string>;
+}) {
   const role = node.role ?? node.nodeId;
   const label = roleLabels[role] ?? role;
   const dotColor = roleColors[role] ?? "bg-slate-500";
@@ -594,6 +694,8 @@ function ActiveNodePanel({ node }: { node: NodeTimeline }) {
         )}
         <BouncingDots />
       </div>
+
+      <DataFlowCard node={node} previewByNode={previewByNode} />
 
       {node.toolCalls.length > 0 && (
         <div className="mb-2 space-y-2">
