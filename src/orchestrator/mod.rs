@@ -76,6 +76,14 @@ pub struct Orchestrator {
     pub(super) classify_cache: Arc<DashMap<(Uuid, String), TaskType>>,
     /// Pricing table for token-usage → USD estimation (Phase 8 / TODO 8-4).
     pub(super) pricing: Arc<crate::pricing::Pricing>,
+    /// Sidecar harness (TODO 9-1, Phase 11). Holds session metadata for
+    /// every node executed; the inference itself still runs through
+    /// `agents.run_role_stream` so token streaming is unaffected.
+    pub(super) harness: Arc<crate::harness::AgentHarness>,
+    /// Map of run_id → root harness session id. Populated when a run starts
+    /// so build_run_node_fn can attach each node session as a child of the
+    /// run's root.
+    pub(super) root_harness_sessions: Arc<DashMap<Uuid, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +121,7 @@ impl Orchestrator {
     ) -> Self {
         let skills = Arc::new(DashMap::new());
         let _ = skills_dir; // loaded asynchronously later
+        let harness = crate::harness::AgentHarness::new(agents.clone(), router.clone());
         Self {
             runtime,
             agents,
@@ -133,6 +142,8 @@ impl Orchestrator {
             session_workspace,
             classify_cache: Arc::new(DashMap::new()),
             pricing: crate::pricing::shared_default(),
+            harness,
+            root_harness_sessions: Arc::new(DashMap::new()),
         }
     }
 
@@ -979,6 +990,12 @@ impl Orchestrator {
         entry.cost_is_estimate = total_cost.is_some();
         entry.error = error_message;
         entry.finished_at = Some(Utc::now());
+
+        // Phase 11-B: terminate the root harness session for this run so
+        // HarnessMetrics no longer reports the run as active.
+        if let Some((_, root_session_id)) = self.root_harness_sessions.remove(&run_id) {
+            let _ = self.harness.terminate(&root_session_id).await;
+        }
         let status_text = entry.status.to_string();
         entry.timeline.push(format!(
             "{} run finished ({})",

@@ -1476,6 +1476,18 @@ impl Orchestrator {
                     None
                 };
 
+                // Phase 11-B: track this node as a child of the run's root
+                // harness session. Each spawn produces a session id we hand
+                // back to the harness when the inference settles, so the
+                // session_tree reflects the actual execution lattice.
+                let root_session = orchestrator
+                    .root_harness_sessions
+                    .get(&run_id)
+                    .map(|kv| kv.value().clone());
+                let harness_session_id = orchestrator
+                    .harness
+                    .create_session(node.role, root_session.as_deref());
+
                 let run = agents
                     .run_role_stream(
                         node.role,
@@ -1488,6 +1500,14 @@ impl Orchestrator {
                 if let Some((stop_tx, heartbeat_handle)) = heartbeat {
                     let _ = stop_tx.send(true);
                     let _ = heartbeat_handle.await;
+                }
+                match &run {
+                    Ok(out) => orchestrator
+                        .harness
+                        .record_output(harness_session_id.as_str(), out),
+                    Err(err) => orchestrator
+                        .harness
+                        .record_error(harness_session_id.as_str(), err.to_string().as_str()),
                 }
                 match run {
                     Ok(output) => {

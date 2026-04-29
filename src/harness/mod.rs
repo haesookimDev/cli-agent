@@ -220,6 +220,43 @@ impl AgentHarness {
         Ok(())
     }
 
+    /// Register a session WITHOUT running inference. Used by the orchestrator
+    /// when it has its own run_role_stream call path but still wants the
+    /// harness to track lifecycle, usage, and tree structure.
+    pub fn create_session(
+        &self,
+        role: AgentRole,
+        parent: Option<&str>,
+    ) -> String {
+        let mut session = AgentSession::new(role, parent.map(str::to_string));
+        session.status = AgentSessionStatus::Running;
+        let id = session.session_id.clone();
+        if let Some(parent_id) = parent {
+            if let Some(mut parent_entry) = self.sessions.get_mut(parent_id) {
+                parent_entry.child_sessions.push(id.clone());
+            }
+        }
+        self.sessions.insert(id.clone(), session);
+        id
+    }
+
+    /// Record an externally-produced AgentOutput against an existing session
+    /// (created via `create_session`). Updates iteration count + rolling
+    /// usage; does not call any LLM.
+    pub fn record_output(&self, session_id: &str, output: &AgentOutput) {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.record_output(output);
+        }
+    }
+
+    /// Record an externally-produced error so HarnessMetrics counts the
+    /// session as Failed (mirrors what `spawn` does on inference error).
+    pub fn record_error(&self, session_id: &str, err: &str) {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.status = AgentSessionStatus::Failed(err.to_string());
+        }
+    }
+
     /// All sessions currently registered (any status). Useful for metrics
     /// and the SubAgentManager's eventual collect_results path.
     pub fn sessions(&self) -> &Arc<DashMap<String, AgentSession>> {

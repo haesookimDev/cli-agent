@@ -160,6 +160,16 @@ impl Orchestrator {
             return Ok(());
         }
 
+        // Phase 11: register a root harness session for this run. Each node
+        // executed in build_run_node_fn becomes a child of this session, so
+        // HarnessMetrics can compute per-run depth + per-role rollups
+        // without changing the underlying inference path.
+        let root_session_id = self
+            .harness
+            .create_session(crate::types::AgentRole::Planner, None);
+        self.root_harness_sessions
+            .insert(run_id, root_session_id);
+
         self.memory
             .append_event(SessionEvent {
                 session_id,
