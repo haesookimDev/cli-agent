@@ -1,0 +1,63 @@
+# Per-million-token USD pricing for inference cost estimation (TODO 8-4 가격표).
+#
+# Loader: src/pricing.rs::Pricing::load. Default lookup path:
+#   1. CLI_AGENT_PRICING_PATH env var, if set
+#   2. ./config/pricing.yaml (this file) relative to CWD
+#   3. fallback to a built-in best-guess table compiled into the binary
+#
+# Match order on lookup:
+#   1. exact "{provider}:{model_id}" (e.g. "anthropic:claude-opus-4-6")
+#   2. exact "{model_id}" (e.g. "gpt-5.2")
+#   3. provider default ("anthropic", "openai", "gemini", "vllm")
+#   4. global default
+#
+# Numbers are in USD per 1,000,000 tokens. Update when providers change rates.
+# Estimates only — never guaranteed accurate.
+
+global_default:
+  input_per_1m: 1.00
+  output_per_1m: 3.00
+
+provider_defaults:
+  anthropic:
+    input_per_1m: 3.00
+    output_per_1m: 15.00
+  openai:
+    input_per_1m: 2.50
+    output_per_1m: 10.00
+  gemini:
+    input_per_1m: 1.25
+    output_per_1m: 5.00
+  vllm:
+    # Local inference — operating cost only. Set to 0 by default; operators
+    # can override with their own electricity / GPU amortization estimate.
+    input_per_1m: 0.00
+    output_per_1m: 0.00
+
+models:
+  # --- OpenAI ---
+  "openai:gpt-5.2":
+    input_per_1m: 5.00
+    output_per_1m: 20.00
+  "openai:gpt-5.1":
+    input_per_1m: 1.50
+    output_per_1m: 6.00
+  "openai:gpt-5-mini":
+    input_per_1m: 0.80
+    output_per_1m: 3.20
+
+  # --- Anthropic ---
+  "anthropic:claude-sonnet-4-6":
+    input_per_1m: 3.00
+    output_per_1m: 15.00
+  "anthropic:claude-opus-4-6":
+    input_per_1m: 15.00
+    output_per_1m: 75.00
+
+  # --- Gemini ---
+  "gemini:gemini-3.1-pro-preview":
+    input_per_1m: 2.00
+    output_per_1m: 8.00
+  "gemini:gemini-3-flash-preview":
+    input_per_1m: 0.20
+    output_per_1m: 0.80

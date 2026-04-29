@@ -307,6 +307,15 @@ pub struct AgentExecutionRecord {
     pub duration_ms: u128,
     pub succeeded: bool,
     pub error: Option<String>,
+    /// Provider-reported token usage for this node (None when the backend
+    /// didn't surface a usage block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
+    /// USD cost estimate computed via the configured pricing table. Always
+    /// to be treated as an estimate; pair with `cost_is_estimate: true` on
+    /// API responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimate_usd: Option<f64>,
 }
 
 /// Per-inference token accounting reported by the upstream LLM provider.
@@ -346,6 +355,19 @@ pub struct RunRecord {
     pub outputs: Vec<AgentExecutionRecord>,
     pub error: Option<String>,
     pub timeline: Vec<String>,
+    /// Sum of `token_usage` across all node outputs, populated on
+    /// `finish_run`. None for runs that produced no usage-bearing nodes
+    /// (e.g. CLI-only backends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_token_usage: Option<TokenUsage>,
+    /// USD estimate for the entire run. Always paired with
+    /// `cost_is_estimate: true` on responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_estimate_usd: Option<f64>,
+    /// Always `true` when `total_cost_estimate_usd` is set — the cost is
+    /// derived from a static pricing table, not provider invoices.
+    #[serde(default)]
+    pub cost_is_estimate: bool,
 }
 
 impl RunRecord {
@@ -362,6 +384,9 @@ impl RunRecord {
             outputs: Vec::new(),
             error: None,
             timeline: Vec::new(),
+            total_token_usage: None,
+            total_cost_estimate_usd: None,
+            cost_is_estimate: false,
         }
     }
 }
@@ -429,6 +454,17 @@ pub struct SessionSummary {
     pub run_count: usize,
     pub last_run_at: Option<DateTime<Utc>>,
     pub last_task: Option<String>,
+    /// Sum of `total_token_usage` across every finished run in this session.
+    /// None when no run has reported usage yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_token_usage: Option<TokenUsage>,
+    /// Sum of `total_cost_estimate_usd` across every finished run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_estimate_usd: Option<f64>,
+    /// Always `true` when the cost field is set. Mirrors RunRecord's flag
+    /// so consumers can disclaim consistently.
+    #[serde(default)]
+    pub cost_is_estimate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1203,4 +1239,14 @@ pub struct ClusterRunRecord {
     pub status: ClusterRunStatus,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Aggregated token usage across every sub-run, populated as each sub-run
+    /// finishes. None until at least one sub-run reports usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_token_usage: Option<TokenUsage>,
+    /// Aggregated USD cost estimate. Always paired with
+    /// `cost_is_estimate: true` on API responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_estimate_usd: Option<f64>,
+    #[serde(default)]
+    pub cost_is_estimate: bool,
 }

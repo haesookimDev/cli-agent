@@ -1556,6 +1556,8 @@ impl Orchestrator {
                         let current_output = tool_augment::strip_tool_call_tags(&current_output);
 
                         let model = current_model.clone();
+                        let cost_estimate_usd = accumulated_usage
+                            .map(|u| orchestrator.pricing.cost_for(model.as_str(), &u));
                         let _ = memory
                             .append_run_action_event(
                                 run_id,
@@ -1569,6 +1571,8 @@ impl Orchestrator {
                                     "role": role,
                                     "model": model.clone(),
                                     "token_usage": accumulated_usage,
+                                    "cost_estimate_usd": cost_estimate_usd,
+                                    "cost_is_estimate": cost_estimate_usd.is_some(),
                                 }),
                             )
                             .await;

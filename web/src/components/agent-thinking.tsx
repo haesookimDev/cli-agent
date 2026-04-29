@@ -221,6 +221,8 @@ interface RecoveryAlert {
 interface RunSummary {
   phase: PhaseKey;
   totalTokens: number;
+  totalCostUsd: number;
+  costIsEstimate: boolean;
   recovery: RecoveryAlert | null;
   hadRunFinished: boolean;
 }
@@ -228,6 +230,8 @@ interface RunSummary {
 function summarizeRun(events: RunActionEvent[]): RunSummary {
   let phase: PhaseKey = "preparing";
   let totalTokens = 0;
+  let totalCostUsd = 0;
+  let costIsEstimate = false;
   let recovery: RecoveryAlert | null = null;
   let hadRunFinished = false;
 
@@ -275,10 +279,16 @@ function summarizeRun(events: RunActionEvent[]): RunSummary {
           (Number(usage.input_tokens) || 0) +
           (Number(usage.output_tokens) || 0);
       }
+      // Backend computes cost_estimate_usd on the model_selected event so the
+      // frontend doesn't have to duplicate the pricing table.
+      if (ev.action === "model_selected" && typeof p.cost_estimate_usd === "number") {
+        totalCostUsd += Number(p.cost_estimate_usd) || 0;
+        if (p.cost_is_estimate === true) costIsEstimate = true;
+      }
     }
   }
 
-  return { phase, totalTokens, recovery, hadRunFinished };
+  return { phase, totalTokens, totalCostUsd, costIsEstimate, recovery, hadRunFinished };
 }
 
 /* ------------------------------------------------------------------ */
@@ -322,7 +332,10 @@ export function AgentThinking({ events, isRunning }: Props) {
   return (
     <div className="space-y-3">
       {/* Phase + progress + recovery banner */}
-      {(showProgress || summary.recovery || summary.totalTokens > 0) && (
+      {(showProgress ||
+        summary.recovery ||
+        summary.totalTokens > 0 ||
+        summary.totalCostUsd > 0) && (
         <div className="mx-4 space-y-2">
           <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
             <div className="flex items-center gap-2">
@@ -335,11 +348,17 @@ export function AgentThinking({ events, isRunning }: Props) {
                 </span>
               )}
             </div>
-            {summary.totalTokens > 0 && (
-              <span className="font-mono text-[11px] text-slate-500">
-                tokens: {summary.totalTokens.toLocaleString()}
-              </span>
-            )}
+            <div className="flex items-center gap-2 font-mono text-[11px] text-slate-500">
+              {summary.totalTokens > 0 && (
+                <span>tokens: {summary.totalTokens.toLocaleString()}</span>
+              )}
+              {summary.totalCostUsd > 0 && (
+                <span title={summary.costIsEstimate ? "estimated cost" : "cost"}>
+                  ≈ ${summary.totalCostUsd.toFixed(summary.totalCostUsd < 1 ? 4 : 2)}
+                  {summary.costIsEstimate && " est."}
+                </span>
+              )}
+            </div>
           </div>
           {showProgress && totalNodes > 0 && (
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">

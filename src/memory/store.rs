@@ -131,6 +131,15 @@ impl SqliteStore {
     }
 
     pub async fn upsert_run(&self, run: &RunRecord) -> anyhow::Result<()> {
+        let total_input = run
+            .total_token_usage
+            .map(|u| u.input_tokens as i64)
+            .unwrap_or(0);
+        let total_output = run
+            .total_token_usage
+            .map(|u| u.output_tokens as i64)
+            .unwrap_or(0);
+        let total_cost = run.total_cost_estimate_usd.unwrap_or(0.0);
         sqlx::query(
             r#"
             INSERT INTO agent_runs (
@@ -142,15 +151,21 @@ impl SqliteStore {
                 run_json,
                 error,
                 created_at,
-                updated_at
+                updated_at,
+                total_input_tokens,
+                total_output_tokens,
+                total_cost_usd
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(run_id)
             DO UPDATE SET
                 status = excluded.status,
                 run_json = excluded.run_json,
                 error = excluded.error,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                total_input_tokens = excluded.total_input_tokens,
+                total_output_tokens = excluded.total_output_tokens,
+                total_cost_usd = excluded.total_cost_usd
             "#,
         )
         .bind(run.run_id.to_string())
@@ -162,6 +177,9 @@ impl SqliteStore {
         .bind(run.error.clone())
         .bind(run.created_at.to_rfc3339())
         .bind(Utc::now().to_rfc3339())
+        .bind(total_input)
+        .bind(total_output)
+        .bind(total_cost)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -459,7 +477,10 @@ impl SqliteStore {
                     WHERE ar2.session_id = s.id
                     ORDER BY ar2.created_at DESC
                     LIMIT 1
-                ) AS last_task
+                ) AS last_task,
+                COALESCE(SUM(ar.total_input_tokens), 0)  AS total_input,
+                COALESCE(SUM(ar.total_output_tokens), 0) AS total_output,
+                COALESCE(SUM(ar.total_cost_usd), 0.0)    AS total_cost
             FROM sessions s
             LEFT JOIN agent_runs ar ON ar.session_id = s.id
             GROUP BY s.id
@@ -476,6 +497,10 @@ impl SqliteStore {
             let session_raw: String = row.get("session_id");
             let created_at_raw: String = row.get("created_at");
             let last_run_at_raw: Option<String> = row.get("last_run_at");
+            let total_input: i64 = row.try_get("total_input").unwrap_or(0);
+            let total_output: i64 = row.try_get("total_output").unwrap_or(0);
+            let total_cost: f64 = row.try_get("total_cost").unwrap_or(0.0);
+            let (token_usage, cost) = build_session_totals(total_input, total_output, total_cost);
 
             sessions.push(SessionSummary {
                 session_id: Uuid::parse_str(session_raw.as_str())?,
@@ -483,6 +508,9 @@ impl SqliteStore {
                 run_count: row.get::<i64, _>("run_count").max(0) as usize,
                 last_run_at: last_run_at_raw.as_deref().map(parse_rfc3339).transpose()?,
                 last_task: row.get("last_task"),
+                total_token_usage: token_usage,
+                total_cost_estimate_usd: cost,
+                cost_is_estimate: cost.is_some(),
             });
         }
 
@@ -503,7 +531,10 @@ impl SqliteStore {
                     WHERE ar2.session_id = s.id
                     ORDER BY ar2.created_at DESC
                     LIMIT 1
-                ) AS last_task
+                ) AS last_task,
+                COALESCE(SUM(ar.total_input_tokens), 0)  AS total_input,
+                COALESCE(SUM(ar.total_output_tokens), 0) AS total_output,
+                COALESCE(SUM(ar.total_cost_usd), 0.0)    AS total_cost
             FROM sessions s
             LEFT JOIN agent_runs ar ON ar.session_id = s.id
             WHERE s.id = ?1
@@ -521,6 +552,10 @@ impl SqliteStore {
         let session_raw: String = row.get("session_id");
         let created_at_raw: String = row.get("created_at");
         let last_run_at_raw: Option<String> = row.get("last_run_at");
+        let total_input: i64 = row.try_get("total_input").unwrap_or(0);
+        let total_output: i64 = row.try_get("total_output").unwrap_or(0);
+        let total_cost: f64 = row.try_get("total_cost").unwrap_or(0.0);
+        let (token_usage, cost) = build_session_totals(total_input, total_output, total_cost);
 
         Ok(Some(SessionSummary {
             session_id: Uuid::parse_str(session_raw.as_str())?,
@@ -528,6 +563,9 @@ impl SqliteStore {
             run_count: row.get::<i64, _>("run_count").max(0) as usize,
             last_run_at: last_run_at_raw.as_deref().map(parse_rfc3339).transpose()?,
             last_task: row.get("last_task"),
+            total_token_usage: token_usage,
+            total_cost_estimate_usd: cost,
+            cost_is_estimate: cost.is_some(),
         }))
     }
 
@@ -1677,6 +1715,30 @@ fn parse_workflow_row(
         updated_at: parse_rfc3339(&r.get::<String, _>("updated_at"))?,
         source: Default::default(),
     })
+}
+
+/// Convert raw aggregate columns into the `(token_usage, cost)` tuple used by
+/// SessionSummary. Returns None for both when nothing was reported (so the
+/// summary stays slim for sessions that haven't run a metered model yet).
+fn build_session_totals(
+    total_input: i64,
+    total_output: i64,
+    total_cost: f64,
+) -> (Option<crate::types::TokenUsage>, Option<f64>) {
+    let token_usage = if total_input > 0 || total_output > 0 {
+        Some(crate::types::TokenUsage {
+            input_tokens: total_input.max(0).min(u32::MAX as i64) as u32,
+            output_tokens: total_output.max(0).min(u32::MAX as i64) as u32,
+        })
+    } else {
+        None
+    };
+    let cost = if total_cost > 0.0 {
+        Some(total_cost)
+    } else {
+        None
+    };
+    (token_usage, cost)
 }
 
 /// Read the master passphrase used to encrypt webhook secrets at rest. Falls

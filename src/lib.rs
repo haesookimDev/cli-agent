@@ -11,6 +11,7 @@ pub mod interface;
 pub mod mcp;
 pub mod memory;
 pub mod orchestrator;
+pub mod pricing;
 pub mod router;
 pub mod runtime;
 pub mod scheduler;

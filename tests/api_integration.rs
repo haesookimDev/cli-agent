@@ -439,6 +439,34 @@ async fn health_endpoint_unauthenticated_returns_ok_when_db_alive() {
 }
 
 #[tokio::test]
+async fn session_list_carries_cost_estimate_fields() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+
+    // Create a session so the list isn't empty.
+    let req = signed_request(&harness.auth, "POST", "/v1/sessions", b"");
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let req = signed_request(&harness.auth, "GET", "/v1/sessions?limit=10", b"");
+    let resp = app.oneshot(req).await.unwrap();
+    let body = read_json(resp.into_body()).await;
+    let arr = body.as_array().expect("array");
+    let s = arr.iter().next().expect("at least one session");
+
+    // No runs yet → cost_is_estimate is false and totals are absent.
+    assert_eq!(
+        s.get("cost_is_estimate").and_then(|v| v.as_bool()),
+        Some(false),
+        "cost_is_estimate is always present (false when no runs ran)"
+    );
+    assert!(
+        s.get("total_cost_estimate_usd").is_none(),
+        "totals omitted via skip_serializing_if when None"
+    );
+}
+
+#[tokio::test]
 async fn list_skills_returns_array() {
     let harness = make_harness().await;
     let app = router(harness.state);

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::orchestrator::Orchestrator;
 use crate::types::{
     ClusterRunRecord, ClusterRunRequest, ClusterRunStatus, ClusterSubRunEntry, RunRequest,
-    RunStatus, TaskProfile,
+    RunStatus, TaskProfile, TokenUsage,
 };
 
 // ── Internal message bus ─────────────────────────────────────────────────────
@@ -20,6 +20,8 @@ enum ClusterMessage {
         cluster_run_id: Uuid,
         run_id: Uuid,
         status: RunStatus,
+        token_usage: Option<TokenUsage>,
+        cost_estimate_usd: Option<f64>,
     },
 }
 
@@ -66,6 +68,8 @@ impl OrchestratorCluster {
                     cluster_run_id,
                     run_id,
                     status,
+                    token_usage,
+                    cost_estimate_usd,
                 } => {
                     if let Some(mut record) = runs.get_mut(&cluster_run_id) {
                         for sub in &mut record.sub_runs {
@@ -73,6 +77,18 @@ impl OrchestratorCluster {
                                 sub.status = status;
                                 break;
                             }
+                        }
+
+                        if let Some(u) = token_usage {
+                            record.total_token_usage = Some(match record.total_token_usage {
+                                Some(prev) => prev.merge(&u),
+                                None => u,
+                            });
+                        }
+                        if let Some(c) = cost_estimate_usd {
+                            record.total_cost_estimate_usd =
+                                Some(record.total_cost_estimate_usd.unwrap_or(0.0) + c);
+                            record.cost_is_estimate = true;
                         }
 
                         let all_done = record.sub_runs.iter().all(|s| s.status.is_terminal());
@@ -191,6 +207,9 @@ impl OrchestratorCluster {
             status: ClusterRunStatus::Running,
             created_at: Utc::now(),
             completed_at: None,
+            total_token_usage: None,
+            total_cost_estimate_usd: None,
+            cost_is_estimate: false,
         };
 
         self.runs.insert(cluster_run_id, record.clone());
@@ -214,6 +233,8 @@ impl OrchestratorCluster {
                                 cluster_run_id,
                                 run_id,
                                 status: run.status,
+                                token_usage: run.total_token_usage,
+                                cost_estimate_usd: run.total_cost_estimate_usd,
                             })
                             .await;
                         break;

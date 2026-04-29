@@ -46,7 +46,7 @@ use crate::types::{
     NodeTraceState, RepoAnalysis, RepoAnalysisConfig, RunActionEvent, RunActionType,
     RunBehaviorActionCount, RunBehaviorLane, RunBehaviorSummary, RunBehaviorView, RunRecord,
     RunRequest, RunStatus, RunSubmission, RunTrace, RunTraceGraph, SessionEvent, SessionEventType,
-    SessionMemoryItem, TaskType, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
+    SessionMemoryItem, TaskType, TokenUsage, TraceEdge, ValidationConfig, WebhookDeliveryRecord,
     WebhookEndpoint, WorkflowTemplate,
 };
 use crate::webhook::WebhookDispatcher;
@@ -74,6 +74,8 @@ pub struct Orchestrator {
     /// Keyed by (session_id, task text); stores the resolved TaskType so
     /// repeated submissions inside one session skip the LLM call.
     pub(super) classify_cache: Arc<DashMap<(Uuid, String), TaskType>>,
+    /// Pricing table for token-usage → USD estimation (Phase 8 / TODO 8-4).
+    pub(super) pricing: Arc<crate::pricing::Pricing>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,7 @@ impl Orchestrator {
             skills,
             session_workspace,
             classify_cache: Arc::new(DashMap::new()),
+            pricing: crate::pricing::shared_default(),
         }
     }
 
@@ -931,6 +934,9 @@ impl Orchestrator {
             return Err(anyhow::anyhow!("run {run_id} not found"));
         };
 
+        let pricing = self.pricing.clone();
+        let mut total_usage: Option<TokenUsage> = None;
+        let mut total_cost: Option<f64> = None;
         let records = outputs
             .into_iter()
             .map(|n| {
@@ -939,6 +945,19 @@ impl Orchestrator {
                 } else {
                     n.output
                 };
+                let cost = n
+                    .token_usage
+                    .as_ref()
+                    .map(|u| pricing.cost_for(n.model.as_str(), u));
+                if let Some(u) = n.token_usage {
+                    total_usage = Some(match total_usage {
+                        Some(prev) => prev.merge(&u),
+                        None => u,
+                    });
+                }
+                if let Some(c) = cost {
+                    total_cost = Some(total_cost.unwrap_or(0.0) + c);
+                }
                 AgentExecutionRecord {
                     node_id: n.node_id,
                     role: n.role,
@@ -947,12 +966,17 @@ impl Orchestrator {
                     duration_ms: n.duration_ms,
                     succeeded: n.succeeded,
                     error: n.error,
+                    token_usage: n.token_usage,
+                    cost_estimate_usd: cost,
                 }
             })
             .collect::<Vec<_>>();
 
         entry.status = status;
         entry.outputs = records;
+        entry.total_token_usage = total_usage;
+        entry.total_cost_estimate_usd = total_cost;
+        entry.cost_is_estimate = total_cost.is_some();
         entry.error = error_message;
         entry.finished_at = Some(Utc::now());
         let status_text = entry.status.to_string();

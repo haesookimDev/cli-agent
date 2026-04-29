@@ -42,6 +42,11 @@ export interface AgentExecutionRecord {
   error: string | null;
 }
 
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface RunRecord {
   run_id: string;
   session_id: string;
@@ -54,6 +59,9 @@ export interface RunRecord {
   outputs: AgentExecutionRecord[];
   error: string | null;
   timeline: string[];
+  total_token_usage?: TokenUsage;
+  total_cost_estimate_usd?: number;
+  cost_is_estimate?: boolean;
 }
 
 export interface SessionSummary {
@@ -62,6 +70,9 @@ export interface SessionSummary {
   run_count: number;
   last_run_at: string | null;
   last_task: string | null;
+  total_token_usage?: TokenUsage;
+  total_cost_estimate_usd?: number;
+  cost_is_estimate?: boolean;
 }
 
 export interface RunActionEvent {
