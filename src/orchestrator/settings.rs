@@ -66,6 +66,13 @@ impl Orchestrator {
             settings.terminal_command = persisted.terminal_command;
             settings.terminal_args = persisted.terminal_args;
             settings.terminal_auto_spawn = persisted.terminal_auto_spawn;
+            // Restore persisted vLLM config so the Settings UI keeps the
+            // user's custom model after a server restart. router.catalog
+            // is already repopulated by `load_persisted_settings`; this
+            // line just makes sure GET /v1/settings reports the same
+            // values as the active runtime.
+            settings.vllm_base_url = persisted.vllm_base_url;
+            settings.vllm_custom_model = persisted.vllm_custom_model;
 
             if !settings.cli_model_enabled && persisted.cli_model_enabled {
                 settings.cli_model_enabled = true;

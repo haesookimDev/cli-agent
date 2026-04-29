@@ -846,12 +846,19 @@ impl ProviderClient {
     ) -> anyhow::Result<(String, Option<crate::types::TokenUsage>)> {
         let base_url = self.vllm_base_url.read().unwrap().clone();
         let endpoint = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+        // The catalog tags user-added vLLM models with a `custom:` prefix
+        // so reloads can distinguish them from preconfigured entries; the
+        // server itself only knows the raw model name.
+        let serving_id = model
+            .model_id
+            .strip_prefix("custom:")
+            .unwrap_or(&model.model_id);
 
         let resp = self
             .http
             .post(&endpoint)
             .json(&serde_json::json!({
-                "model": model.model_id,
+                "model": serving_id,
                 "messages": [{"role": "user", "content": prompt}],
             }))
             .send()
@@ -1133,8 +1140,16 @@ impl ProviderClient {
             "https://api.openai.com/v1/chat/completions".to_string()
         };
 
+        // Strip the catalog-only `custom:` marker before talking to vLLM.
+        // OpenAI model ids never carry that prefix so this is a no-op for
+        // them.
+        let serving_id = model
+            .model_id
+            .strip_prefix("custom:")
+            .unwrap_or(&model.model_id);
+
         let mut req = self.http.post(&base_url).json(&serde_json::json!({
-            "model": model.model_id,
+            "model": serving_id,
             "messages": [{"role": "user", "content": prompt}],
             "stream": true,
             // Ask the server to include a final usage block. OpenAI honors

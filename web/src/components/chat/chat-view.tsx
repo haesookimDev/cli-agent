@@ -9,7 +9,12 @@ import { ChatBubble } from "@/components/chat-bubble";
 import { AgentThinking } from "@/components/agent-thinking";
 import { ToolCallCard, extractToolCalls } from "@/components/tool-call-card";
 import { TerminalPanel } from "@/components/terminal-panel";
-import { getLastSessionId, setLastSessionId } from "@/lib/session-store";
+import {
+  getLastSessionId,
+  setLastSessionId,
+  getLastActiveRun,
+  setLastActiveRun,
+} from "@/lib/session-store";
 import type {
   ChatMessage,
   GlobalMemoryItem,
@@ -82,11 +87,33 @@ export function ChatContent({
   const runEventsMapRef = useRef(runEventsMap);
   runEventsMapRef.current = runEventsMap;
 
-  // Current active run
-  const [currentRun, setCurrentRun] = useState<RunSubmission | null>(null);
+  // Current active run. Initialised from sessionStorage so that navigating
+  // away (e.g. to /runs) and returning while a run is streaming does not
+  // drop the SSE connection — useRunSSE picks up where we left off via its
+  // built-in `after_seq` resume.
+  const [currentRun, setCurrentRun] = useState<RunSubmission | null>(() => {
+    if (typeof window === "undefined") return null;
+    const stored = getLastActiveRun(mode);
+    if (!stored) return null;
+    return {
+      run_id: stored.runId,
+      session_id: stored.sessionId,
+      status: "running",
+    };
+  });
   const { events, terminalStatus, sseError } = useRunSSE(
     currentRun?.run_id ?? null,
   );
+
+  // Mirror currentRun into sessionStorage so the next mount can resume it.
+  useEffect(() => {
+    setLastActiveRun(
+      mode,
+      currentRun
+        ? { runId: currentRun.run_id, sessionId: currentRun.session_id }
+        : null,
+    );
+  }, [mode, currentRun]);
 
   // Skip loadMessages when handleSubmit just created a new session
   const skipLoadRef = useRef(false);
