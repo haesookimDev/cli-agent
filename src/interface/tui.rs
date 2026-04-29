@@ -408,6 +408,8 @@ async fn handle_key(
                             workflow_id: None,
                             workflow_params: None,
                             repo_url: None,
+                            assignee: None,
+                            team_members: None,
                         };
                         match orchestrator.submit_run(req).await {
                             Ok(sub) => {

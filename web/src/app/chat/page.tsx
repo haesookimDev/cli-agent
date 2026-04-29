@@ -19,6 +19,7 @@ import type {
   RunActionEvent,
   RunTrace,
   TaskProfile,
+  TeamMember,
 } from "@/lib/types";
 
 function ChatContent() {
@@ -33,6 +34,10 @@ function ChatContent() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [task, setTask] = useState("");
   const [profile, setProfile] = useState<TaskProfile>("general");
+  const [assignee, setAssignee] = useState<string>(
+    searchParams.get("assignee") ?? ""
+  );
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const [showTerminal, setShowTerminal] = useState(false);
@@ -84,6 +89,13 @@ function ChatContent() {
     apiGet<SessionSummary[]>("/v1/sessions?limit=50")
       .then(setSessions)
       .catch(() => {});
+  }, []);
+
+  // Load Virtual Dev Team members for the assignee selector
+  useEffect(() => {
+    apiGet<TeamMember[]>("/v1/team/members")
+      .then(setTeamMembers)
+      .catch(() => setTeamMembers([]));
   }, []);
 
   // Delete session
@@ -242,6 +254,7 @@ function ChatContent() {
     try {
       const body: Record<string, string> = { task: task.trim(), profile };
       if (activeSessionId) body.session_id = activeSessionId;
+      if (assignee) body.assignee = assignee;
 
       const sub = await apiPost<RunSubmission>("/v1/runs", body);
       setCurrentRun(sub);
@@ -759,6 +772,21 @@ function ChatContent() {
             <option value="extraction">Extraction</option>
             <option value="coding">Coding</option>
           </select>
+          {teamMembers.length > 0 && (
+            <select
+              value={assignee}
+              onChange={(e) => setAssignee(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs focus:border-teal-500 focus:outline-none"
+              title="Assign to a Virtual Dev Team member"
+            >
+              <option value="">Auto (whole team)</option>
+              {teamMembers.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.persona.display_name} · {m.role}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             onClick={() => setShowTerminal(!showTerminal)}

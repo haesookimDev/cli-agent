@@ -229,7 +229,7 @@ impl Orchestrator {
                 (None, None)
             };
 
-        let graph = match self.workflow_graphs.remove(&run_id).map(|(_, g)| g) {
+        let mut graph = match self.workflow_graphs.remove(&run_id).map(|(_, g)| g) {
             Some(g) => g,
             None => {
                 let graph_working_dir = self.session_workspace.ensure_session_dir(session_id).await?;
@@ -246,6 +246,14 @@ impl Orchestrator {
                 .await?
             }
         };
+        // Pin Virtual Dev Team personas onto every static node before the
+        // first execute_graph call so trace events surface persona names
+        // from the start.
+        self.pin_personas_on_graph(
+            &mut graph,
+            req.assignee.as_deref(),
+            req.team_members.as_deref(),
+        );
         self.record_graph_initialized(run_id, session_id, &graph, "initial")
             .await;
 
@@ -299,8 +307,14 @@ impl Orchestrator {
                     .map(|n| n.id.clone())
                     .collect(),
             ));
-        let on_complete =
-            self.build_on_completed_fn(run_id, session_id, req.task.clone(), static_node_ids.clone());
+        let on_complete = self.build_on_completed_fn(
+            run_id,
+            session_id,
+            req.task.clone(),
+            req.assignee.clone(),
+            req.team_members.clone(),
+            static_node_ids.clone(),
+        );
 
         let should_cancel: ShouldCancelFn = Arc::new({
             let cancel_flag = cancel_flag.clone();
@@ -440,7 +454,14 @@ impl Orchestrator {
                             &succeeded,
                             failure_retries,
                         ) {
-                            Ok(g) => g,
+                            Ok(mut g) => {
+                                self.pin_personas_on_graph(
+                                    &mut g,
+                                    req.assignee.as_deref(),
+                                    req.team_members.as_deref(),
+                                );
+                                g
+                            }
                             Err(err) => {
                                 self.finish_run(
                                     run_id,
@@ -574,7 +595,14 @@ impl Orchestrator {
                         &accumulated_results,
                         continuation_attempts,
                     ) {
-                        Ok(graph) => graph,
+                        Ok(mut graph) => {
+                            self.pin_personas_on_graph(
+                                &mut graph,
+                                req.assignee.as_deref(),
+                                req.team_members.as_deref(),
+                            );
+                            graph
+                        }
                         Err(err) => {
                             self.finish_run(
                                 run_id,

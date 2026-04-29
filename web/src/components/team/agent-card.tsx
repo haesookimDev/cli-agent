@@ -11,6 +11,9 @@ interface AgentCardProps {
     prsCreated: number;
     reviewsDone: number;
   };
+  onEdit?: (member: TeamMember) => void;
+  onDelete?: (member: TeamMember) => void;
+  onAssign?: (member: TeamMember) => void;
 }
 
 const statusColors: Record<string, string> = {
@@ -32,6 +35,9 @@ export default function AgentCard({
   status = "idle",
   currentTask,
   stats,
+  onEdit,
+  onDelete,
+  onAssign,
 }: AgentCardProps) {
   const persona = member.persona;
 
@@ -108,6 +114,35 @@ export default function AgentCard({
           <span>Issues: {stats.issuesCreated}</span>
           <span>PRs: {stats.prsCreated}</span>
           <span>Reviews: {stats.reviewsDone}</span>
+        </div>
+      )}
+
+      {(onEdit || onDelete || onAssign) && (
+        <div className="flex gap-2 mt-3 pt-3 border-t border-gray-700">
+          {onAssign && (
+            <button
+              onClick={() => onAssign(member)}
+              className="flex-1 px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500"
+            >
+              Assign task
+            </button>
+          )}
+          {onEdit && (
+            <button
+              onClick={() => onEdit(member)}
+              className="px-2 py-1 text-xs rounded bg-gray-700 text-gray-200 hover:bg-gray-600"
+            >
+              Edit
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={() => onDelete(member)}
+              className="px-2 py-1 text-xs rounded bg-gray-700 text-red-300 hover:bg-red-900"
+            >
+              Delete
+            </button>
+          )}
         </div>
       )}
     </div>

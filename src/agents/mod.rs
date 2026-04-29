@@ -12,7 +12,7 @@ use crate::context::OptimizedContext;
 use crate::router::{CliOutputCallback, ModelRouter, RoutingConstraints, TokenCallback};
 use crate::types::{AgentRole, StructuredBrief, TaskProfile};
 
-use agent_loader::load_agents_from_dir;
+use agent_loader::{load_agents_from_dir, AgentDefinition};
 
 #[derive(Debug, Clone)]
 pub struct AgentInput {
@@ -46,12 +46,25 @@ pub trait SubAgent: Send + Sync {
     ) -> anyhow::Result<AgentOutput>;
 }
 
+/// In-registry record for a Virtual Dev Team persona. Keeps the runnable
+/// agent (with the persona's system_prompt baked in) next to the original
+/// definition so the PersonaRouter can match on `expertise`/`capabilities`.
+#[derive(Clone)]
+struct PersonaEntry {
+    agent: Arc<dyn SubAgent>,
+    definition: AgentDefinition,
+}
+
 #[derive(Clone)]
 pub struct AgentRegistry {
     /// RwLock so `reload_from_dir` can swap the table at runtime without
     /// invalidating outstanding clones of the registry. All reads acquire a
     /// read lock and clone the Arc<dyn SubAgent> immediately.
     agents: Arc<RwLock<HashMap<AgentRole, Arc<dyn SubAgent>>>>,
+    /// Virtual Dev Team personas, keyed by `AgentDefinition.name`. Loaded
+    /// from `<agents_dir>/team/*.yaml` alongside the role-based agents
+    /// above. A node's `assigned_persona` resolves through this map.
+    personas: Arc<RwLock<HashMap<String, PersonaEntry>>>,
 }
 
 impl AgentRegistry {
@@ -62,11 +75,12 @@ impl AgentRegistry {
         }
         Self {
             agents: Arc::new(RwLock::new(map)),
+            personas: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     fn build_map_from_definitions(
-        definitions: Vec<crate::agents::agent_loader::AgentDefinition>,
+        definitions: Vec<AgentDefinition>,
     ) -> HashMap<AgentRole, Arc<dyn SubAgent>> {
         let mut map: HashMap<AgentRole, Arc<dyn SubAgent>> = HashMap::new();
         for def in definitions {
@@ -85,29 +99,116 @@ impl AgentRegistry {
         map
     }
 
+    fn build_personas_from_definitions(
+        definitions: &[AgentDefinition],
+    ) -> HashMap<String, PersonaEntry> {
+        definitions
+            .iter()
+            .map(|def| {
+                let agent: Arc<dyn SubAgent> = Arc::new(BuiltinAgent {
+                    role: def.role,
+                    system_prompt: def.system_prompt.clone(),
+                    task_profile: def.task_profile,
+                });
+                (
+                    def.name.clone(),
+                    PersonaEntry {
+                        agent,
+                        definition: def.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Load agent definitions from YAML files in `dir`, falling back to builtin
-    /// defaults for any role not covered by a YAML file.
+    /// defaults for any role not covered by a YAML file. The companion
+    /// `<dir>/team/` directory (if present) is loaded into the persona index.
     pub async fn from_dir_with_fallback(dir: &Path) -> Self {
         let definitions = load_agents_from_dir(dir).await;
+        let team_dir = dir.join("team");
+        let team_definitions = load_agents_from_dir(&team_dir).await;
         Self {
             agents: Arc::new(RwLock::new(Self::build_map_from_definitions(definitions))),
+            personas: Arc::new(RwLock::new(Self::build_personas_from_definitions(
+                &team_definitions,
+            ))),
         }
     }
 
     /// Reload agent definitions from `dir`. Used by TODO 9-5 to support
     /// runtime hot-swap without bouncing the orchestrator. Existing
     /// in-flight `run_role` calls keep their Arc<dyn SubAgent> snapshot;
-    /// the next call resolves against the new map.
+    /// the next call resolves against the new map. The persona index
+    /// (`<dir>/team/*.yaml`) is refreshed in the same call so adds/edits
+    /// surface immediately to the PersonaRouter.
     pub async fn reload_from_dir(&self, dir: &Path) -> anyhow::Result<usize> {
         let definitions = load_agents_from_dir(dir).await;
         let new_map = Self::build_map_from_definitions(definitions);
         let count = new_map.len();
-        let mut guard = self
-            .agents
-            .write()
-            .map_err(|e| anyhow::anyhow!("agents map poisoned: {e}"))?;
-        *guard = new_map;
+        {
+            let mut guard = self
+                .agents
+                .write()
+                .map_err(|e| anyhow::anyhow!("agents map poisoned: {e}"))?;
+            *guard = new_map;
+        }
+
+        let team_dir = dir.join("team");
+        let team_definitions = load_agents_from_dir(&team_dir).await;
+        let new_personas = Self::build_personas_from_definitions(&team_definitions);
+        {
+            let mut guard = self
+                .personas
+                .write()
+                .map_err(|e| anyhow::anyhow!("personas map poisoned: {e}"))?;
+            *guard = new_personas;
+        }
+
         Ok(count)
+    }
+
+    /// Snapshot of every persona definition currently registered. Used by
+    /// the PersonaRouter for capability matching and by the
+    /// `/v1/team/members` handler for serving the dashboard.
+    pub fn list_personas(&self) -> Vec<AgentDefinition> {
+        let guard = match self.personas.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<AgentDefinition> =
+            guard.values().map(|p| p.definition.clone()).collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// Names of every persona whose YAML `role` matches `role`.
+    pub fn personas_for_role(&self, role: AgentRole) -> Vec<String> {
+        let guard = match self.personas.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<String> = guard
+            .values()
+            .filter(|p| p.definition.role == role)
+            .map(|p| p.definition.name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The role of a registered persona, or `None` when the name is not
+    /// found.
+    pub fn persona_role(&self, name: &str) -> Option<AgentRole> {
+        let guard = self.personas.read().ok()?;
+        guard.get(name).map(|p| p.definition.role)
+    }
+
+    /// The full definition of a persona, or `None` when the name is not
+    /// registered.
+    pub fn persona_definition(&self, name: &str) -> Option<AgentDefinition> {
+        let guard = self.personas.read().ok()?;
+        guard.get(name).map(|p| p.definition.clone())
     }
 
     pub async fn run_role(
@@ -152,6 +253,69 @@ impl AgentRegistry {
         let prompt = format!(
             "{}\n\nTASK:\n{}\n\nINSTRUCTIONS:\n{}\n\nDEPENDENCY OUTPUTS:\n{}\n\nCONTEXT:\n{}",
             agent.system_prompt(),
+            input.task,
+            input.instructions,
+            input.dependency_outputs.join("\n---\n"),
+            input.context.flatten(),
+        );
+
+        let profile = agent_role_profile(role);
+        let constraints = RoutingConstraints::for_profile(profile);
+        let working_dir = input.working_dir.as_deref();
+        let (_decision, inference) = router
+            .infer_stream_in_dir_with_cli_output(
+                profile,
+                prompt.as_str(),
+                &constraints,
+                working_dir,
+                on_token,
+                cli_output,
+            )
+            .await?;
+
+        Ok(AgentOutput {
+            model: format!("{}:{}", inference.provider, inference.model_id),
+            content: inference.output,
+            usage: inference.usage,
+        })
+    }
+
+    /// Run a node using the prompt baked for a specific Virtual Dev Team
+    /// persona. When `persona_name` is unknown (e.g. it was deleted while
+    /// the run was in flight), this gracefully falls back to the role's
+    /// default agent so the run can continue.
+    pub async fn run_persona_stream(
+        &self,
+        persona_name: &str,
+        fallback_role: AgentRole,
+        input: AgentInput,
+        router: Arc<ModelRouter>,
+        on_token: TokenCallback,
+        cli_output: Option<CliOutputCallback>,
+    ) -> anyhow::Result<AgentOutput> {
+        let entry = {
+            let guard = self
+                .personas
+                .read()
+                .map_err(|e| anyhow::anyhow!("personas map poisoned: {e}"))?;
+            guard.get(persona_name).cloned()
+        };
+
+        let Some(entry) = entry else {
+            tracing::warn!(
+                persona = persona_name,
+                fallback_role = %fallback_role,
+                "persona not registered; falling back to role default",
+            );
+            return self
+                .run_role_stream(fallback_role, input, router, on_token, cli_output)
+                .await;
+        };
+
+        let role = entry.definition.role;
+        let prompt = format!(
+            "{}\n\nTASK:\n{}\n\nINSTRUCTIONS:\n{}\n\nDEPENDENCY OUTPUTS:\n{}\n\nCONTEXT:\n{}",
+            entry.agent.system_prompt(),
             input.task,
             input.instructions,
             input.dependency_outputs.join("\n---\n"),

@@ -68,6 +68,12 @@ pub struct AgentNode {
     pub mcp_tools: Vec<String>,
     #[serde(default)]
     pub git_commands: Vec<String>,
+    /// Persona name to use when running this node. When `Some`, the agent
+    /// registry resolves to that persona's prompt; when `None`, the role's
+    /// default agent is used. Filled in by the orchestrator's PersonaRouter
+    /// before execution.
+    #[serde(default)]
+    pub assigned_persona: Option<String>,
 }
 
 impl AgentNode {
@@ -82,6 +88,7 @@ impl AgentNode {
             retry_context: None,
             mcp_tools: Vec::new(),
             git_commands: Vec::new(),
+            assigned_persona: None,
         }
     }
 }
@@ -168,6 +175,15 @@ impl ExecutionGraph {
         }
 
         Ok(())
+    }
+
+    /// Set or clear the persona assigned to a node. Used by the
+    /// orchestrator's PersonaRouter to pin a specific Virtual Dev Team
+    /// member to a node before execution.
+    pub fn pin_persona(&mut self, node_id: &str, persona_name: Option<String>) {
+        if let Some(node) = self.nodes.get_mut(node_id) {
+            node.assigned_persona = persona_name;
+        }
     }
 
     pub fn force_ready(&mut self, node_id: &str) {

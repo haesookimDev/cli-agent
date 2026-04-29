@@ -289,6 +289,16 @@ pub struct RunRequest {
     pub workflow_id: Option<String>,
     pub workflow_params: Option<serde_json::Value>,
     pub repo_url: Option<String>,
+    /// Pin every same-role node in the graph to this Virtual Dev Team
+    /// persona (matched by `AgentDefinition.name`). Other-role nodes still
+    /// auto-route through the persona router.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// Restrict persona auto-routing to this candidate pool. When `None`,
+    /// the router chooses freely from every registered persona of the
+    /// matching role.
+    #[serde(default)]
+    pub team_members: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

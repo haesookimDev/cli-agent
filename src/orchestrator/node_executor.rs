@@ -1488,15 +1488,27 @@ impl Orchestrator {
                     .harness
                     .create_session(node.role, root_session.as_deref());
 
-                let run = agents
-                    .run_role_stream(
-                        node.role,
-                        input,
-                        router.clone(),
-                        on_token.clone(),
-                        cli_output.clone(),
-                    )
-                    .await;
+                let run = match node.assigned_persona.as_deref() {
+                    Some(persona_name) => agents
+                        .run_persona_stream(
+                            persona_name,
+                            node.role,
+                            input,
+                            router.clone(),
+                            on_token.clone(),
+                            cli_output.clone(),
+                        )
+                        .await,
+                    None => agents
+                        .run_role_stream(
+                            node.role,
+                            input,
+                            router.clone(),
+                            on_token.clone(),
+                            cli_output.clone(),
+                        )
+                        .await,
+                };
                 if let Some((stop_tx, heartbeat_handle)) = heartbeat {
                     let _ = stop_tx.send(true);
                     let _ = heartbeat_handle.await;
@@ -1553,13 +1565,24 @@ impl Orchestrator {
                                 brief: brief.clone(),
                                 working_dir: Some(cli_working_dir.clone()),
                             };
-                            match agents.run_role_stream(
-                                node.role,
-                                followup_input,
-                                router.clone(),
-                                on_token.clone(),
-                                cli_output.clone(),
-                            ).await {
+                            let followup_run = match node.assigned_persona.as_deref() {
+                                Some(persona_name) => agents.run_persona_stream(
+                                    persona_name,
+                                    node.role,
+                                    followup_input,
+                                    router.clone(),
+                                    on_token.clone(),
+                                    cli_output.clone(),
+                                ).await,
+                                None => agents.run_role_stream(
+                                    node.role,
+                                    followup_input,
+                                    router.clone(),
+                                    on_token.clone(),
+                                    cli_output.clone(),
+                                ).await,
+                            };
+                            match followup_run {
                                 Ok(followup) => {
                                     current_output = followup.content;
                                     current_model = followup.model;

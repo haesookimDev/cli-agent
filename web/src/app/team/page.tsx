@@ -1,11 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiGet } from "@/lib/api-client";
+import { useCallback, useEffect, useState } from "react";
+import { apiDelete, apiGet } from "@/lib/api-client";
 import { TeamMember, GitHubActivityItem } from "@/lib/types";
 import AgentCard from "@/components/team/agent-card";
+import AgentFormModal from "@/components/team/agent-form-modal";
+import AssignTaskModal from "@/components/team/assign-task-modal";
 import GitHubActivityFeed from "@/components/team/github-activity-feed";
 import InteractionGraph from "@/components/team/interaction-graph";
+
+type ModalState =
+  | { kind: "none" }
+  | { kind: "create" }
+  | { kind: "edit"; member: TeamMember }
+  | { kind: "assign"; member: TeamMember };
 
 export default function TeamPage() {
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -17,6 +25,16 @@ export default function TeamPage() {
   const [activeTab, setActiveTab] = useState<"members" | "activity" | "graph">(
     "members"
   );
+  const [modal, setModal] = useState<ModalState>({ kind: "none" });
+
+  const reloadMembers = useCallback(async () => {
+    try {
+      const m = await apiGet<TeamMember[]>("/v1/team/members").catch(() => []);
+      setMembers(m);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -53,6 +71,24 @@ export default function TeamPage() {
     };
   }
 
+  async function handleDelete(member: TeamMember) {
+    if (
+      !window.confirm(
+        `Delete ${member.persona.display_name}? This removes the YAML file from agents/team/.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await apiDelete(`/v1/team/members/${encodeURIComponent(member.name)}`);
+      await reloadMembers();
+    } catch (e) {
+      window.alert(
+        `Delete failed: ${e instanceof Error ? e.message : "unknown error"}`
+      );
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-gray-500">
@@ -76,6 +112,12 @@ export default function TeamPage() {
             activities
           </p>
         </div>
+        <button
+          onClick={() => setModal({ kind: "create" })}
+          className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+        >
+          + Add member
+        </button>
       </div>
 
       {/* Tabs */}
@@ -107,13 +149,17 @@ export default function TeamPage() {
               key={member.name}
               member={member}
               stats={getStatsForMember(member.persona.display_name)}
+              onEdit={(m) => setModal({ kind: "edit", member: m })}
+              onDelete={handleDelete}
+              onAssign={(m) => setModal({ kind: "assign", member: m })}
             />
           ))}
           {members.length === 0 && (
             <div className="col-span-3 text-center py-12 text-gray-500">
-              No team members configured. Add agent YAML files to{" "}
+              No team members configured. Click <strong>+ Add member</strong>{" "}
+              to create one, or drop a YAML file into{" "}
               <code className="bg-gray-100 px-1 rounded">agents/team/</code>{" "}
-              directory.
+              and reload.
             </div>
           )}
         </div>
@@ -132,6 +178,21 @@ export default function TeamPage() {
             personas={personaNames}
           />
         </div>
+      )}
+
+      {(modal.kind === "create" || modal.kind === "edit") && (
+        <AgentFormModal
+          member={modal.kind === "edit" ? modal.member : null}
+          onClose={() => setModal({ kind: "none" })}
+          onSaved={reloadMembers}
+        />
+      )}
+
+      {modal.kind === "assign" && (
+        <AssignTaskModal
+          member={modal.member}
+          onClose={() => setModal({ kind: "none" })}
+        />
       )}
     </div>
   );

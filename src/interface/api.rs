@@ -213,7 +213,14 @@ pub fn router(state: ApiState) -> Router {
         // Team & GitHub activity endpoints
         .route(
             "/v1/team/members",
-            get(handlers::team::list_team_members_handler),
+            get(handlers::team::list_team_members_handler)
+                .post(handlers::team::create_team_member_handler),
+        )
+        .route(
+            "/v1/team/members/:name",
+            get(handlers::team::get_team_member_handler)
+                .put(handlers::team::update_team_member_handler)
+                .delete(handlers::team::delete_team_member_handler),
         )
         .route(
             "/v1/github/activities",

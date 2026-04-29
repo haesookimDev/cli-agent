@@ -26,6 +26,10 @@ pub(crate) struct CreateRunRequest {
     pub profile: Option<TaskProfile>,
     pub session_id: Option<Uuid>,
     pub repo_url: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub team_members: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +96,8 @@ pub(crate) async fn create_run_handler(
         workflow_id: None,
         workflow_params: None,
         repo_url: req.repo_url,
+        assignee: req.assignee,
+        team_members: req.team_members,
     };
 
     match state.orchestrator.submit_run(run_req).await {

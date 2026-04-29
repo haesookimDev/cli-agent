@@ -246,6 +246,8 @@ async fn main() -> anyhow::Result<()> {
                 workflow_id: None,
                 workflow_params: None,
                 repo_url: None,
+                assignee: None,
+                team_members: None,
             };
 
             if no_wait {

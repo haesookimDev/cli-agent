@@ -24,6 +24,10 @@ export interface RunRequest {
   task: string;
   profile?: TaskProfile;
   session_id?: string;
+  /** Pin every same-role node to this Virtual Dev Team persona (by name). */
+  assignee?: string;
+  /** Restrict persona auto-routing to this candidate pool. */
+  team_members?: string[];
 }
 
 export interface RunSubmission {
@@ -325,7 +329,27 @@ export interface TeamMember {
   role: AgentRole;
   task_profile: TaskProfile;
   capabilities: string[];
+  /** Optional - only present on detail / edit responses. */
+  system_prompt?: string;
+  /** Optional - present alongside system_prompt on detail responses. */
+  instructions?: string;
   persona: AgentPersona;
+}
+
+/**
+ * Body for `POST /v1/team/members` and `PUT /v1/team/members/:name`.
+ * Matches the backend `AgentDefinition` shape — `system_prompt` is required
+ * because the backend rejects empty values with 422.
+ */
+export interface TeamMemberInput {
+  name: string;
+  description: string;
+  role: AgentRole;
+  task_profile: TaskProfile;
+  capabilities: string[];
+  system_prompt: string;
+  instructions?: string;
+  persona?: AgentPersona;
 }
 
 export type GitHubActivityType =

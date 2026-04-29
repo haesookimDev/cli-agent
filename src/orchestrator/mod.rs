@@ -7,6 +7,7 @@ pub mod graph_builder;
 pub mod helpers;
 pub mod interactive;
 pub mod node_executor;
+pub mod persona_router;
 pub mod prompt_composer;
 pub mod repo_analyzer;
 pub mod requirement_analyzer;
@@ -89,6 +90,14 @@ pub struct Orchestrator {
     /// Stored so the `/v1/agents/reload` handler can re-read YAML without
     /// the caller having to know the layout.
     pub(super) agents_dir: Arc<std::sync::RwLock<Option<PathBuf>>>,
+    /// Maps a node's `assigned_persona` (or auto-routes when None) to a
+    /// concrete Virtual Dev Team member's name. Stateful: holds per-role
+    /// round-robin counters used as a tie-break.
+    pub(super) persona_router: Arc<persona_router::PersonaRouter>,
+    /// Serializes Team CRUD writes (POST/PUT/DELETE on `/v1/team/members`)
+    /// so the YAML directory and the in-memory persona index stay in
+    /// sync even under concurrent edits.
+    pub(super) team_yaml_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +136,8 @@ impl Orchestrator {
         let skills = Arc::new(DashMap::new());
         let _ = skills_dir; // loaded asynchronously later
         let harness = crate::harness::AgentHarness::new(agents.clone(), router.clone());
+        let persona_router =
+            Arc::new(persona_router::PersonaRouter::new(agents.clone()));
         Self {
             runtime,
             agents,
@@ -150,6 +161,8 @@ impl Orchestrator {
             harness,
             root_harness_sessions: Arc::new(DashMap::new()),
             agents_dir: Arc::new(std::sync::RwLock::new(None)),
+            persona_router,
+            team_yaml_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -194,6 +207,67 @@ impl Orchestrator {
     pub fn set_agents_dir(&self, dir: PathBuf) {
         if let Ok(mut guard) = self.agents_dir.write() {
             *guard = Some(dir);
+        }
+    }
+
+    /// Returns the configured agents directory, when set. The Team CRUD
+    /// handlers use this to find `<agents_dir>/team/` for YAML I/O.
+    pub fn agents_dir(&self) -> Option<PathBuf> {
+        self.agents_dir.read().ok()?.clone()
+    }
+
+    /// Read-only access to the PersonaRouter (Team-aware mapping from
+    /// `AgentRole` to a registered persona name).
+    pub fn persona_router(&self) -> &Arc<persona_router::PersonaRouter> {
+        &self.persona_router
+    }
+
+    /// Snapshot every Virtual Dev Team persona currently registered. Used
+    /// by the `/v1/team/members` GET handler.
+    pub fn list_team_personas(&self) -> Vec<crate::agents::agent_loader::AgentDefinition> {
+        self.agents.list_personas()
+    }
+
+    /// Look up a single persona definition by name.
+    pub fn get_team_persona(
+        &self,
+        name: &str,
+    ) -> Option<crate::agents::agent_loader::AgentDefinition> {
+        self.agents.persona_definition(name)
+    }
+
+    /// Decide which persona a single node should run under given the run's
+    /// `assignee` (single pin) and `team_members` (candidate pool).
+    /// Returns `None` when no persona is registered for the node's role —
+    /// the runtime then falls back to the role's default agent.
+    pub(super) fn resolve_persona_for_node(
+        &self,
+        node: &crate::runtime::graph::AgentNode,
+        assignee: Option<&str>,
+        team_members: Option<&[String]>,
+    ) -> Option<String> {
+        if let Some(name) = assignee {
+            if self.agents.persona_role(name) == Some(node.role) {
+                return Some(name.to_string());
+            }
+        }
+        self.persona_router
+            .pick_for_role(node.role, team_members, &node.instructions)
+    }
+
+    /// Pin every node in `graph` to a persona based on the run's
+    /// assignment options. Idempotent and cheap (clones nothing on the
+    /// hot path).
+    pub(super) fn pin_personas_on_graph(
+        &self,
+        graph: &mut crate::runtime::graph::ExecutionGraph,
+        assignee: Option<&str>,
+        team_members: Option<&[String]>,
+    ) {
+        let snapshot = graph.nodes();
+        for node in snapshot {
+            let pinned = self.resolve_persona_for_node(&node, assignee, team_members);
+            graph.pin_persona(&node.id, pinned);
         }
     }
 
@@ -671,6 +745,8 @@ impl Orchestrator {
             workflow_id: None,
             workflow_params: None,
             repo_url: None,
+            assignee: None,
+            team_members: None,
         };
         self.submit_run(req).await
     }
@@ -691,6 +767,8 @@ impl Orchestrator {
             workflow_id: None,
             workflow_params: None,
             repo_url: None,
+            assignee: None,
+            team_members: None,
         };
         self.submit_run(req).await
     }
@@ -1301,6 +1379,8 @@ impl Orchestrator {
             workflow_id: Some(workflow_id.to_string()),
             workflow_params: params,
             repo_url: None,
+            assignee: None,
+            team_members: None,
         };
 
         let run_id = Uuid::new_v4();
@@ -2429,6 +2509,8 @@ mod tests {
             Uuid::new_v4(),
             Uuid::new_v4(),
             "Inspect a remote repository".to_string(),
+            None,
+            None,
             static_ids,
         );
         let (result, _skip) = on_completed(
@@ -2533,6 +2615,8 @@ mod tests {
             Uuid::new_v4(),
             Uuid::new_v4(),
             "Analyze the backend architecture".to_string(),
+            None,
+            None,
             static_ids,
         );
         let (result, _skip) = on_completed(

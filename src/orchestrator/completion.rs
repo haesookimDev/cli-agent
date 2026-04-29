@@ -219,6 +219,8 @@ impl Orchestrator {
         run_id: Uuid,
         session_id: Uuid,
         task: String,
+        assignee: Option<String>,
+        team_members: Option<Vec<String>>,
         // Node IDs of static graph nodes (non-Planner) for the current graph stage.
         // When Planner generates a SubtaskPlan, these are returned as "skip" targets
         // so the runtime skips them in favour of the dynamic subtask nodes.
@@ -230,6 +232,8 @@ impl Orchestrator {
         let orchestrator = self.clone();
         Arc::new(move |node: AgentNode, result: NodeExecutionResult| {
             let task = task.clone();
+            let assignee = assignee.clone();
+            let team_members = team_members.clone();
             let static_node_ids = static_node_ids.clone();
             let memory = memory.clone();
             let validation_config = validation_config.clone();
@@ -363,6 +367,12 @@ impl Orchestrator {
                                     on_dependency_failure: DependencyFailurePolicy::ContinueOnError,
                                     fallback_node: None,
                                 };
+                                sub_node.assigned_persona = orchestrator
+                                    .resolve_persona_for_node(
+                                        &sub_node,
+                                        assignee.as_deref(),
+                                        team_members.as_deref(),
+                                    );
                                 dynamic_nodes.push(sub_node);
                             }
                             orchestrator.normalize_dynamic_nodes_for_runtime(&mut dynamic_nodes);
