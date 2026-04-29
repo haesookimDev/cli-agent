@@ -85,6 +85,10 @@ pub struct Orchestrator {
     /// so build_run_node_fn can attach each node session as a child of the
     /// run's root.
     pub(super) root_harness_sessions: Arc<DashMap<Uuid, String>>,
+    /// Path to the agents/ directory used for `reload_from_dir` calls.
+    /// Stored so the `/v1/agents/reload` handler can re-read YAML without
+    /// the caller having to know the layout.
+    pub(super) agents_dir: Arc<std::sync::RwLock<Option<PathBuf>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +149,7 @@ impl Orchestrator {
             pricing: crate::pricing::shared_default(),
             harness,
             root_harness_sessions: Arc::new(DashMap::new()),
+            agents_dir: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -182,6 +187,30 @@ impl Orchestrator {
     pub async fn reload_skills(&self, dir: &std::path::Path) {
         self.skills.clear();
         self.load_skills_from_dir(dir).await;
+    }
+
+    /// Tell the orchestrator where to look when `/v1/agents/reload` is
+    /// invoked. main.rs sets this once at startup.
+    pub fn set_agents_dir(&self, dir: PathBuf) {
+        if let Ok(mut guard) = self.agents_dir.write() {
+            *guard = Some(dir);
+        }
+    }
+
+    /// Re-read the agents directory and swap the in-memory registry. Used
+    /// by the `/v1/agents/reload` handler (TODO 9-5 / F5). Returns Err when
+    /// no directory has been registered or the YAML loader fails.
+    pub async fn reload_agents(&self) -> anyhow::Result<usize> {
+        let dir = {
+            self.agents_dir
+                .read()
+                .map_err(|e| anyhow::anyhow!("agents_dir poisoned: {e}"))?
+                .clone()
+        };
+        let dir = dir.ok_or_else(|| {
+            anyhow::anyhow!("agents directory not configured; call set_agents_dir first")
+        })?;
+        self.agents.reload_from_dir(&dir).await
     }
 
     pub fn list_skills(&self) -> Vec<WorkflowTemplate> {

@@ -3,6 +3,7 @@
 //! Each submodule owns the handlers for a set of related endpoints. They
 //! share `ApiState` and the `json_value` helper from `crate::interface::api`.
 
+pub mod agents;
 pub mod cluster;
 pub mod harness;
 pub mod health;

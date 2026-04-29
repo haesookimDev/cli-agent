@@ -221,6 +221,11 @@ async fn main() -> anyhow::Result<()> {
         session_workspace.clone(),
         skills_dir.clone(),
     );
+    orchestrator.set_agents_dir(
+        agents_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("agents")),
+    );
     orchestrator.load_persisted_settings().await;
 
     if let Some(dir) = &skills_dir {

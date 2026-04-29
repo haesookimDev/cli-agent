@@ -32,6 +32,37 @@ pub struct ChainResult {
     pub merged_parameters: Vec<WorkflowParameter>,
 }
 
+/// Parse the LLM's response to a `generate_from_description` prompt into an
+/// ordered list of skill ids. The prompt asks the model to return JSON of
+/// the form `{"skills": ["id1", "id2"]}` — this helper accepts that shape,
+/// the bare array form `["id1", "id2"]`, and a markdown-fenced variant.
+/// Filters out ids that aren't in `available`.
+pub fn parse_skill_chain_response(raw: &str, available: &[&str]) -> Vec<String> {
+    let trimmed = raw
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| raw.trim().strip_prefix("```"))
+        .unwrap_or(raw.trim())
+        .strip_suffix("```")
+        .unwrap_or(raw.trim());
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let candidates = value
+        .get("skills")
+        .or_else(|| Some(&value))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let allow: std::collections::HashSet<&str> = available.iter().copied().collect();
+    candidates
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .filter(|s| allow.contains(s.as_str()))
+        .collect()
+}
+
 /// Compose `skills` (already in the order they should execute) into a single
 /// WorkflowTemplate. Returns Err if `skills` is empty or if a node id
 /// collision survives namespacing (which would indicate caller-supplied
@@ -241,6 +272,40 @@ mod tests {
             .err()
             .expect("must error");
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn parse_skill_chain_accepts_object_form() {
+        let raw = r#"{"skills": ["scan", "report", "unknown"]}"#;
+        let parsed = parse_skill_chain_response(raw, &["scan", "report"]);
+        assert_eq!(parsed, vec!["scan".to_string(), "report".to_string()]);
+    }
+
+    #[test]
+    fn parse_skill_chain_accepts_bare_array() {
+        let raw = r#"["scan", "report"]"#;
+        let parsed = parse_skill_chain_response(raw, &["scan", "report"]);
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn parse_skill_chain_strips_markdown_fence() {
+        let raw = "```json\n{\"skills\": [\"scan\"]}\n```";
+        let parsed = parse_skill_chain_response(raw, &["scan"]);
+        assert_eq!(parsed, vec!["scan".to_string()]);
+    }
+
+    #[test]
+    fn parse_skill_chain_drops_unknown_ids() {
+        let raw = r#"["scan", "report", "ghost"]"#;
+        let parsed = parse_skill_chain_response(raw, &["scan", "report"]);
+        assert_eq!(parsed, vec!["scan".to_string(), "report".to_string()]);
+    }
+
+    #[test]
+    fn parse_skill_chain_returns_empty_on_garbage() {
+        let parsed = parse_skill_chain_response("not json at all", &["scan"]);
+        assert!(parsed.is_empty());
     }
 
     #[test]
