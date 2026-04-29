@@ -98,6 +98,11 @@ pub struct Orchestrator {
     /// so the YAML directory and the in-memory persona index stay in
     /// sync even under concurrent edits.
     pub(super) team_yaml_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Per-run Virtual Dev Team assignment snapshot. Captured at submit
+    /// time so per-persona run lookup (`/v1/team/members/:name/runs`)
+    /// works without modifying the persisted RunRecord schema. Resets on
+    /// process restart; v1 limitation.
+    pub(super) run_assignments: Arc<DashMap<Uuid, crate::types::RunAssignment>>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +168,7 @@ impl Orchestrator {
             agents_dir: Arc::new(std::sync::RwLock::new(None)),
             persona_router,
             team_yaml_lock: Arc::new(tokio::sync::Mutex::new(())),
+            run_assignments: Arc::new(DashMap::new()),
         }
     }
 
@@ -234,6 +240,45 @@ impl Orchestrator {
         name: &str,
     ) -> Option<crate::agents::agent_loader::AgentDefinition> {
         self.agents.persona_definition(name)
+    }
+
+    /// Look up the Virtual Dev Team assignment recorded for a single run.
+    /// Returns `None` when the run was submitted without `assignee`/
+    /// `team_members` or before the orchestrator restart that lost the
+    /// in-memory entry.
+    pub fn get_run_assignment(&self, run_id: Uuid) -> Option<crate::types::RunAssignment> {
+        self.run_assignments.get(&run_id).map(|kv| kv.value().clone())
+    }
+
+    /// Recent runs that targeted the persona `name` (either as the
+    /// pinned `assignee` or as a member of the candidate `team_members`
+    /// pool). Capped at `limit`; results are newest-first.
+    pub async fn list_runs_for_persona(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<RunRecord>> {
+        let recent = self.list_recent_runs(500).await?;
+        let mut filtered: Vec<RunRecord> = recent
+            .into_iter()
+            .filter(|r| {
+                self.run_assignments
+                    .get(&r.run_id)
+                    .map(|kv| {
+                        let a = kv.value();
+                        a.assignee.as_deref() == Some(name)
+                            || a.team_members
+                                .as_ref()
+                                .map(|m| m.iter().any(|x| x == name))
+                                .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        if filtered.len() > limit {
+            filtered.truncate(limit);
+        }
+        Ok(filtered)
     }
 
     /// Decide which persona a single node should run under given the run's

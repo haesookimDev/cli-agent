@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { TeamMember } from "@/lib/types";
 
 interface AgentCardProps {
@@ -118,15 +119,21 @@ export default function AgentCard({
       )}
 
       {(onEdit || onDelete || onAssign) && (
-        <div className="flex gap-2 mt-3 pt-3 border-t border-gray-700">
+        <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-700">
           {onAssign && (
             <button
               onClick={() => onAssign(member)}
-              className="flex-1 px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500"
+              className="flex-1 min-w-[80px] px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500"
             >
               Assign task
             </button>
           )}
+          <Link
+            href={`/team/${encodeURIComponent(member.name)}`}
+            className="px-2 py-1 text-xs rounded bg-gray-700 text-gray-200 hover:bg-gray-600"
+          >
+            View runs
+          </Link>
           {onEdit && (
             <button
               onClick={() => onEdit(member)}

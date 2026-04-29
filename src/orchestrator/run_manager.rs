@@ -73,6 +73,20 @@ impl Orchestrator {
 
         self.runs.insert(run_id, record.clone());
         self.memory.upsert_run(&record).await?;
+
+        // Record Virtual Dev Team assignment so /v1/team/members/:name/runs
+        // can filter retrospectively. Stored even when both fields are
+        // None so the run still appears in unassigned listings if needed.
+        if req.assignee.is_some() || req.team_members.is_some() {
+            self.run_assignments.insert(
+                run_id,
+                crate::types::RunAssignment {
+                    run_id,
+                    assignee: req.assignee.clone(),
+                    team_members: req.team_members.clone(),
+                },
+            );
+        }
         self.controls.insert(
             run_id,
             RunControl {

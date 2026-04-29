@@ -308,6 +308,20 @@ pub struct RunSubmission {
     pub status: RunStatus,
 }
 
+/// Records which Virtual Dev Team personas a run was bound to at submit
+/// time. Held in-memory by the Orchestrator so per-persona run history
+/// (`/v1/team/members/:name/runs`) can be served without a schema change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunAssignment {
+    pub run_id: Uuid,
+    /// Single persona pinned to every same-role node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Restricted candidate pool for auto-routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_members: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionRecord {
     pub node_id: String,

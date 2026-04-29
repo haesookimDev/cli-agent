@@ -4,7 +4,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useActiveRuns } from "@/hooks/use-active-runs";
 
-const tabs = [
+type Tab = {
+  href: string;
+  label: string;
+  /** When true, only mark active on exact path match (prevents /team
+   * lighting up while /team/chat is the actual page). */
+  exact?: boolean;
+};
+
+const tabs: Tab[] = [
   { href: "/", label: "Runner" },
   { href: "/chat", label: "Chat" },
   { href: "/sessions", label: "Sessions" },
@@ -17,7 +25,8 @@ const tabs = [
   { href: "/schedules", label: "Schedules" },
   { href: "/terminal", label: "Terminal" },
   { href: "/tools", label: "Tools" },
-  { href: "/team", label: "Team" },
+  { href: "/team", label: "Team", exact: true },
+  { href: "/team/chat", label: "Team Chat" },
   { href: "/harness", label: "Harness" },
   { href: "/settings", label: "Settings" },
 ];
@@ -33,7 +42,10 @@ export function Nav() {
           const active =
             tab.href === "/"
               ? pathname === "/"
-              : pathname.startsWith(tab.href);
+              : tab.exact
+                ? pathname === tab.href
+                : pathname === tab.href ||
+                  pathname.startsWith(tab.href + "/");
           return (
             <Link
               key={tab.href}

@@ -7,16 +7,22 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::agents::agent_loader;
 use crate::agents::agent_loader::AgentDefinition;
-use crate::interface::api::ApiState;
+use crate::interface::api::{json_value, ApiState};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct GitHubActivityQuery {
     pub persona: Option<String>,
     pub run_id: Option<String>,
     pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PersonaRunsQuery {
+    pub limit: Option<usize>,
 }
 
 fn definition_to_json(def: &AgentDefinition) -> serde_json::Value {
@@ -272,6 +278,71 @@ pub(crate) async fn delete_team_member_handler(
             "reload_error": reload_result.err().map(|e| e.to_string()),
         })),
     )
+}
+
+pub(crate) async fn list_persona_runs_handler(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    Query(query): Query<PersonaRunsQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    if state.orchestrator.get_team_persona(&name).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "team member not found"})),
+        );
+    }
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    match state.orchestrator.list_runs_for_persona(&name, limit).await {
+        Ok(runs) => (StatusCode::OK, Json(json_value(runs))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
+}
+
+pub(crate) async fn get_run_assignment_handler(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = state.auth.verify_headers(&headers, &[]) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    let parsed = match Uuid::parse_str(run_id.as_str()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
+    };
+
+    match state.orchestrator.get_run_assignment(parsed) {
+        Some(a) => (StatusCode::OK, Json(json_value(a))),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "run_id": parsed,
+                "assignee": serde_json::Value::Null,
+                "team_members": serde_json::Value::Null,
+            })),
+        ),
+    }
 }
 
 pub(crate) async fn list_github_activities_handler(

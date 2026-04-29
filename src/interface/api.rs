@@ -223,6 +223,14 @@ pub fn router(state: ApiState) -> Router {
                 .delete(handlers::team::delete_team_member_handler),
         )
         .route(
+            "/v1/team/members/:name/runs",
+            get(handlers::team::list_persona_runs_handler),
+        )
+        .route(
+            "/v1/team/runs/:run_id/assignment",
+            get(handlers::team::get_run_assignment_handler),
+        )
+        .route(
             "/v1/github/activities",
             get(handlers::team::list_github_activities_handler),
         )
