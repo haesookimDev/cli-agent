@@ -4,7 +4,7 @@
 
 Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼의 전반적인 코드 품질, 에이전트 동작 결함, 리팩토링 필요사항을 종합 분석한 결과.
 
-**현재 상태 (최신 커밋 `3ce2a2a` 기준)**: 빌드 정상, **193개 테스트 통과 (lib 179 + integration 14)**, Phase 1~7 완료 + Stage I~IV (Section 7~9 사전 슬라이스) 완료. Stage I에서 토큰 사용량 추적이 InferenceResult → AgentOutput → NodeExecutionResult → RuntimeEvent 전 경로로 흐르고, RecoveryPhaseStarted/Completed 이벤트로 재계획 사이클이 가시화됨. Stage II에서 trace 페이지 DAG가 SSE로 실시간 갱신되고, 채팅에 phase/progress/recovery alert + subtask tree가 추가됨. Stage III에서 SubtaskPlan 구조 검증 + 휴리스틱 RequirementAnalyzer (shadow mode) + WorkflowComposer.chain_skills 가 추가됨. Stage IV에서 AgentHarness sidecar + HarnessMetrics 스냅샷 + AgentRegistry 핫 리로드가 도입됨 (orchestrator 호출 경로 변경 없음).
+**현재 상태 (최신 커밋 `c3dc569` 기준)**: 빌드 정상, **213개 테스트 통과 (lib 197 + integration 16)**, Phase 1~12 + Stage I~IV 완료. Stage I/II에서 token 추적·재계획 트레이싱·라이브 DAG·subtask tree·data flow card가 들어왔고, Stage III/IV에서 SubtaskPlan 검증·RequirementAnalyzer (shadow)·chain_skills·AgentHarness sidecar가 도입되었다. Phase 8에서 비용 추정 (config/pricing.yaml + per-run/session/cluster), Phase 9에서 Data Flow Card, Phase 10에서 react-flow 시각 편집기, Phase 11에서 orchestrator 가 본격적으로 harness 위에서 동작 (root session + 자식 노드 + SubAgentManager + 메시지 버스 + `/v1/harness/metrics`), Phase 12에서 `/v1/agents/reload` + generate_from_description 파서 헬퍼가 추가됨. 보류 항목: F1 RequirementAnalyzer promotion (1주 production 데이터 후), F2 generate_from_description LLM 호출 wrapper (D2 가격 정책 후), filesystem watcher 자동 reload (F5 옵션 b).
 
 ---
 
@@ -23,9 +23,14 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | Stage II | Tracing 프론트 (TODO 8-1 + 8-2 + 8-3) | ✅ 완료 | 3 |
 | Stage III | Workflow 백엔드 (TODO 7-3 + 7-1 + 7-2 chain) | ✅ 완료 | 3 |
 | Stage IV | Harness sidecar (TODO 9-1 + 9-4 + 9-5) | ✅ 완료 | 1 |
-| 보류 | TODO 7-4 GUI · 9-2 SubAgentManager · 9-3 메시지 버스 · 9-6 orchestrator 전환 · 8-4 비용 추정 가격표 | ⏸️ 사용자 합의 후 | — |
+| Phase 8 | Cost Tracking (TODO 8-4 가격표) | ✅ 완료 | 1 |
+| Phase 9 | Data Flow Card (TODO 8-2 추가 슬라이스) | ✅ 완료 | 1 |
+| Phase 10 | Visual Workflow Editor (TODO 7-4) | ✅ 완료 | 1 |
+| Phase 11 | Harness 본격 전환 + SubAgentManager + 메시지 버스 + 메트릭 API (D5+D3+D4+F4) | ✅ 완료 | 2 |
+| Phase 12 | /v1/agents/reload + generate_from_description 파서 (F5 + F2 일부) | ✅ 완료 | 1 |
+| 잔여 | F1 RequirementAnalyzer promotion · F2 LLM wrapper · F5 watcher | ⏸️ production 운영/추가 합의 후 | — |
 
-**누적 70 commits** · 테스트 87 → 193 (+106)
+**누적 78 commits** · 테스트 87 → 213 (+126)
 
 ---
 
@@ -265,7 +270,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 7. Workflow Composition & Requirement Analyzer — ✅ Stage III 슬라이스 완료 (7-4 보류)
+## 7. Workflow Composition & Requirement Analyzer — ✅ 완료 (F1/F2 잔여)
 
 ### 현재 상태
 - 워크플로우는 `skills/*.yaml`에 정적 DAG로 정의 (7개 스킬)
@@ -289,7 +294,11 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - **적용**: 빈 plan / 캡 초과 / 중복 ID / 빈 필드 / 모르는 의존성 / 사이클 (반복 DFS) 검출. 검증 실패 시 SubtaskPlanned 액션 이벤트 `{rejected: true, reason}` 으로 기록 후 plan 무시.
 - **테스트**: 8 단위 (empty/duplicate/unknown-dep/blank-id/cap-exceeded/cycle/static-dep/diamond DAG)
 
-### TODO 7-4: 워크플로우 템플릿 UI — 시각적 편집기 (⏸️ 보류)
+### TODO 7-4: 워크플로우 템플릿 UI — 시각적 편집기 — ✅ Phase 10 (`5a8d51c`)
+- **파일**: `web/src/app/workflows/[id]/edit/page.tsx` (신규), `web/src/app/workflows/[id]/page.tsx` (Edit 버튼)
+- **적용**: `@xyflow/react` 도입. 자동 BFS layout, 드래그 노드, 클릭 선택 + 사이드바 폼 (id/role/instructions/mcp_tools), Add Node 팔레트 (역할별 컬러), 엣지 드래그 추가, "Save as new workflow" → POST /v1/workflows. 기존 워크플로우를 in-place 수정하는 PATCH 엔드포인트는 follow-up.
+
+### TODO 7-4 원본 설계 참고 (보류 시 사용)
 - **파일**: `web/src/app/workflows/` (확장)
 - **문제**: 현재 워크플로우 페이지는 목록/실행만 지원. DAG 기반 시각적 편집 불가
 - **수정**:
@@ -301,7 +310,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 8. Agent Execution Tracing & Chat Visibility — ✅ Stage I/II 완료 (8-4 가격표 follow-up)
+## 8. Agent Execution Tracing & Chat Visibility — ✅ 완료
 
 ### 현재 상태
 - `RuntimeEvent` 13종 이벤트가 `EventSink` 콜백으로 발행됨
@@ -329,9 +338,14 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 - **파일**: `web/src/components/trace/subtask-tree.tsx` (신규), `web/src/app/trace/page.tsx` (배치)
 - **적용**: dynamic_node_added 의 `from` 필드 (없으면 첫 의존성) 기준으로 부모-자식 트리 구성. static 노드는 top-level, dynamic 은 sub pill 표시. status color · role · duration 표시. Live ON 시 SSE 이벤트 사용.
 
-### TODO 8-4: 노드별 토큰 사용량 및 비용 실시간 추적 — ✅ `6bed393` `d294302` (가격표는 follow-up)
-- **파일**: `src/router/mod.rs`, `src/agents/mod.rs`, `src/runtime/mod.rs`, `src/orchestrator/node_executor.rs`, `web/src/components/agent-thinking.tsx`
-- **적용**: 모든 provider (OpenAI/vLLM/Anthropic/Gemini) 의 usage 블록을 `Option<TokenUsage>` 로 추출. InferenceResult → AgentOutput → NodeExecutionResult → RuntimeEvent::NodeCompleted 까지 전파. 캐시 항목에도 보존. ModelSelected 페이로드에 누적 usage 포함. 프론트엔드 phase 배너에 누적 tokens 표시. **비용 추정 (가격표 + 단가 환산) 은 별도 phase**: env / pricing.yaml 위치, exposure 단위 (run/session/cluster) 결정 필요.
+### TODO 8-4: 노드별 토큰 사용량 및 비용 실시간 추적 — ✅ Stage I + Phase 8 (`6bed393` `d294302` `1453070`)
+- **파일**: `src/router/mod.rs`, `src/agents/mod.rs`, `src/runtime/mod.rs`, `src/orchestrator/node_executor.rs`, `src/pricing.rs` (신규), `config/pricing.yaml` (신규), `web/src/components/agent-thinking.tsx`
+- **적용 (Stage I)**: 모든 provider (OpenAI/vLLM/Anthropic/Gemini) usage 추출 → `Option<TokenUsage>` 전파. InferenceResult → AgentOutput → NodeExecutionResult → RuntimeEvent::NodeCompleted. 캐시 항목 보존. ModelSelected 페이로드에 누적 usage.
+- **적용 (Phase 8)**: `Pricing` 모듈 + `config/pricing.yaml` (override via `CLI_AGENT_PRICING_PATH`). 4-step lookup. RunRecord/SessionSummary/ClusterRunRecord 에 `total_token_usage` + `total_cost_estimate_usd` + `cost_is_estimate`. `agent_runs` 에 `total_input_tokens` / `total_output_tokens` / `total_cost_usd` 컬럼 추가 (migration 0003). `finish_run` 이 per-node cost + run total 계산. ModelSelected 페이로드에 `cost_estimate_usd` 포함. 프론트엔드 phase 배너에 "≈ $0.XXXX est." 표시.
+
+### TODO 8-2 추가: Data Flow Card — ✅ Phase 9 (`e0f886f`)
+- **파일**: `web/src/components/agent-thinking.tsx`
+- **적용**: 각 노드 카드에 "Inputs from depA: <preview>… · depB: <preview>…" 라인 추가. graph_initialized 의 dependencies + node_completed 의 output_preview 로 데이터 흐름 가시화. 의존성 없거나 preview 없으면 카드 숨김.
 
 ### TODO 8-5: 검증/재계획 루프 트레이싱 강화 — ✅ `a39df71`
 - **파일**: `src/types.rs` (RunActionType), `src/memory/store.rs` (parser), `src/orchestrator/run_manager.rs` (emit), `src/orchestrator/mod.rs` (trace match arm), `web/src/components/agent-thinking.tsx`
@@ -339,7 +353,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ---
 
-## 9. Harness Engineering & Sub-Agent Management — ✅ Stage IV 슬라이스 (9-2/9-3/9-6 보류)
+## 9. Harness Engineering & Sub-Agent Management — ✅ 완료 (orchestrator 가 본격적으로 harness 위에서 동작)
 
 ### 현재 상태
 - `AgentRegistry`가 11개 역할 에이전트를 관리 (YAML 설정 가능)
@@ -392,7 +406,11 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   ```
 - **핵심 가치**: 에이전트를 일회성 함수 호출이 아닌 상태를 가진 세션으로 관리
 
-### TODO 9-2: 서브에이전트 스포닝 및 계층 관리 — ⏸️ 보류
+### TODO 9-2: 서브에이전트 스포닝 및 계층 관리 — ✅ Phase 11-C (`dbabd96`)
+- **파일**: `src/harness/sub_agent.rs` (신규), `src/orchestrator/completion.rs`
+- **적용**: `SubAgentManager::{spawn_from_plan, spawn_child, collect_child_outputs, classify_child_failure, hierarchy}`. `completion.rs` 가 SubtaskPlan 검증 직후 SubAgentManager.spawn_from_plan 으로 자식 harness 세션을 등록. classify_child_failure 임계: 1/n→Continue, ≥n/2→EscalateToPlanner, n/n→AbortParent.
+
+### TODO 9-2 원본 설계 (참고용 archive)
 - **파일**: `src/harness/sub_agent.rs` (신규)
 - **문제**: 현재 Planner가 SubtaskPlan을 생성하면 `on_completed`에서 그래프 노드로만 추가. 서브에이전트의 부모-자식 관계, 결과 집약, 실패 전파를 체계적으로 관리하지 않음
 - **설계**:
@@ -420,7 +438,11 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   ```
 - **기존 연동**: `completion.rs::build_on_completed_fn`의 SubtaskPlan 처리 로직을 SubAgentManager로 위임
 
-### TODO 9-3: 에이전트 간 메시지 버스 — ⏸️ 보류 (use case 합의 필요)
+### TODO 9-3: 에이전트 간 메시지 버스 — ✅ Phase 11-D (`dbabd96`)
+- **파일**: `src/harness/message_bus.rs` (신규), `src/harness/mod.rs`
+- **적용**: 사용자 use case ("서브에이전트와의 통신을 주로 사용") 채택. per-session `tokio::sync::mpsc` mailbox (cap 64), AgentHarness::create_session 이 자동 ensure_mailbox, terminate 시 close. 메시지 종류: Query / Feedback / Delegation / Status. ensure_mailbox / send / try_recv / drain / close 5개 메서드. agent 실행 경로에 자동 inject 는 follow-up — 현재는 primitive만 노출.
+
+### TODO 9-3 원본 설계 (참고용 archive)
 - **파일**: `src/harness/message_bus.rs` (신규)
 - **문제**: 에이전트 간 통신이 오직 dependency_outputs (선행 노드 출력)으로만 가능. 실행 중 에이전트가 다른 에이전트에 질문하거나 피드백을 주고받을 수 없음
 - **설계**:
@@ -429,7 +451,7 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
   - 수신 에이전트의 컨텍스트에 메시지 자동 주입
   - 타임아웃 및 메시지 큐 크기 제한
 
-### TODO 9-4: 하네스 수준 관측성 (Observability) — ✅ snapshot 슬라이스 (`3ce2a2a`)
+### TODO 9-4: 하네스 수준 관측성 (Observability) — ✅ Phase 11-E (`3ce2a2a` `dbabd96`)
 - **파일**: `src/harness/metrics.rs` (신규)
 - **적용**: `HarnessMetrics::snapshot(&AgentHarness)` — sessions DashMap 을 walk 해서 status별 count, total_iterations, total_tokens, sub_agent_depth, per_role rollup 산출. API 엔드포인트 (`GET /v1/harness/metrics`) + 프론트엔드 위젯은 follow-up.
 - **원래 설계 참고**:
@@ -449,16 +471,11 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ### TODO 9-5: 에이전트 역할 동적 확장 — ✅ on-demand reload (`3ce2a2a`)
 - **파일**: `src/agents/mod.rs` (AgentRegistry 확장)
-- **적용**: `agents` 필드를 `Arc<RwLock<HashMap<...>>>` 로 전환, `reload_from_dir(&self, dir)` 신설 — YAML 디렉토리 재읽기 후 hashmap 교체. 실행 중 Arc 클론은 invalidate 되지 않음. API 엔드포인트 노출 + filesystem watch 자동 reload 는 follow-up. 2 unit 테스트 (성공 reload, 누락 디렉토리 fallback).
+- **적용**: `agents` 필드를 `Arc<RwLock<HashMap<...>>>` 로 전환, `reload_from_dir(&self, dir)` 신설. Phase 12 `c3dc569` 에서 `POST /v1/agents/reload` API + `Orchestrator::set_agents_dir/reload_agents` 헬퍼 추가. filesystem watcher (notify crate) 는 follow-up.
 
-### TODO 9-6: 하네스 기반 실행 흐름으로 orchestrator 전환 — ⏸️ 보류 (breaking, 별도 phase)
-- **현재 위치**: `src/orchestrator/run_manager.rs` (execute_run), `node_executor.rs` (build_run_node_fn)
-- **문제**: 현재 `build_run_node_fn`이 직접 `agents.run_role()`을 호출. 하네스 계층을 거치지 않아 세션 관리, 컨텍스트 축적, 계층 추적 등이 불가능
-- **수정**:
-  - `build_run_node_fn` 내부에서 `harness.spawn()` → `harness.send()` → `harness.terminate()` 패턴으로 전환
-  - run 시작 시 루트 하네스 세션 생성
-  - 각 노드 실행을 자식 세션으로 관리
-  - 기존 `AgentRegistry.run_role()` 직접 호출 경로는 하네스 내부로 캡슐화
+### TODO 9-6: 하네스 기반 실행 흐름으로 orchestrator 전환 — ✅ Phase 11-A/B (`348a094`)
+- **파일**: `src/orchestrator/mod.rs` (harness + root_harness_sessions 필드), `src/orchestrator/run_manager.rs` (root session 생성), `src/orchestrator/node_executor.rs` (per-node child session)
+- **적용**: D5 옵션 B 채택. execute_run 시작 시 `harness.create_session(Planner, None)` 으로 root session 생성, `root_harness_sessions: DashMap<run_id, session_id>` 에 저장. build_run_node_fn 의 LLM 스트리밍 경로 직전에 `harness.create_session(role, parent=root)` 으로 자식 세션 생성, run_role_stream 결과에 따라 `record_output` / `record_error`. finish_run 이 root session terminate. 인퍼런스 경로 (run_role_stream 호출, 토큰 스트리밍, ModelSelected) 자체는 변경 없음 — harness 는 metadata 추적 + tree 구조만 담당.
 
 ---
 
@@ -487,13 +504,16 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 9. ~~**Stage II**: Tracing 프론트 (TODO 8-1 + 8-2 + 8-3)~~ — ✅ 완료
 10. ~~**Stage III**: Workflow 백엔드 (TODO 7-3 + 7-1 + 7-2 chain)~~ — ✅ 완료
 11. ~~**Stage IV**: Harness sidecar (TODO 9-1 + 9-4 + 9-5)~~ — ✅ 완료
+12. ~~**Phase 8**: Cost Tracking (TODO 8-4 가격표)~~ — ✅ 완료
+13. ~~**Phase 9**: Data Flow Card (TODO 8-2 추가 슬라이스)~~ — ✅ 완료
+14. ~~**Phase 10**: Visual Workflow Editor (TODO 7-4)~~ — ✅ 완료
+15. ~~**Phase 11**: Harness 본격 전환 (D5 + D3 + D4 + F4 = TODO 9-6 + 9-2 + 9-3 + HarnessMetrics API)~~ — ✅ 완료
+16. ~~**Phase 12**: F5 hot reload + F2 parser groundwork~~ — ✅ 완료
 
-**보류 — 사용자 합의 후 별도 phase**:
-- TODO 7-4 (워크플로우 시각 편집기, react-flow 의존성)
-- TODO 8-4 가격표 (per-token 비용 환산, env 또는 pricing.yaml 위치 결정 필요)
-- TODO 9-2 SubAgentManager (계층 결과 집약, 9-6 에 종속)
-- TODO 9-3 메시지 버스 (use case 합의 필요)
-- TODO 9-6 orchestrator 의 harness 전환 (breaking, 별도 phase 합의 필요)
+**잔여 — production 운영 또는 추가 합의 후**:
+- F1: RequirementAnalyzer shadow → driver promotion (1주 production SubtaskPlanned 이벤트 분포 누적 후 의사결정)
+- F2: WorkflowComposer.generate_from_description LLM wrapper (캐시 정책 + fallback 전략 합의 후)
+- F5(b): notify crate 기반 filesystem watcher 자동 reload
 
 ---
 
@@ -530,15 +550,24 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 | `web/src/hooks/use-sse.ts` | ~150 | 재연결 + after_seq + connection state |
 | `web/e2e/{sessions,run-actions,settings}.spec.ts` | — | Phase 5 신규 Playwright |
 | `src/orchestrator/requirement_analyzer.rs` | ~190 | Stage III 신규: 휴리스틱 분석기 (shadow mode) |
-| `src/orchestrator/workflow_composer.rs` | ~280 | Stage III 신규: chain_skills |
-| `src/harness/mod.rs` | ~310 | Stage IV 신규: AgentHarness sidecar |
+| `src/orchestrator/workflow_composer.rs` | ~310 | Stage III/Phase 12: chain_skills + parse_skill_chain_response |
+| `src/harness/mod.rs` | ~360 | Stage IV/Phase 11: AgentHarness sidecar + bus + create/record helpers |
 | `src/harness/metrics.rs` | ~180 | Stage IV 신규: HarnessMetrics snapshot |
+| `src/harness/sub_agent.rs` | ~290 | Phase 11-C 신규: SubAgentManager + classify_child_failure |
+| `src/harness/message_bus.rs` | ~210 | Phase 11-D 신규: per-session mpsc mailbox |
+| `src/pricing.rs` | ~270 | Phase 8 신규: Pricing + ModelPrice + parse helpers |
+| `src/interface/handlers/harness.rs` | 32 | Phase 11-E 신규: GET /v1/harness/metrics |
+| `src/interface/handlers/agents.rs` | 41 | Phase 12 신규: POST /v1/agents/reload |
+| `config/pricing.yaml` | 71 | Phase 8 신규: per-million USD 가격표 |
+| `migrations/0003_run_cost_columns.sql` | 9 | Phase 8 신규: agent_runs 비용 컬럼 |
 | `web/src/components/trace/subtask-tree.tsx` | ~210 | Stage II 신규: 서브태스크 계층 트리 |
+| `web/src/app/workflows/[id]/edit/page.tsx` | ~430 | Phase 10 신규: react-flow 시각 편집기 |
+| `web/src/app/harness/page.tsx` | ~140 | Phase 11-E 신규: 하네스 메트릭 대시보드 |
 | `docs/SECTION_7_9_PREP.md` | 238 | Section 7~9 사전 정리 브리프 |
 
 ---
 
-## 커밋 레퍼런스 (70 commits)
+## 커밋 레퍼런스 (78 commits)
 
 ### Phase 1 Critical Fixes
 - `2171e4e` fix: Mutex poisoning in terminal scrollback
@@ -613,3 +642,19 @@ Rust + Next.js 기반 멀티에이전트 오케스트레이터 CLI/TUI 플랫폼
 
 ### Stage IV Harness sidecar (TODO 9-1 + 9-4 + 9-5)
 - `3ce2a2a` feat: AgentHarness sidecar + HarnessMetrics + AgentRegistry hot reload
+
+### Phase 8 Cost Tracking (TODO 8-4 가격표)
+- `1453070` feat(phase8): Cost tracking — per-run/session/cluster + UI banner
+
+### Phase 9 Data Flow Card (TODO 8-2 추가 슬라이스)
+- `e0f886f` feat(phase9): Data Flow Card — show upstream node outputs inline
+
+### Phase 10 Visual Workflow Editor (TODO 7-4)
+- `5a8d51c` feat(phase10): Visual workflow editor (react-flow)
+
+### Phase 11 Harness 본격 전환 (D5 + D3 + D4 + F4)
+- `348a094` feat(phase11ab): Wire AgentHarness into the run lifecycle
+- `dbabd96` feat(phase11cde): SubAgentManager + message bus + /v1/harness/metrics
+
+### Phase 12 Reload + parser groundwork (F5 + F2 일부)
+- `c3dc569` feat(phase12): /v1/agents/reload + parse_skill_chain_response helper
