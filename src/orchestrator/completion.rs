@@ -299,6 +299,29 @@ impl Orchestrator {
                                 .take(MAX_DYNAMIC_SUBTASKS_PER_PLAN)
                                 .collect();
 
+                            // Phase 11-C: register every subtask with the
+                            // harness as a child of the run's root session.
+                            // The harness session ids returned here are
+                            // currently informational; future iterations will
+                            // pair them with build_run_node_fn to drive the
+                            // metrics tree directly.
+                            let plan_for_harness = crate::types::SubtaskPlan {
+                                subtasks: subtasks.clone(),
+                            };
+                            let parent_session = orchestrator
+                                .root_harness_sessions
+                                .get(&run_id)
+                                .map(|kv| kv.value().clone());
+                            if let Some(parent_session_id) = parent_session.as_ref() {
+                                let manager = crate::harness::sub_agent::SubAgentManager::new(
+                                    orchestrator.harness.clone(),
+                                );
+                                let _ = manager.spawn_from_plan(
+                                    parent_session_id,
+                                    &plan_for_harness,
+                                );
+                            }
+
                             let _ = memory
                                 .append_run_action_event(
                                     run_id,

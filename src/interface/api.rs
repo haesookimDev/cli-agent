@@ -56,6 +56,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(handlers::health::health_handler))
         .route("/v1/health", get(handlers::health::health_handler))
         .route(
+            "/v1/harness/metrics",
+            get(handlers::harness::get_metrics_handler),
+        )
+        .route(
             "/v1/sessions",
             post(handlers::sessions::create_session_handler)
                 .get(handlers::sessions::list_sessions_handler),

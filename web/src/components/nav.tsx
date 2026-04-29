@@ -18,6 +18,7 @@ const tabs = [
   { href: "/terminal", label: "Terminal" },
   { href: "/tools", label: "Tools" },
   { href: "/team", label: "Team" },
+  { href: "/harness", label: "Harness" },
   { href: "/settings", label: "Settings" },
 ];
 

@@ -467,6 +467,19 @@ async fn session_list_carries_cost_estimate_fields() {
 }
 
 #[tokio::test]
+async fn harness_metrics_endpoint_returns_snapshot() {
+    let harness = make_harness().await;
+    let app = router(harness.state);
+    let req = signed_request(&harness.auth, "GET", "/v1/harness/metrics", b"");
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp.into_body()).await;
+    assert!(body.get("active_sessions").is_some());
+    assert!(body.get("total_tokens").is_some());
+    assert!(body.get("per_role").is_some());
+}
+
+#[tokio::test]
 async fn list_skills_returns_array() {
     let harness = make_harness().await;
     let app = router(harness.state);

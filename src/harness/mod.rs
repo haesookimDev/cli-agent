@@ -17,7 +17,9 @@
 //! has been observed in production for a release cycle and the API has
 //! settled, TODO 9-6 will route node execution through it.
 
+pub mod message_bus;
 pub mod metrics;
+pub mod sub_agent;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -105,6 +107,7 @@ pub struct AgentHarness {
     registry: AgentRegistry,
     router: Arc<ModelRouter>,
     sessions: Arc<DashMap<String, AgentSession>>,
+    bus: Arc<message_bus::MessageBus>,
 }
 
 impl AgentHarness {
@@ -113,7 +116,14 @@ impl AgentHarness {
             registry,
             router,
             sessions: Arc::new(DashMap::new()),
+            bus: Arc::new(message_bus::MessageBus::new()),
         })
+    }
+
+    /// Inter-session message bus — sub-agents and parents communicate via
+    /// `harness.bus().send(...)` / `harness.bus().drain(...)`.
+    pub fn bus(&self) -> &Arc<message_bus::MessageBus> {
+        &self.bus
     }
 
     /// Spawn a new session and immediately run a single inference. Returns
@@ -217,6 +227,10 @@ impl AgentHarness {
             .get_mut(session_id)
             .ok_or_else(|| anyhow!("unknown session id `{session_id}`"))?;
         entry.status = AgentSessionStatus::Terminated;
+        drop(entry);
+        // Drop the mailbox alongside the session so closed sessions don't
+        // accumulate as silent black-holes for messages.
+        self.bus.close(session_id);
         Ok(())
     }
 
@@ -237,6 +251,9 @@ impl AgentHarness {
             }
         }
         self.sessions.insert(id.clone(), session);
+        // Auto-provision the mailbox so peers can send before the receiver
+        // ever calls `bus().drain()`.
+        self.bus.ensure_mailbox(&id);
         id
     }
 

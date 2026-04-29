@@ -79,7 +79,8 @@ pub struct Orchestrator {
     /// Sidecar harness (TODO 9-1, Phase 11). Holds session metadata for
     /// every node executed; the inference itself still runs through
     /// `agents.run_role_stream` so token streaming is unaffected.
-    pub(super) harness: Arc<crate::harness::AgentHarness>,
+    /// Public so the `/v1/harness/metrics` handler can read snapshots.
+    pub harness: Arc<crate::harness::AgentHarness>,
     /// Map of run_id → root harness session id. Populated when a run starts
     /// so build_run_node_fn can attach each node session as a child of the
     /// run's root.
