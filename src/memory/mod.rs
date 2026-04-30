@@ -48,8 +48,8 @@ impl MemoryManager {
         self.store.clone()
     }
 
-    pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
-        self.store.create_session(session_id).await
+    pub async fn create_session(&self, session_id: Uuid, kind: &str) -> anyhow::Result<()> {
+        self.store.create_session(session_id, kind).await
     }
 
     pub async fn append_event(&self, event: SessionEvent) -> anyhow::Result<()> {
@@ -184,8 +184,12 @@ impl MemoryManager {
         self.store.list_session_runs(session_id, limit).await
     }
 
-    pub async fn list_sessions(&self, limit: usize) -> anyhow::Result<Vec<SessionSummary>> {
-        self.store.list_sessions(limit).await
+    pub async fn list_sessions(
+        &self,
+        limit: usize,
+        kind: Option<&str>,
+    ) -> anyhow::Result<Vec<SessionSummary>> {
+        self.store.list_sessions(limit, kind).await
     }
 
     pub async fn get_session(&self, session_id: Uuid) -> anyhow::Result<Option<SessionSummary>> {
@@ -196,7 +200,7 @@ impl MemoryManager {
         &self,
         session_id: Uuid,
         limit: usize,
-    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+    ) -> anyhow::Result<Vec<crate::memory::store::StoredMessage>> {
         self.store.list_session_messages(session_id, limit).await
     }
 

@@ -155,6 +155,8 @@ pub enum RuntimeEvent {
     NodeStarted {
         node_id: String,
         role: AgentRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona_name: Option<String>,
     },
     NodeCompleted {
         node_id: String,
@@ -165,11 +167,15 @@ pub enum RuntimeEvent {
         output_truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_usage: Option<crate::types::TokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona_name: Option<String>,
     },
     NodeFailed {
         node_id: String,
         role: AgentRole,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona_name: Option<String>,
     },
     NodeSkipped {
         node_id: String,
@@ -180,6 +186,8 @@ pub enum RuntimeEvent {
         from_node: String,
         role: AgentRole,
         dependencies: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona_name: Option<String>,
     },
     NodeTokenChunk {
         node_id: String,
@@ -369,6 +377,7 @@ impl AgentRuntime {
                     sink(RuntimeEvent::NodeStarted {
                         node_id: node.id.clone(),
                         role: node.role,
+                        persona_name: node.assigned_persona.clone(),
                     });
                 }
 
@@ -454,6 +463,7 @@ impl AgentRuntime {
                                 output_preview,
                                 output_truncated,
                                 token_usage: ok.token_usage,
+                                persona_name: node.assigned_persona.clone(),
                             });
                         }
 
@@ -491,12 +501,15 @@ impl AgentRuntime {
                             let dynamic_role = dynamic.role;
                             let dynamic_dependencies = dynamic.dependencies.clone();
                             graph.add_node(dynamic)?;
+                            let dynamic_persona =
+                                graph.node(&dynamic_id).and_then(|n| n.assigned_persona.clone());
                             if let Some(sink) = &on_event {
                                 sink(RuntimeEvent::DynamicNodeAdded {
                                     node_id: dynamic_id,
                                     from_node: node.id.clone(),
                                     role: dynamic_role,
                                     dependencies: dynamic_dependencies,
+                                    persona_name: dynamic_persona,
                                 });
                             }
                         }
@@ -511,6 +524,7 @@ impl AgentRuntime {
                                     node_id: node.id.clone(),
                                     role: node.role,
                                     error: err.clone(),
+                                    persona_name: node.assigned_persona.clone(),
                                 });
                             }
                         }
@@ -550,6 +564,7 @@ impl AgentRuntime {
                                 node_id: node.id.clone(),
                                 role: node.role,
                                 error: err.to_string(),
+                                persona_name: node.assigned_persona.clone(),
                             });
                         }
 

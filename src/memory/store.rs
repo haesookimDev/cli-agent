@@ -8,12 +8,27 @@ use uuid::Uuid;
 
 use crate::types::{
     CronSchedule, KnowledgeItem, MemoryHit, RunActionEvent, RunActionType, RunRecord,
-    SessionMemoryItem, SessionSummary, WebhookDeliveryRecord, WebhookEndpoint,
+    SessionMemoryItem, SessionSummary, WebhookDeliveryRecord, WebhookEndpoint, Workspace,
+    WorkspaceFile, WorkspaceFileCreatedBy, WorkspaceKind,
 };
 
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
+}
+
+/// One row of `messages`. Carries optional run/node/persona linkage so
+/// chat UIs can show agent replies under the right persona heading and
+/// pair them with their owning run.
+#[derive(Debug, Clone)]
+pub struct StoredMessage {
+    pub id: i64,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+    pub run_id: Option<String>,
+    pub node_id: Option<String>,
+    pub persona_name: Option<String>,
 }
 
 /// Row payload for `batch_insert_run_action_events`. Identical fields to
@@ -64,15 +79,16 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+    pub async fn create_session(&self, session_id: Uuid, kind: &str) -> anyhow::Result<()> {
         sqlx::query(
             r#"
-            INSERT OR IGNORE INTO sessions (id, created_at)
-            VALUES (?1, ?2)
+            INSERT OR IGNORE INTO sessions (id, created_at, kind)
+            VALUES (?1, ?2, ?3)
             "#,
         )
         .bind(session_id.to_string())
         .bind(Utc::now().to_rfc3339())
+        .bind(kind)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -99,14 +115,49 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Persist an agent reply tied to a specific run + node so the chat UI
+    /// can show it as soon as the node settles, instead of waiting for the
+    /// whole run to finish and surface it through `RunRecord.outputs`.
+    /// Idempotent on (session_id, run_id, node_id) — re-runs of the same
+    /// node update content rather than duplicating the row.
+    pub async fn record_agent_message(
+        &self,
+        session_id: Uuid,
+        run_id: Uuid,
+        node_id: &str,
+        persona_name: Option<&str>,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO messages (session_id, role, content, run_id, node_id, persona_name, created_at)
+            VALUES (?1, 'agent', ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(session_id, run_id, node_id) WHERE run_id IS NOT NULL
+            DO UPDATE SET
+                content = excluded.content,
+                persona_name = excluded.persona_name,
+                created_at = excluded.created_at
+            "#,
+        )
+        .bind(session_id.to_string())
+        .bind(content)
+        .bind(run_id.to_string())
+        .bind(node_id)
+        .bind(persona_name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_session_messages(
         &self,
         session_id: Uuid,
         limit: usize,
-    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+    ) -> anyhow::Result<Vec<StoredMessage>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, role, content, created_at
+            SELECT id, role, content, created_at, run_id, node_id, persona_name
             FROM messages
             WHERE session_id = ?1
             ORDER BY id DESC
@@ -120,11 +171,15 @@ impl SqliteStore {
 
         let mut msgs = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: i64 = row.get("id");
-            let role: String = row.get("role");
-            let content: String = row.get("content");
-            let created_at: String = row.get("created_at");
-            msgs.push((id, role, content, created_at));
+            msgs.push(StoredMessage {
+                id: row.get("id"),
+                role: row.get("role"),
+                content: row.get("content"),
+                created_at: row.get("created_at"),
+                run_id: row.try_get("run_id").ok(),
+                node_id: row.try_get("node_id").ok(),
+                persona_name: row.try_get("persona_name").ok(),
+            });
         }
         msgs.reverse();
         Ok(msgs)
@@ -463,7 +518,11 @@ impl SqliteStore {
         Ok(runs)
     }
 
-    pub async fn list_sessions(&self, limit: usize) -> anyhow::Result<Vec<SessionSummary>> {
+    pub async fn list_sessions(
+        &self,
+        limit: usize,
+        kind: Option<&str>,
+    ) -> anyhow::Result<Vec<SessionSummary>> {
         let rows = sqlx::query(
             r#"
             SELECT
@@ -483,12 +542,14 @@ impl SqliteStore {
                 COALESCE(SUM(ar.total_cost_usd), 0.0)    AS total_cost
             FROM sessions s
             LEFT JOIN agent_runs ar ON ar.session_id = s.id
+            WHERE (?2 IS NULL OR s.kind = ?2)
             GROUP BY s.id
             ORDER BY COALESCE(MAX(ar.created_at), s.created_at) DESC
             LIMIT ?1
             "#,
         )
         .bind(limit as i64)
+        .bind(kind)
         .fetch_all(&self.pool)
         .await?;
 
@@ -1563,6 +1624,243 @@ impl SqliteStore {
         }
     }
 
+    // --- Workspaces ---
+
+    pub async fn insert_workspace(&self, ws: &Workspace) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO workspaces
+                (id, slug, name, kind, root_path, description, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+        )
+        .bind(&ws.id)
+        .bind(&ws.slug)
+        .bind(&ws.name)
+        .bind(ws.kind.to_string())
+        .bind(&ws.root_path)
+        .bind(ws.description.as_deref())
+        .bind(ws.created_at.to_rfc3339())
+        .bind(ws.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_workspace(&self, id: &str) -> anyhow::Result<Option<Workspace>> {
+        let row = sqlx::query(
+            r#"SELECT id, slug, name, kind, root_path, description, created_at, updated_at
+               FROM workspaces WHERE id = ?1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| workspace_from_row(&r).ok()))
+    }
+
+    pub async fn get_workspace_by_slug(&self, slug: &str) -> anyhow::Result<Option<Workspace>> {
+        let row = sqlx::query(
+            r#"SELECT id, slug, name, kind, root_path, description, created_at, updated_at
+               FROM workspaces WHERE slug = ?1"#,
+        )
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| workspace_from_row(&r).ok()))
+    }
+
+    pub async fn list_workspaces(
+        &self,
+        kind: Option<&str>,
+    ) -> anyhow::Result<Vec<Workspace>> {
+        let rows = sqlx::query(
+            r#"SELECT id, slug, name, kind, root_path, description, created_at, updated_at
+               FROM workspaces
+               WHERE (?1 IS NULL OR kind = ?1)
+               ORDER BY created_at DESC"#,
+        )
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Ok(ws) = workspace_from_row(&row) {
+                out.push(ws);
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn update_workspace(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        if let Some(name) = name {
+            sqlx::query("UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(name)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(desc) = description {
+            sqlx::query("UPDATE workspaces SET description = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(desc)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_workspace(&self, id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM workspaces WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Set or clear the workspace association for a session. Used after
+    /// `POST /v1/sessions { workspace_id }` and during workspace soft
+    /// reattachment.
+    pub async fn set_session_workspace(
+        &self,
+        session_id: Uuid,
+        workspace_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE sessions SET workspace_id = ?1 WHERE id = ?2")
+            .bind(workspace_id)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_workspace_sessions(
+        &self,
+        workspace_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Uuid>> {
+        let rows = sqlx::query(
+            r#"SELECT id FROM sessions
+               WHERE workspace_id = ?1
+               ORDER BY created_at DESC
+               LIMIT ?2"#,
+        )
+        .bind(workspace_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let raw: String = row.get("id");
+            if let Ok(uuid) = Uuid::parse_str(&raw) {
+                out.push(uuid);
+            }
+        }
+        Ok(out)
+    }
+
+    // --- Workspace Files ---
+
+    pub async fn upsert_workspace_file(&self, file: &WorkspaceFile) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO workspace_files
+                (id, workspace_id, session_id, relative_path, size_bytes, mime, sha256,
+                 created_by, created_by_persona, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(workspace_id, relative_path) DO UPDATE SET
+                size_bytes = excluded.size_bytes,
+                mime = excluded.mime,
+                sha256 = excluded.sha256,
+                created_by = excluded.created_by,
+                created_by_persona = excluded.created_by_persona,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&file.id)
+        .bind(&file.workspace_id)
+        .bind(file.session_id.map(|u| u.to_string()))
+        .bind(&file.relative_path)
+        .bind(file.size_bytes as i64)
+        .bind(file.mime.as_deref())
+        .bind(file.sha256.as_deref())
+        .bind(file.created_by.to_string())
+        .bind(file.created_by_persona.as_deref())
+        .bind(file.created_at.to_rfc3339())
+        .bind(file.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_workspace_file(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> anyhow::Result<Option<WorkspaceFile>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, session_id, relative_path, size_bytes, mime, sha256,
+                      created_by, created_by_persona, created_at, updated_at
+               FROM workspace_files
+               WHERE workspace_id = ?1 AND relative_path = ?2"#,
+        )
+        .bind(workspace_id)
+        .bind(relative_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| workspace_file_from_row(&r).ok()))
+    }
+
+    pub async fn list_workspace_files(
+        &self,
+        workspace_id: &str,
+        session_id: Option<Uuid>,
+        prefix: Option<&str>,
+    ) -> anyhow::Result<Vec<WorkspaceFile>> {
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, session_id, relative_path, size_bytes, mime, sha256,
+                      created_by, created_by_persona, created_at, updated_at
+               FROM workspace_files
+               WHERE workspace_id = ?1
+                 AND (?2 IS NULL OR session_id = ?2)
+                 AND (?3 IS NULL OR relative_path LIKE ?3 || '%')
+               ORDER BY relative_path ASC"#,
+        )
+        .bind(workspace_id)
+        .bind(session_id.map(|u| u.to_string()))
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Ok(f) = workspace_file_from_row(&row) {
+                out.push(f);
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn delete_workspace_file(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> anyhow::Result<bool> {
+        let result =
+            sqlx::query("DELETE FROM workspace_files WHERE workspace_id = ?1 AND relative_path = ?2")
+                .bind(workspace_id)
+                .bind(relative_path)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn save_settings(&self, settings: &crate::types::AppSettings) -> anyhow::Result<()> {
         let json = serde_json::to_string(settings)?;
         sqlx::query(
@@ -1750,6 +2048,55 @@ fn webhook_secret_passphrase() -> String {
 
 fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
+}
+
+fn workspace_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Workspace> {
+    let kind_raw: String = row.get("kind");
+    let kind = WorkspaceKind::parse(&kind_raw)
+        .ok_or_else(|| anyhow::anyhow!("invalid workspace kind: {kind_raw}"))?;
+    let created_at_raw: String = row.get("created_at");
+    let updated_at_raw: String = row.get("updated_at");
+    Ok(Workspace {
+        id: row.get("id"),
+        slug: row.get("slug"),
+        name: row.get("name"),
+        kind,
+        root_path: row.get("root_path"),
+        description: row.try_get("description").ok(),
+        created_at: parse_rfc3339(&created_at_raw)?,
+        updated_at: parse_rfc3339(&updated_at_raw)?,
+    })
+}
+
+fn workspace_file_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<WorkspaceFile> {
+    let session_raw: Option<String> = row.try_get("session_id").ok();
+    let session_id = match session_raw {
+        Some(s) if !s.is_empty() => Some(Uuid::parse_str(&s)?),
+        _ => None,
+    };
+    let created_by_raw: String = row.get("created_by");
+    let created_by = match created_by_raw.as_str() {
+        "user" => WorkspaceFileCreatedBy::User,
+        "persona" => WorkspaceFileCreatedBy::Persona,
+        "system" => WorkspaceFileCreatedBy::System,
+        other => return Err(anyhow::anyhow!("invalid created_by: {other}")),
+    };
+    let size: i64 = row.get("size_bytes");
+    let created_at_raw: String = row.get("created_at");
+    let updated_at_raw: String = row.get("updated_at");
+    Ok(WorkspaceFile {
+        id: row.get("id"),
+        workspace_id: row.get("workspace_id"),
+        session_id,
+        relative_path: row.get("relative_path"),
+        size_bytes: size.max(0) as u64,
+        mime: row.try_get("mime").ok(),
+        sha256: row.try_get("sha256").ok(),
+        created_by,
+        created_by_persona: row.try_get("created_by_persona").ok(),
+        created_at: parse_rfc3339(&created_at_raw)?,
+        updated_at: parse_rfc3339(&updated_at_raw)?,
+    })
 }
 
 fn tokenize_lexical(text: &str) -> HashSet<String> {
@@ -1994,7 +2341,10 @@ mod tests {
             .expect("store");
         let run_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        store.create_session(session_id).await.expect("create session");
+        store
+            .create_session(session_id, "general")
+            .await
+            .expect("create session");
 
         let inputs: Vec<RunActionEventInput> = (0..7)
             .map(|i| RunActionEventInput {
@@ -2044,7 +2394,7 @@ mod tests {
             .expect("store");
         let session_id = Uuid::new_v4();
         store
-            .create_session(session_id)
+            .create_session(session_id, "general")
             .await
             .expect("create session");
 
