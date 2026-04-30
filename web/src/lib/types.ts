@@ -18,7 +18,11 @@ export type RunActionType =
   | "interactive_step"
   | "github_issue_created" | "github_issue_commented" | "github_issue_closed"
   | "github_pr_created" | "github_pr_reviewed" | "github_pr_commented"
-  | "github_pr_merged" | "github_branch_created";
+  | "github_pr_merged" | "github_branch_created"
+  | "persona_message" | "mention_received"
+  | "note_created" | "note_updated"
+  | "meeting_started" | "meeting_message" | "meeting_ended"
+  | "team_memory_written";
 
 export interface RunRequest {
   task: string;
@@ -301,6 +305,37 @@ export interface WorkflowTemplate {
   source_run_id: string | null;
   graph_template: WorkflowGraphTemplate;
   parameters: WorkflowParameter[];
+}
+
+// --- Workspace Types ---
+
+export type WorkspaceKind = "general" | "team";
+
+export interface Workspace {
+  id: string;
+  slug: string;
+  name: string;
+  kind: WorkspaceKind;
+  root_path: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WorkspaceFileCreatedBy = "user" | "persona" | "system";
+
+export interface WorkspaceFile {
+  id: string;
+  workspace_id: string;
+  session_id: string | null;
+  relative_path: string;
+  size_bytes: number;
+  mime: string | null;
+  sha256: string | null;
+  created_by: WorkspaceFileCreatedBy;
+  created_by_persona: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // --- Team Persona Types ---

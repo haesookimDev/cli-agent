@@ -10,17 +10,39 @@ export function setLastRunId(page: string, runId: string): void {
   sessionStorage.setItem(`${PREFIX}${page}:runId`, runId);
 }
 
-export function getLastSessionId(): string | null {
-  if (typeof window === "undefined") return null;
-  return sessionStorage.getItem(`${PREFIX}chat:sessionId`) || null;
+function sessionIdKey(mode: string): string {
+  return `${PREFIX}${mode}-chat:sessionId`;
 }
 
-export function setLastSessionId(sid: string | null): void {
+/**
+ * Read the last session id for a chat mode. The legacy single-key store
+ * (`agent-orch:chat:sessionId`) is migrated to the `general` slot on first
+ * read so existing users don't lose their session pointer.
+ */
+export function getLastSessionId(mode: "general" | "team" = "general"): string | null {
+  if (typeof window === "undefined") return null;
+  const stored = sessionStorage.getItem(sessionIdKey(mode));
+  if (stored) return stored;
+  if (mode === "general") {
+    const legacy = sessionStorage.getItem(`${PREFIX}chat:sessionId`);
+    if (legacy) {
+      sessionStorage.setItem(sessionIdKey("general"), legacy);
+      sessionStorage.removeItem(`${PREFIX}chat:sessionId`);
+      return legacy;
+    }
+  }
+  return null;
+}
+
+export function setLastSessionId(
+  mode: "general" | "team",
+  sid: string | null,
+): void {
   if (typeof window === "undefined") return;
   if (sid) {
-    sessionStorage.setItem(`${PREFIX}chat:sessionId`, sid);
+    sessionStorage.setItem(sessionIdKey(mode), sid);
   } else {
-    sessionStorage.removeItem(`${PREFIX}chat:sessionId`);
+    sessionStorage.removeItem(sessionIdKey(mode));
   }
 }
 

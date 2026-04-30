@@ -15,6 +15,12 @@ import {
   getLastActiveRun,
   setLastActiveRun,
 } from "@/lib/session-store";
+import {
+  loadRunEvents,
+  saveRunEvents,
+  pruneOldRunEvents,
+} from "@/lib/run-events-store";
+import { getActiveWorkspaceId } from "@/lib/workspace-store";
 import type {
   ChatMessage,
   GlobalMemoryItem,
@@ -51,7 +57,7 @@ export function ChatContent({
 }) {
   const searchParams = useSearchParams();
   const initialSessionId =
-    searchParams.get("session") || getLastSessionId() || null;
+    searchParams.get("session") || getLastSessionId(mode) || null;
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
@@ -64,6 +70,14 @@ export function ChatContent({
     searchParams.get("assignee") ?? ""
   );
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceIdLocal] =
+    useState<string | null>(null);
+
+  useEffect(() => {
+    getActiveWorkspaceId(mode)
+      .then(setActiveWorkspaceIdLocal)
+      .catch(() => setActiveWorkspaceIdLocal(null));
+  }, [mode]);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const [showTerminal, setShowTerminal] = useState(false);
@@ -86,6 +100,28 @@ export function ChatContent({
   const [runEventsMap, setRunEventsMap] = useState<Record<string, RunActionEvent[]>>({});
   const runEventsMapRef = useRef(runEventsMap);
   runEventsMapRef.current = runEventsMap;
+
+  // Drop expired IndexedDB entries once per mount. Cheap (one keys() scan).
+  useEffect(() => {
+    pruneOldRunEvents(mode).catch(() => {});
+  }, [mode]);
+
+  // Mirror runEventsMap to IndexedDB (debounced) so a tab swap doesn't
+  // force a slow round-trip to /v1/runs/:id/trace for every prior run.
+  const persistTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
+    {},
+  );
+  useEffect(() => {
+    for (const [runId, events] of Object.entries(runEventsMap)) {
+      if (!events || events.length === 0) continue;
+      const existing = persistTimerRef.current[runId];
+      if (existing) clearTimeout(existing);
+      persistTimerRef.current[runId] = setTimeout(() => {
+        saveRunEvents(mode, runId, events).catch(() => {});
+        delete persistTimerRef.current[runId];
+      }, 250);
+    }
+  }, [mode, runEventsMap]);
 
   // Current active run. Initialised from sessionStorage so that navigating
   // away (e.g. to /runs) and returning while a run is streaming does not
@@ -122,7 +158,7 @@ export function ChatContent({
 
   // Sync activeSessionId to URL + sessionStorage
   useEffect(() => {
-    setLastSessionId(activeSessionId);
+    setLastSessionId(mode, activeSessionId);
     const url = new URL(window.location.href);
     if (activeSessionId) {
       url.searchParams.set("session", activeSessionId);
@@ -134,7 +170,9 @@ export function ChatContent({
 
   // Load sessions
   useEffect(() => {
-    apiGet<SessionSummary[]>("/v1/sessions?limit=50")
+    apiGet<SessionSummary[]>(
+        `/v1/sessions?limit=50${mode === "team" ? "&kind=team" : "&kind=general"}`,
+      )
       .then(setSessions)
       .catch(() => {});
   }, []);
@@ -267,15 +305,26 @@ export function ChatContent({
         return msgs;
       });
 
-      // Load events for runs we don't have yet
+      // Load events for runs we don't have yet — try IndexedDB cache
+      // first, fall back to /v1/runs/:id/trace on a miss.
       const runIds = [...new Set(msgs.map((m) => m.run_id).filter(Boolean))] as string[];
       for (const rid of runIds) {
         if (runEventsMapRef.current[rid]) continue;
-        apiGet<RunTrace>(`/v1/runs/${rid}/trace?limit=5000`)
-          .then((trace) => {
-            if (trace?.events?.length) {
-              setRunEventsMap((prev) => ({ ...prev, [rid]: trace.events }));
+        loadRunEvents(mode, rid)
+          .then((cached) => {
+            if (cached && cached.length > 0) {
+              setRunEventsMap((prev) =>
+                prev[rid] ? prev : { ...prev, [rid]: cached },
+              );
+              return;
             }
+            apiGet<RunTrace>(`/v1/runs/${rid}/trace?limit=5000`)
+              .then((trace) => {
+                if (trace?.events?.length) {
+                  setRunEventsMap((prev) => ({ ...prev, [rid]: trace.events }));
+                }
+              })
+              .catch(() => {});
           })
           .catch(() => {});
       }
@@ -283,7 +332,7 @@ export function ChatContent({
       console.error("loadMessages:", err);
       // Don't clear messages on error — keep existing messages visible
     }
-  }, []);
+  }, [mode]);
 
   // Load messages when session changes (skip when just created by handleSubmit)
   useEffect(() => {
@@ -339,14 +388,34 @@ export function ChatContent({
     setSubmitting(true);
 
     try {
+      // Team chats need their session row tagged kind='team' from the
+      // start, so when no active session exists we pre-create one with
+      // the right kind before posting the run. General chats keep the
+      // implicit-create path through POST /v1/runs.
+      let sessionIdForRun = activeSessionId;
+      if (!sessionIdForRun && mode === "team") {
+        try {
+          const created = await apiPost<{ session_id: string }>(
+            "/v1/sessions",
+            { kind: "team" },
+          );
+          sessionIdForRun = created.session_id;
+          skipLoadRef.current = true;
+          setActiveSessionId(created.session_id);
+        } catch (err) {
+          console.error("pre-create team session:", err);
+        }
+      }
+
       const body: Record<string, string> = { task: task.trim(), profile };
-      if (activeSessionId) body.session_id = activeSessionId;
+      if (sessionIdForRun) body.session_id = sessionIdForRun;
       if (assignee) body.assignee = assignee;
+      if (activeWorkspaceId) body.workspace_id = activeWorkspaceId;
 
       const sub = await apiPost<RunSubmission>("/v1/runs", body);
       setCurrentRun(sub);
 
-      if (!activeSessionId) {
+      if (!sessionIdForRun) {
         skipLoadRef.current = true; // Don't reload — we have the local message
         setActiveSessionId(sub.session_id);
       }
@@ -366,7 +435,9 @@ export function ChatContent({
       ]);
 
       setTask("");
-      apiGet<SessionSummary[]>("/v1/sessions?limit=50")
+      apiGet<SessionSummary[]>(
+        `/v1/sessions?limit=50${mode === "team" ? "&kind=team" : "&kind=general"}`,
+      )
         .then(setSessions)
         .catch(() => {});
     } catch (err) {

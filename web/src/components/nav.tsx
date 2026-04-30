@@ -27,6 +27,7 @@ const tabs: Tab[] = [
   { href: "/tools", label: "Tools" },
   { href: "/team", label: "Team", exact: true },
   { href: "/team/chat", label: "Team Chat" },
+  { href: "/workspaces", label: "Workspaces" },
   { href: "/harness", label: "Harness" },
   { href: "/settings", label: "Settings" },
 ];
