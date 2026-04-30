@@ -37,6 +37,35 @@ impl Orchestrator {
             req.repo_url = extract_repo_url_from_text(req.task.as_str());
         }
 
+        // Auto-extract @mentions from the task text when the client
+        // didn't already supply a list. The first detected mention also
+        // becomes the assignee if none was set, so a user typing
+        // "@Senior Dev Minho please rewrite X" is routed to Minho.
+        let registered_personas: Vec<String> = self
+            .agents
+            .list_personas()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        if req.mentions.is_none() && !registered_personas.is_empty() {
+            let parsed = super::mentions::parse_mentions(
+                req.task.as_str(),
+                &registered_personas,
+            );
+            if !parsed.is_empty() {
+                req.mentions = Some(parsed);
+            }
+        }
+        if req.assignee.is_none() {
+            if let Some(first) = req
+                .mentions
+                .as_ref()
+                .and_then(|m| m.first().cloned())
+            {
+                req.assignee = Some(first);
+            }
+        }
+
         let auto_route = if req.workflow_id.is_none() {
             self.auto_skill_route(req.task.as_str(), req.repo_url.as_deref())
         } else {
@@ -62,7 +91,10 @@ impl Orchestrator {
         // create their session via POST /v1/sessions { kind: "team" } so
         // sessions.kind matches the chat surface from the start. Existing
         // sessions stay untouched (INSERT OR IGNORE).
-        let kind = if req.assignee.is_some() || req.team_members.is_some() {
+        let kind = if req.assignee.is_some()
+            || req.team_members.is_some()
+            || req.mentions.as_ref().is_some_and(|m| !m.is_empty())
+        {
             "team"
         } else {
             "general"
@@ -98,7 +130,10 @@ impl Orchestrator {
         // Record Virtual Dev Team assignment so /v1/team/members/:name/runs
         // can filter retrospectively. Stored even when both fields are
         // None so the run still appears in unassigned listings if needed.
-        if req.assignee.is_some() || req.team_members.is_some() {
+        if req.assignee.is_some()
+            || req.team_members.is_some()
+            || req.mentions.as_ref().is_some_and(|m| !m.is_empty())
+        {
             self.run_assignments.insert(
                 run_id,
                 crate::types::RunAssignment {
@@ -107,6 +142,25 @@ impl Orchestrator {
                     team_members: req.team_members.clone(),
                 },
             );
+        }
+        // Surface every @mention as a MentionReceived event so the trace
+        // UI can render the user's intent before any node fires.
+        if let Some(mentions) = req.mentions.as_ref() {
+            for mention in mentions {
+                self.record_action_event(
+                    run_id,
+                    session_id,
+                    RunActionType::MentionReceived,
+                    Some("user"),
+                    Some(mention.as_str()),
+                    None,
+                    serde_json::json!({
+                        "persona_name": mention,
+                        "task": req.task.clone(),
+                    }),
+                )
+                .await;
+            }
         }
         self.controls.insert(
             run_id,

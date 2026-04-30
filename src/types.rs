@@ -305,6 +305,12 @@ pub struct RunRequest {
     /// runs never write into the cli-agent repo by accident.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// `@persona` mentions extracted from the user's message. The first
+    /// mention drives the run (same effect as `assignee`); the rest get
+    /// pre-loaded into their personas' inbox before any node fires so the
+    /// recipient sees the request even if they're a downstream node.
+    #[serde(default)]
+    pub mentions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

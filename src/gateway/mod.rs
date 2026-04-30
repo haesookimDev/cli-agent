@@ -184,6 +184,7 @@ impl GatewayManager {
                     assignee: None,
                     team_members: None,
                 workspace_id: None,
+                mentions: None,
                 };
                 let sub = self.orchestrator.submit_run(req).await?;
                 Ok(GatewayResponsePayload::RunSubmitted(sub))

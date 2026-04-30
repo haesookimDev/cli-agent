@@ -249,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
                 assignee: None,
                 team_members: None,
                 workspace_id: None,
+                mentions: None,
             };
 
             if no_wait {

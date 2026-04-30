@@ -32,6 +32,8 @@ pub(crate) struct CreateRunRequest {
     pub team_members: Option<Vec<String>>,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub mentions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +103,7 @@ pub(crate) async fn create_run_handler(
         assignee: req.assignee,
         team_members: req.team_members,
         workspace_id: req.workspace_id,
+        mentions: req.mentions,
     };
 
     match state.orchestrator.submit_run(run_req).await {

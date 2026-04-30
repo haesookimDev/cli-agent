@@ -411,6 +411,7 @@ async fn handle_key(
                             assignee: None,
                             team_members: None,
                 workspace_id: None,
+                mentions: None,
                         };
                         match orchestrator.submit_run(req).await {
                             Ok(sub) => {

@@ -6,6 +6,7 @@ pub mod git_manager;
 pub mod graph_builder;
 pub mod helpers;
 pub mod interactive;
+pub mod mentions;
 pub mod node_executor;
 pub mod persona_router;
 pub mod workspaces;
@@ -817,6 +818,7 @@ impl Orchestrator {
             assignee: None,
             team_members: None,
                 workspace_id: None,
+                mentions: None,
         };
         self.submit_run(req).await
     }
@@ -840,6 +842,7 @@ impl Orchestrator {
             assignee: None,
             team_members: None,
                 workspace_id: None,
+                mentions: None,
         };
         self.submit_run(req).await
     }
@@ -1453,6 +1456,7 @@ impl Orchestrator {
             assignee: None,
             team_members: None,
                 workspace_id: None,
+                mentions: None,
         };
 
         let run_id = Uuid::new_v4();
