@@ -248,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
                 repo_url: None,
                 assignee: None,
                 team_members: None,
+                workspace_id: None,
             };
 
             if no_wait {

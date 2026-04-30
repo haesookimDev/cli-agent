@@ -16,6 +16,7 @@ pub mod router;
 pub mod runtime;
 pub mod scheduler;
 pub mod session_workspace;
+pub mod workspace;
 pub mod terminal;
 pub mod types;
 pub mod webhook;

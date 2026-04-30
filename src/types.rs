@@ -299,6 +299,12 @@ pub struct RunRequest {
     /// matching role.
     #[serde(default)]
     pub team_members: Option<Vec<String>>,
+    /// Workspace this run should execute under. The agent's working
+    /// directory, file uploads, and notes all resolve against the
+    /// workspace's root. None falls back to the default workspace so
+    /// runs never write into the cli-agent repo by accident.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,6 +547,15 @@ pub enum RunActionType {
     GitHubPrCommented,
     GitHubPrMerged,
     GitHubBranchCreated,
+    // Phase C/D — collaboration tracing.
+    PersonaMessage,
+    MentionReceived,
+    NoteCreated,
+    NoteUpdated,
+    MeetingStarted,
+    MeetingMessage,
+    MeetingEnded,
+    TeamMemoryWritten,
 }
 
 impl Display for RunActionType {
@@ -588,6 +603,14 @@ impl Display for RunActionType {
             RunActionType::GitHubPrCommented => "github_pr_commented",
             RunActionType::GitHubPrMerged => "github_pr_merged",
             RunActionType::GitHubBranchCreated => "github_branch_created",
+            RunActionType::PersonaMessage => "persona_message",
+            RunActionType::MentionReceived => "mention_received",
+            RunActionType::NoteCreated => "note_created",
+            RunActionType::NoteUpdated => "note_updated",
+            RunActionType::MeetingStarted => "meeting_started",
+            RunActionType::MeetingMessage => "meeting_message",
+            RunActionType::MeetingEnded => "meeting_ended",
+            RunActionType::TeamMemoryWritten => "team_memory_written",
         };
         write!(f, "{s}")
     }
@@ -801,6 +824,84 @@ pub struct SettingsPatch {
     pub terminal_auto_spawn: Option<bool>,
     pub vllm_base_url: Option<String>,
     pub vllm_custom_model: Option<Option<String>>,
+}
+
+// --- Workspace Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    General,
+    Team,
+}
+
+impl Display for WorkspaceKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            WorkspaceKind::General => "general",
+            WorkspaceKind::Team => "team",
+        })
+    }
+}
+
+impl WorkspaceKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "general" => Some(WorkspaceKind::General),
+            "team" => Some(WorkspaceKind::Team),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub kind: WorkspaceKind,
+    pub root_path: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceFileCreatedBy {
+    User,
+    Persona,
+    System,
+}
+
+impl Display for WorkspaceFileCreatedBy {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            WorkspaceFileCreatedBy::User => "user",
+            WorkspaceFileCreatedBy::Persona => "persona",
+            WorkspaceFileCreatedBy::System => "system",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceFile {
+    pub id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub mime: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    pub created_by: WorkspaceFileCreatedBy,
+    #[serde(default)]
+    pub created_by_persona: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 // --- Cron Schedule Types ---
