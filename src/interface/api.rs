@@ -30,6 +30,8 @@ pub struct ApiState {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListQuery {
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// Authentication query params for WebSocket upgrade endpoints (headers are
@@ -77,6 +79,31 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/sessions/:session_id/messages",
             get(handlers::sessions::list_session_messages_handler),
+        )
+        .route(
+            "/v1/workspaces",
+            get(handlers::workspaces::list_workspaces_handler)
+                .post(handlers::workspaces::create_workspace_handler),
+        )
+        .route(
+            "/v1/workspaces/:wid",
+            get(handlers::workspaces::get_workspace_handler)
+                .put(handlers::workspaces::update_workspace_handler)
+                .delete(handlers::workspaces::delete_workspace_handler),
+        )
+        .route(
+            "/v1/workspaces/:wid/sessions",
+            get(handlers::workspaces::list_workspace_sessions_handler),
+        )
+        .route(
+            "/v1/workspaces/:wid/files",
+            get(handlers::workspaces::list_workspace_files_handler)
+                .post(handlers::workspaces::upload_workspace_file_handler)
+                .delete(handlers::workspaces::delete_workspace_file_handler),
+        )
+        .route(
+            "/v1/workspaces/:wid/file",
+            get(handlers::workspaces::download_workspace_file_handler),
         )
         .route(
             "/v1/memory/sessions/:session_id/items",

@@ -18,3 +18,4 @@ pub mod team;
 pub mod terminal;
 pub mod webhooks;
 pub mod workflows;
+pub mod workspaces;

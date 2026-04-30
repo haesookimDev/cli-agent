@@ -328,7 +328,7 @@ pub async fn run_tui(orchestrator: Orchestrator, settings_path: PathBuf) -> anyh
 
 async fn refresh_state(orchestrator: &Orchestrator, state: &mut TuiState) -> anyhow::Result<()> {
     state.sessions = orchestrator
-        .list_sessions(state.settings.session_limit)
+        .list_sessions(state.settings.session_limit, None)
         .await?;
 
     let run_scope_session = if state.settings.follow_active_session {
@@ -410,6 +410,7 @@ async fn handle_key(
                             repo_url: None,
                             assignee: None,
                             team_members: None,
+                workspace_id: None,
                         };
                         match orchestrator.submit_run(req).await {
                             Ok(sub) => {
@@ -789,7 +790,7 @@ async fn handle_key(
         }
         KeyCode::Char('n') => {
             let session_id = Uuid::new_v4();
-            match orchestrator.create_session(session_id).await {
+            match orchestrator.create_session(session_id, "general").await {
                 Ok(()) => {
                     state.active_session = Some(session_id);
                     state.set_status(format!("new session created: {}", short_uuid(session_id)));

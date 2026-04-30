@@ -13,6 +13,10 @@ use crate::interface::api::{json_value, ApiState, ListQuery};
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateSessionRequest {
     pub session_id: Option<Uuid>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -33,7 +37,11 @@ pub(crate) async fn create_session_handler(
     }
 
     let req = if body.is_empty() {
-        CreateSessionRequest { session_id: None }
+        CreateSessionRequest {
+            session_id: None,
+            kind: None,
+            workspace_id: None,
+        }
     } else {
         match serde_json::from_slice::<CreateSessionRequest>(body.as_ref()) {
             Ok(v) => v,
@@ -47,11 +55,33 @@ pub(crate) async fn create_session_handler(
     };
 
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
-    if let Err(err) = state.orchestrator.create_session(session_id).await {
+    let kind = req.kind.as_deref().unwrap_or("general");
+    if !matches!(kind, "general" | "team") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "kind must be 'general' or 'team'"
+            })),
+        );
+    }
+    if let Err(err) = state.orchestrator.create_session(session_id, kind).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),
         );
+    }
+
+    if let Some(ws_id) = req.workspace_id.as_deref() {
+        if let Err(err) = state
+            .orchestrator
+            .assign_session_workspace(session_id, Some(ws_id))
+            .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            );
+        }
     }
 
     (
@@ -73,7 +103,18 @@ pub(crate) async fn list_sessions_handler(
     }
 
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    match state.orchestrator.list_sessions(limit).await {
+    let kind = query.kind.as_deref();
+    if let Some(k) = kind {
+        if !matches!(k, "general" | "team") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "kind must be 'general' or 'team'"
+                })),
+            );
+        }
+    }
+    match state.orchestrator.list_sessions(limit, kind).await {
         Ok(sessions) => (StatusCode::OK, Json(json_value(sessions))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,

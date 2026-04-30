@@ -154,7 +154,7 @@ impl GatewayManager {
             return Ok(*entry.value());
         }
         let session_id = Uuid::new_v4();
-        self.orchestrator.create_session(session_id).await?;
+        self.orchestrator.create_session(session_id, "general").await?;
         self.session_map.insert(key, session_id);
         Ok(session_id)
     }
@@ -183,6 +183,7 @@ impl GatewayManager {
                     repo_url: None,
                     assignee: None,
                     team_members: None,
+                workspace_id: None,
                 };
                 let sub = self.orchestrator.submit_run(req).await?;
                 Ok(GatewayResponsePayload::RunSubmitted(sub))
@@ -239,7 +240,7 @@ impl GatewayManager {
                 Ok(GatewayResponsePayload::RunList(runs))
             }
             GatewayAction::ListSessions { limit } => {
-                let sessions = self.orchestrator.list_sessions(limit).await?;
+                let sessions = self.orchestrator.list_sessions(limit, None).await?;
                 Ok(GatewayResponsePayload::SessionList(sessions))
             }
             GatewayAction::ListWorkflows { limit } => {
