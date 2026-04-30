@@ -2,11 +2,16 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { apiDelete, apiGet } from "@/lib/api-client";
+import { apiDelete, apiGet, apiPost } from "@/lib/api-client";
 import { API_KEY, API_SECRET, API_URL } from "@/lib/config";
 import { generateNonce, hmacSha256Hex } from "@/lib/hmac";
 import { setActiveWorkspaceId } from "@/lib/workspace-store";
-import { Workspace, WorkspaceFile } from "@/lib/types";
+import {
+  Meeting,
+  TeamMember,
+  Workspace,
+  WorkspaceFile,
+} from "@/lib/types";
 
 interface PageProps {
   params: Promise<{ id: string }>;
@@ -19,14 +24,19 @@ export default function WorkspaceDetailPage({ params }: PageProps) {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [sessions, setSessions] = useState<string[]>([]);
+  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [members, setMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [uploadPath, setUploadPath] = useState("");
   const [uploadBusy, setUploadBusy] = useState(false);
+  const [meetingTopic, setMeetingTopic] = useState("");
+  const [meetingParticipants, setMeetingParticipants] = useState<string[]>([]);
+  const [meetingBusy, setMeetingBusy] = useState(false);
 
   const reload = useCallback(async () => {
     try {
-      const [w, fs, sr] = await Promise.all([
+      const [w, fs, sr, mt, tm] = await Promise.all([
         apiGet<Workspace>(`/v1/workspaces/${encodeURIComponent(id)}`),
         apiGet<WorkspaceFile[]>(
           `/v1/workspaces/${encodeURIComponent(id)}/files`,
@@ -36,10 +46,16 @@ export default function WorkspaceDetailPage({ params }: PageProps) {
         )
           .then((r) => r.session_ids)
           .catch(() => []),
+        apiGet<Meeting[]>(
+          `/v1/workspaces/${encodeURIComponent(id)}/meetings`,
+        ).catch(() => []),
+        apiGet<TeamMember[]>("/v1/team/members").catch(() => []),
       ]);
       setWs(w);
       setFiles(fs);
       setSessions(sr);
+      setMeetings(mt);
+      setMembers(tm);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
@@ -100,6 +116,31 @@ export default function WorkspaceDetailPage({ params }: PageProps) {
       setUploadBusy(false);
       e.target.value = "";
     }
+  }
+
+  async function handleCreateMeeting(e: React.FormEvent) {
+    e.preventDefault();
+    if (!meetingTopic.trim() || meetingBusy) return;
+    setMeetingBusy(true);
+    try {
+      await apiPost(`/v1/workspaces/${encodeURIComponent(id)}/meetings`, {
+        topic: meetingTopic.trim(),
+        participants: meetingParticipants,
+      });
+      setMeetingTopic("");
+      setMeetingParticipants([]);
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Create failed");
+    } finally {
+      setMeetingBusy(false);
+    }
+  }
+
+  function toggleParticipant(name: string) {
+    setMeetingParticipants((prev) =>
+      prev.includes(name) ? prev.filter((p) => p !== name) : [...prev, name],
+    );
   }
 
   async function handleDeleteFile(path: string) {
@@ -208,6 +249,88 @@ export default function WorkspaceDetailPage({ params }: PageProps) {
                 >
                   Delete
                 </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">
+          Meetings ({meetings.length})
+        </h3>
+        <form
+          onSubmit={handleCreateMeeting}
+          className="rounded-xl border border-slate-200 bg-white p-3 mb-3 space-y-2"
+        >
+          <input
+            type="text"
+            value={meetingTopic}
+            onChange={(e) => setMeetingTopic(e.target.value)}
+            placeholder="Meeting topic (e.g. Architecture review for ProjectX)"
+            className="w-full px-2 py-1 border border-slate-300 rounded text-sm"
+          />
+          {members.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {members.map((m) => (
+                <button
+                  key={m.name}
+                  type="button"
+                  onClick={() => toggleParticipant(m.name)}
+                  className={`px-2 py-0.5 text-[11px] rounded border ${
+                    meetingParticipants.includes(m.name)
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"
+                  }`}
+                >
+                  {m.persona.display_name}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={meetingBusy || !meetingTopic.trim()}
+              className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-blue-300"
+            >
+              {meetingBusy ? "Creating..." : "Start meeting"}
+            </button>
+          </div>
+        </form>
+        {meetings.length === 0 ? (
+          <div className="rounded border border-dashed border-slate-300 p-4 text-sm text-slate-500 text-center">
+            No meetings yet.
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-200 rounded border border-slate-200 bg-white">
+            {meetings.map((m) => (
+              <li key={m.id}>
+                <Link
+                  href={`/workspaces/${encodeURIComponent(id)}/meetings/${encodeURIComponent(m.id)}`}
+                  className="block px-3 py-2 hover:bg-slate-50"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-800 truncate">
+                        {m.topic}
+                      </p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {m.participants.length} participants ·{" "}
+                        {new Date(m.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 text-[10px] rounded font-medium ${
+                        m.status === "open"
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-slate-200 text-slate-500"
+                      }`}
+                    >
+                      {m.status}
+                    </span>
+                  </div>
+                </Link>
               </li>
             ))}
           </ul>

@@ -338,6 +338,32 @@ export interface WorkspaceFile {
   updated_at: string;
 }
 
+// --- Meetings ---
+
+export type MeetingStatus = "open" | "closed";
+export type MeetingSpeakerKind = "user" | "persona" | "system";
+
+export interface Meeting {
+  id: string;
+  workspace_id: string;
+  session_id: string | null;
+  topic: string;
+  participants: string[];
+  status: MeetingStatus;
+  created_by: string;
+  created_at: string;
+  closed_at: string | null;
+}
+
+export interface MeetingMessage {
+  id: number;
+  meeting_id: string;
+  speaker_kind: MeetingSpeakerKind;
+  speaker_name: string;
+  content: string;
+  created_at: string;
+}
+
 // --- Team Persona Types ---
 
 export interface PersonalityTraits {
