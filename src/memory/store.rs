@@ -1862,6 +1862,47 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Cross-session memory lookup by `scope` prefix. Persona-private and
+    /// team-shared memories use namespaced scopes (`persona:<name>:...`,
+    /// `team:<workspace_id>:...`); this lets the context builder pull
+    /// every entry under a namespace without joining anything.
+    pub async fn list_memory_by_scope_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionMemoryItem>> {
+        let pattern = format!("{prefix}%");
+        let rows = sqlx::query(
+            r#"SELECT id, session_id, content, importance, scope, created_at, updated_at
+               FROM memory_items
+               WHERE scope LIKE ?1
+               ORDER BY updated_at DESC
+               LIMIT ?2"#,
+        )
+        .bind(pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_raw: String = row.get("session_id");
+            let created_at_raw: String = row.get("created_at");
+            let updated_at_raw: String = row.get("updated_at");
+            out.push(SessionMemoryItem {
+                id: row.get("id"),
+                session_id: Uuid::parse_str(&session_raw)
+                    .unwrap_or_else(|_| Uuid::nil()),
+                scope: row.get("scope"),
+                content: row.get("content"),
+                importance: row.get("importance"),
+                source_refs: Vec::new(),
+                created_at: parse_rfc3339(&created_at_raw)?,
+                updated_at: parse_rfc3339(&updated_at_raw)?,
+            });
+        }
+        Ok(out)
+    }
+
     // --- Meetings ---
 
     pub async fn insert_meeting(&self, m: &Meeting) -> anyhow::Result<()> {

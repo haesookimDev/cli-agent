@@ -101,6 +101,41 @@ pub fn build_recent_run_summary(current_run_id: Uuid, runs: &[RunRecord]) -> Opt
     ))
 }
 
+/// Build context chunks for a node that's bound to a Virtual Dev Team
+/// persona: the persona's own memory plus the workspace's shared team
+/// memory, both capped to a few entries to keep prompt prefixes stable.
+/// Returned chunks are designed to be appended to the planner's existing
+/// context, not to replace it.
+pub fn build_persona_context_chunks(
+    persona_memory: &[crate::types::SessionMemoryItem],
+    team_memory: &[crate::types::SessionMemoryItem],
+) -> Vec<ContextChunk> {
+    let mut chunks = Vec::new();
+    for (idx, item) in persona_memory.iter().take(5).enumerate() {
+        let topic = item.scope.split(':').nth(2).unwrap_or("note");
+        let summary = trim_for_context(item.content.as_str(), 240);
+        chunks.push(ContextChunk {
+            id: format!("persona-mem-{idx}"),
+            scope: ContextScope::SessionShared,
+            kind: ContextKind::History,
+            content: format!("[your-memory · {topic}]\n{summary}"),
+            priority: 0.85 - (idx as f64 * 0.04),
+        });
+    }
+    for (idx, item) in team_memory.iter().take(5).enumerate() {
+        let topic = item.scope.split(':').nth(2).unwrap_or("shared");
+        let summary = trim_for_context(item.content.as_str(), 240);
+        chunks.push(ContextChunk {
+            id: format!("team-mem-{idx}"),
+            scope: ContextScope::SessionShared,
+            kind: ContextKind::History,
+            content: format!("[team-memory · {topic}]\n{summary}"),
+            priority: 0.78 - (idx as f64 * 0.04),
+        });
+    }
+    chunks
+}
+
 /// Truncate text to `max_chars` characters total, keeping head and tail halves
 /// around a `... [trimmed] ...` marker so the reader still sees both ends.
 pub fn trim_for_context(text: &str, max_chars: usize) -> String {

@@ -320,6 +320,75 @@ impl MemoryManager {
         entry.push(item);
     }
 
+    /// Encode a persona-private memory scope: `persona:<name>:<topic>`.
+    /// `topic` is a free-form sub-key that lets the same persona keep
+    /// multiple distinct memory streams (e.g. design decisions vs.
+    /// pending todos).
+    pub fn persona_scope(persona_name: &str, topic: &str) -> String {
+        format!("persona:{persona_name}:{topic}")
+    }
+
+    /// Encode a team-shared memory scope: `team:<workspace_id>:<topic>`.
+    /// Use the workspace UUID rather than slug so renames don't break
+    /// historical lookups.
+    pub fn team_scope(workspace_id: &str, topic: &str) -> String {
+        format!("team:{workspace_id}:{topic}")
+    }
+
+    /// Persist a persona's private memory item. Thin wrapper over
+    /// `remember_long` with a normalized scope; convenient for context
+    /// builders that already have a persona name in hand.
+    pub async fn remember_for_persona(
+        &self,
+        session_id: Uuid,
+        persona_name: &str,
+        topic: &str,
+        content: &str,
+        importance: f64,
+        source_ref: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let scope = Self::persona_scope(persona_name, topic);
+        self.remember_long(session_id, &scope, content, importance, source_ref)
+            .await
+    }
+
+    /// Persist a workspace-shared team memory item.
+    pub async fn remember_for_team(
+        &self,
+        session_id: Uuid,
+        workspace_id: &str,
+        topic: &str,
+        content: &str,
+        importance: f64,
+        source_ref: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let scope = Self::team_scope(workspace_id, topic);
+        self.remember_long(session_id, &scope, content, importance, source_ref)
+            .await
+    }
+
+    /// Cross-session pull of every persona-private memory entry for
+    /// `persona_name`, newest first.
+    pub async fn list_persona_memory(
+        &self,
+        persona_name: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::types::SessionMemoryItem>> {
+        let prefix = format!("persona:{persona_name}:");
+        self.store.list_memory_by_scope_prefix(&prefix, limit).await
+    }
+
+    /// Cross-session pull of every team-shared memory entry for
+    /// `workspace_id`, newest first.
+    pub async fn list_team_memory(
+        &self,
+        workspace_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::types::SessionMemoryItem>> {
+        let prefix = format!("team:{workspace_id}:");
+        self.store.list_memory_by_scope_prefix(&prefix, limit).await
+    }
+
     pub async fn remember_long(
         &self,
         session_id: Uuid,

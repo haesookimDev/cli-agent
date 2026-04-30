@@ -1362,10 +1362,53 @@ impl Orchestrator {
                 );
 
                 let node_instructions = node.instructions.clone();
+                let mut node_context = optimized.clone();
+                // Phase D.3 — inject persona-private and team-shared
+                // memory chunks for nodes pinned to a Virtual Dev Team
+                // member. Capped at 5 each so prompt prefixes remain
+                // stable across runs (cache friendly).
+                if let Some(persona_name) = node.assigned_persona.as_deref() {
+                    let persona_mem = orchestrator
+                        .memory
+                        .list_persona_memory(persona_name, 5)
+                        .await
+                        .unwrap_or_default();
+                    let team_mem = if let Ok(Some(ws_id)) = orchestrator
+                        .memory
+                        .store()
+                        .get_session(session_id)
+                        .await
+                        .map(|opt| {
+                            opt.and_then(|s| {
+                                // Sessions Summary doesn't expose
+                                // workspace_id today; pull from the row
+                                // via raw query in a follow-up. Empty
+                                // fallback keeps prompts stable.
+                                let _ = s;
+                                None::<String>
+                            })
+                        }) {
+                        orchestrator
+                            .memory
+                            .list_team_memory(&ws_id, 5)
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let chunks = super::context_builder::build_persona_context_chunks(
+                        &persona_mem,
+                        &team_mem,
+                    );
+                    for chunk in chunks {
+                        node_context.history.push(chunk.content);
+                    }
+                }
+
                 let input = AgentInput {
                     task: req.task.clone(),
                     instructions: node.instructions,
-                    context: optimized.clone(),
+                    context: node_context,
                     dependency_outputs: dep_outputs.clone(),
                     brief: brief.clone(),
                     working_dir: Some(cli_working_dir.clone()),
