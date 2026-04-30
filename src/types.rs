@@ -891,6 +891,65 @@ impl Display for WorkspaceFileCreatedBy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingStatus {
+    Open,
+    Closed,
+}
+
+impl Display for MeetingStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MeetingStatus::Open => "open",
+            MeetingStatus::Closed => "closed",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Meeting {
+    pub id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    pub topic: String,
+    pub participants: Vec<String>,
+    pub status: MeetingStatus,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingSpeakerKind {
+    User,
+    Persona,
+    System,
+}
+
+impl Display for MeetingSpeakerKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MeetingSpeakerKind::User => "user",
+            MeetingSpeakerKind::Persona => "persona",
+            MeetingSpeakerKind::System => "system",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingMessage {
+    pub id: i64,
+    pub meeting_id: String,
+    pub speaker_kind: MeetingSpeakerKind,
+    pub speaker_name: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceFile {
     pub id: String,

@@ -16,6 +16,7 @@ pub mod settings;
 pub mod skills;
 pub mod team;
 pub mod terminal;
+pub mod meetings;
 pub mod webhooks;
 pub mod workflows;
 pub mod workspaces;

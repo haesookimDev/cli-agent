@@ -7,9 +7,10 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::types::{
-    CronSchedule, KnowledgeItem, MemoryHit, RunActionEvent, RunActionType, RunRecord,
-    SessionMemoryItem, SessionSummary, WebhookDeliveryRecord, WebhookEndpoint, Workspace,
-    WorkspaceFile, WorkspaceFileCreatedBy, WorkspaceKind,
+    CronSchedule, KnowledgeItem, Meeting, MeetingMessage, MeetingSpeakerKind, MeetingStatus,
+    MemoryHit, RunActionEvent, RunActionType, RunRecord, SessionMemoryItem, SessionSummary,
+    WebhookDeliveryRecord, WebhookEndpoint, Workspace, WorkspaceFile, WorkspaceFileCreatedBy,
+    WorkspaceKind,
 };
 
 #[derive(Debug, Clone)]
@@ -1861,6 +1862,127 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
+    // --- Meetings ---
+
+    pub async fn insert_meeting(&self, m: &Meeting) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO meetings
+                (id, workspace_id, session_id, topic, participants_json, status,
+                 created_by, created_at, closed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+        )
+        .bind(&m.id)
+        .bind(&m.workspace_id)
+        .bind(m.session_id.map(|u| u.to_string()))
+        .bind(&m.topic)
+        .bind(serde_json::to_string(&m.participants)?)
+        .bind(m.status.to_string())
+        .bind(&m.created_by)
+        .bind(m.created_at.to_rfc3339())
+        .bind(m.closed_at.map(|d| d.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn close_meeting(&self, id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE meetings SET status = 'closed', closed_at = ?1 WHERE id = ?2",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_meeting(&self, id: &str) -> anyhow::Result<Option<Meeting>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, session_id, topic, participants_json, status,
+                      created_by, created_at, closed_at
+               FROM meetings WHERE id = ?1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| meeting_from_row(&r).ok()))
+    }
+
+    pub async fn list_workspace_meetings(
+        &self,
+        workspace_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Meeting>> {
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, session_id, topic, participants_json, status,
+                      created_by, created_at, closed_at
+               FROM meetings
+               WHERE workspace_id = ?1
+               ORDER BY created_at DESC
+               LIMIT ?2"#,
+        )
+        .bind(workspace_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Ok(m) = meeting_from_row(&row) {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn append_meeting_message(
+        &self,
+        meeting_id: &str,
+        speaker_kind: MeetingSpeakerKind,
+        speaker_name: &str,
+        content: &str,
+    ) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            r#"INSERT INTO meeting_messages
+                (meeting_id, speaker_kind, speaker_name, content, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5)"#,
+        )
+        .bind(meeting_id)
+        .bind(speaker_kind.to_string())
+        .bind(speaker_name)
+        .bind(content)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn list_meeting_messages(
+        &self,
+        meeting_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MeetingMessage>> {
+        let rows = sqlx::query(
+            r#"SELECT id, meeting_id, speaker_kind, speaker_name, content, created_at
+               FROM meeting_messages
+               WHERE meeting_id = ?1
+               ORDER BY id ASC
+               LIMIT ?2"#,
+        )
+        .bind(meeting_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Ok(m) = meeting_message_from_row(&row) {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn save_settings(&self, settings: &crate::types::AppSettings) -> anyhow::Result<()> {
         let json = serde_json::to_string(settings)?;
         sqlx::query(
@@ -2065,6 +2187,58 @@ fn workspace_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Workspace
         description: row.try_get("description").ok(),
         created_at: parse_rfc3339(&created_at_raw)?,
         updated_at: parse_rfc3339(&updated_at_raw)?,
+    })
+}
+
+fn meeting_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Meeting> {
+    let session_raw: Option<String> = row.try_get("session_id").ok();
+    let session_id = match session_raw {
+        Some(s) if !s.is_empty() => Some(Uuid::parse_str(&s)?),
+        _ => None,
+    };
+    let status_raw: String = row.get("status");
+    let status = match status_raw.as_str() {
+        "open" => MeetingStatus::Open,
+        "closed" => MeetingStatus::Closed,
+        other => return Err(anyhow::anyhow!("invalid meeting status: {other}")),
+    };
+    let created_at_raw: String = row.get("created_at");
+    let closed_at_raw: Option<String> = row.try_get("closed_at").ok();
+    let participants_raw: String = row.get("participants_json");
+    let participants: Vec<String> =
+        serde_json::from_str(&participants_raw).unwrap_or_default();
+    Ok(Meeting {
+        id: row.get("id"),
+        workspace_id: row.get("workspace_id"),
+        session_id,
+        topic: row.get("topic"),
+        participants,
+        status,
+        created_by: row.get("created_by"),
+        created_at: parse_rfc3339(&created_at_raw)?,
+        closed_at: closed_at_raw
+            .as_deref()
+            .map(parse_rfc3339)
+            .transpose()?,
+    })
+}
+
+fn meeting_message_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<MeetingMessage> {
+    let kind_raw: String = row.get("speaker_kind");
+    let speaker_kind = match kind_raw.as_str() {
+        "user" => MeetingSpeakerKind::User,
+        "persona" => MeetingSpeakerKind::Persona,
+        "system" => MeetingSpeakerKind::System,
+        other => return Err(anyhow::anyhow!("invalid speaker_kind: {other}")),
+    };
+    let created_at_raw: String = row.get("created_at");
+    Ok(MeetingMessage {
+        id: row.get("id"),
+        meeting_id: row.get("meeting_id"),
+        speaker_kind,
+        speaker_name: row.get("speaker_name"),
+        content: row.get("content"),
+        created_at: parse_rfc3339(&created_at_raw)?,
     })
 }
 

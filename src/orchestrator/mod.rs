@@ -916,7 +916,7 @@ impl Orchestrator {
             .await
     }
 
-    async fn record_action_event(
+    pub(crate) async fn record_action_event(
         &self,
         run_id: Uuid,
         session_id: Uuid,

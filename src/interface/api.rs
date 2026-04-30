@@ -106,6 +106,23 @@ pub fn router(state: ApiState) -> Router {
             get(handlers::workspaces::download_workspace_file_handler),
         )
         .route(
+            "/v1/workspaces/:wid/meetings",
+            get(handlers::meetings::list_workspace_meetings_handler)
+                .post(handlers::meetings::create_meeting_handler),
+        )
+        .route(
+            "/v1/meetings/:mid",
+            get(handlers::meetings::get_meeting_handler),
+        )
+        .route(
+            "/v1/meetings/:mid/messages",
+            post(handlers::meetings::post_meeting_message_handler),
+        )
+        .route(
+            "/v1/meetings/:mid/close",
+            post(handlers::meetings::close_meeting_handler),
+        )
+        .route(
             "/v1/memory/sessions/:session_id/items",
             get(handlers::memory::list_session_memory_items_handler)
                 .post(handlers::memory::create_session_memory_item_handler),
