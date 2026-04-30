@@ -7,7 +7,13 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { StatusBadge } from "@/components/status-badge";
 import { RunActions } from "@/components/run-actions";
-import type { RunRecord, WorkflowTemplate } from "@/lib/types";
+import { PersonaSwimlane } from "@/components/persona-swimlane";
+import type {
+  RunActionEvent,
+  RunRecord,
+  RunTrace,
+  WorkflowTemplate,
+} from "@/lib/types";
 
 export default function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -18,6 +24,8 @@ export default function RunDetailPage() {
   const [wfName, setWfName] = useState("");
   const [wfDesc, setWfDesc] = useState("");
   const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<"outputs" | "swimlane">("outputs");
+  const [events, setEvents] = useState<RunActionEvent[]>([]);
 
   function load() {
     if (!id) return;
@@ -31,6 +39,14 @@ export default function RunDetailPage() {
   useEffect(() => {
     load();
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Lazy-load trace events when the user switches to the swimlane tab.
+  useEffect(() => {
+    if (!id || tab !== "swimlane" || events.length > 0) return;
+    apiGet<RunTrace>(`/v1/runs/${id}/trace?limit=10000`)
+      .then((trace) => setEvents(trace?.events ?? []))
+      .catch(() => {});
+  }, [id, tab, events.length]);
 
   if (loading) {
     return (
@@ -178,7 +194,31 @@ export default function RunDetailPage() {
         )}
       </div>
 
-      {run.outputs.length > 0 && (
+      <div className="flex gap-1 p-1 rounded-lg bg-slate-100 w-fit">
+        {(["outputs", "swimlane"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`px-4 py-1.5 text-xs rounded-md transition-colors ${
+              tab === t
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            {t === "outputs"
+              ? `Outputs (${run.outputs.length})`
+              : "Persona swimlane"}
+          </button>
+        ))}
+      </div>
+
+      {tab === "swimlane" && (
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <PersonaSwimlane events={events} />
+        </div>
+      )}
+
+      {tab === "outputs" && run.outputs.length > 0 && (
         <div className="rounded-xl border border-slate-200 bg-white">
           <h3 className="border-b border-slate-100 px-4 py-3 text-xs font-semibold text-slate-700">
             Outputs ({run.outputs.length})
