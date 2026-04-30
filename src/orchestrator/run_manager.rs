@@ -56,7 +56,28 @@ impl Orchestrator {
             self.workflow_graphs.insert(run_id, graph);
         }
 
-        self.create_session(session_id).await?;
+        // submit_run is the implicit session-create path used when a
+        // client sends a first run without pre-creating a session. New
+        // sessions default to 'general'; team chats are expected to pre-
+        // create their session via POST /v1/sessions { kind: "team" } so
+        // sessions.kind matches the chat surface from the start. Existing
+        // sessions stay untouched (INSERT OR IGNORE).
+        let kind = if req.assignee.is_some() || req.team_members.is_some() {
+            "team"
+        } else {
+            "general"
+        };
+        self.create_session(session_id, kind).await?;
+        // Workspace binding: explicit > existing session > default. Updates
+        // sessions.workspace_id only when the request set one — leaves
+        // pre-existing sessions alone.
+        if let Some(ws_id) = req.workspace_id.as_deref() {
+            let _ = self
+                .memory
+                .store()
+                .set_session_workspace(session_id, Some(ws_id))
+                .await;
+        }
 
         let mut record = RunRecord::new_queued(run_id, session_id, req.task.clone(), req.profile);
         record
@@ -246,7 +267,22 @@ impl Orchestrator {
         let mut graph = match self.workflow_graphs.remove(&run_id).map(|(_, g)| g) {
             Some(g) => g,
             None => {
-                let graph_working_dir = self.session_workspace.ensure_session_dir(session_id).await?;
+                // Resolve working_dir against the workspace when one is
+                // bound (request override or session.workspace_id).
+                // Falls back to the legacy SessionWorkspaceManager root
+                // for ad-hoc runs that haven't picked a workspace yet.
+                let workspace = match req.workspace_id.as_deref() {
+                    Some(ws_id) => self.memory.store().get_workspace(ws_id).await?,
+                    None => None,
+                };
+                let graph_working_dir = match workspace {
+                    Some(ws) => {
+                        self.workspace_manager
+                            .ensure_session_dir(&ws, session_id)
+                            .await?
+                    }
+                    None => self.session_workspace.ensure_session_dir(session_id).await?,
+                };
                 self.build_graph(
                     session_id,
                     req.task.as_str(),

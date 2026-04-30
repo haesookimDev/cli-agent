@@ -8,6 +8,7 @@ pub mod helpers;
 pub mod interactive;
 pub mod node_executor;
 pub mod persona_router;
+pub mod workspaces;
 pub mod prompt_composer;
 pub mod repo_analyzer;
 pub mod requirement_analyzer;
@@ -103,6 +104,12 @@ pub struct Orchestrator {
     /// works without modifying the persisted RunRecord schema. Resets on
     /// process restart; v1 limitation.
     pub(super) run_assignments: Arc<DashMap<Uuid, crate::types::RunAssignment>>,
+    /// Workspace filesystem helper. Stateless — workspace-specific paths
+    /// are computed on demand from the `Workspace` record.
+    pub(super) workspace_manager: Arc<crate::workspace::WorkspaceManager>,
+    /// Default workspaces root used when a Workspace is created without an
+    /// explicit `root_path`. Configured at startup.
+    pub(super) workspaces_root: Arc<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +176,8 @@ impl Orchestrator {
             persona_router,
             team_yaml_lock: Arc::new(tokio::sync::Mutex::new(())),
             run_assignments: Arc::new(DashMap::new()),
+            workspace_manager: Arc::new(crate::workspace::WorkspaceManager::new()),
+            workspaces_root: Arc::new(crate::workspace::default_workspaces_root()),
         }
     }
 
@@ -517,35 +526,51 @@ impl Orchestrator {
         limit: usize,
     ) -> anyhow::Result<Vec<ChatMessage>> {
         let mut messages = Vec::new();
+        // (run_id, node_id) pairs already covered by a row in `messages` so
+        // we don't re-emit them from RunRecord.outputs.
+        let mut seen: std::collections::HashSet<(Uuid, String)> =
+            std::collections::HashSet::new();
 
-        // Gather user messages from store
+        // Gather both user and agent messages from store.
         let raw_msgs = self.memory.list_session_messages(session_id, limit).await?;
-        for (id, role, content, created_at) in raw_msgs {
-            let ts = chrono::DateTime::parse_from_rfc3339(&created_at)
+        for m in raw_msgs {
+            let ts = chrono::DateTime::parse_from_rfc3339(&m.created_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| Utc::now());
 
-            let chat_role = match role.as_str() {
+            let chat_role = match m.role.as_str() {
                 "user" => ChatRole::User,
+                "agent" => ChatRole::Agent,
                 _ => ChatRole::System,
             };
+
+            let run_uuid = m.run_id.as_deref().and_then(|s| Uuid::parse_str(s).ok());
+            if let (Some(rid), Some(nid)) = (run_uuid, m.node_id.clone()) {
+                seen.insert((rid, nid));
+            }
+
             messages.push(ChatMessage {
-                id: format!("msg:{id}"),
+                id: format!("msg:{}", m.id),
                 session_id,
-                run_id: None,
+                run_id: run_uuid,
                 role: chat_role,
-                content,
+                content: m.content,
                 agent_role: None,
                 model: None,
                 timestamp: ts,
             });
         }
 
-        // Gather agent outputs from runs in this session
+        // Backfill agent outputs from runs that pre-date the live-message
+        // path (Phase A). New runs already wrote their NodeCompleted rows
+        // into `messages`, so dedup by (run_id, node_id).
         let runs = self.memory.list_session_runs(session_id, limit).await?;
         for run in &runs {
             for output in &run.outputs {
-                if output.succeeded && !output.output.is_empty() {
+                if output.succeeded
+                    && !output.output.is_empty()
+                    && !seen.contains(&(run.run_id, output.node_id.clone()))
+                {
                     let ts = run.finished_at.unwrap_or(run.created_at);
                     messages.push(ChatMessage {
                         id: format!("out:{}:{}", run.run_id, output.node_id),
@@ -561,9 +586,7 @@ impl Orchestrator {
             }
         }
 
-        // Sort chronologically
         messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        // Keep last `limit` messages
         if messages.len() > limit {
             messages = messages.split_off(messages.len() - limit);
         }
@@ -639,8 +662,9 @@ impl Orchestrator {
     pub async fn list_sessions(
         &self,
         limit: usize,
+        kind: Option<&str>,
     ) -> anyhow::Result<Vec<crate::types::SessionSummary>> {
-        self.memory.list_sessions(limit).await
+        self.memory.list_sessions(limit, kind).await
     }
 
     pub async fn get_session(
@@ -792,6 +816,7 @@ impl Orchestrator {
             repo_url: None,
             assignee: None,
             team_members: None,
+                workspace_id: None,
         };
         self.submit_run(req).await
     }
@@ -814,15 +839,16 @@ impl Orchestrator {
             repo_url: None,
             assignee: None,
             team_members: None,
+                workspace_id: None,
         };
         self.submit_run(req).await
     }
 
-    pub async fn create_session(&self, session_id: Uuid) -> anyhow::Result<()> {
+    pub async fn create_session(&self, session_id: Uuid, kind: &str) -> anyhow::Result<()> {
         self.session_workspace
             .ensure_session_dir(session_id)
             .await?;
-        self.memory.create_session(session_id).await?;
+        self.memory.create_session(session_id, kind).await?;
         Ok(())
     }
 
@@ -1426,6 +1452,7 @@ impl Orchestrator {
             repo_url: None,
             assignee: None,
             team_members: None,
+                workspace_id: None,
         };
 
         let run_id = Uuid::new_v4();
@@ -1434,7 +1461,7 @@ impl Orchestrator {
 
         // We need to submit via the same path but with a pre-built graph
         // Re-implement submit_run inline to use the pre-stored graph
-        self.create_session(sid).await?;
+        self.create_session(sid, "general").await?;
         let mut record = RunRecord::new_queued(run_id, sid, req.task.clone(), req.profile);
         record
             .timeline
@@ -1798,7 +1825,15 @@ fn build_trace_graph(run: &RunRecord, events: &[RunActionEvent]) -> RunTraceGrap
             | RunActionType::GitHubPrReviewed
             | RunActionType::GitHubPrCommented
             | RunActionType::GitHubPrMerged
-            | RunActionType::GitHubBranchCreated => {}
+            | RunActionType::GitHubBranchCreated
+            | RunActionType::PersonaMessage
+            | RunActionType::MentionReceived
+            | RunActionType::NoteCreated
+            | RunActionType::NoteUpdated
+            | RunActionType::MeetingStarted
+            | RunActionType::MeetingMessage
+            | RunActionType::MeetingEnded
+            | RunActionType::TeamMemoryWritten => {}
         }
     }
 
@@ -2891,7 +2926,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let session_dir = repo_root.join(session_id.to_string());
 
-        orchestrator.create_session(session_id).await.unwrap();
+        orchestrator.create_session(session_id, "general").await.unwrap();
         assert!(session_dir.is_dir());
 
         orchestrator.delete_session(session_id).await.unwrap();

@@ -7,16 +7,14 @@
 use uuid::Uuid;
 
 use crate::context::{ContextChunk, ContextKind, ContextScope};
+use crate::memory::store::StoredMessage;
 use crate::orchestrator::task_classifier::looks_like_follow_up_task;
 use crate::types::{AgentRole, RunRecord};
 
 /// Build the query string used to retrieve relevant memory items for the
 /// current task. For short follow-up messages, prepend the preceding user
 /// message so retrieval gets enough keywords to match on.
-pub fn build_memory_query(
-    current_task: &str,
-    recent_messages: &[(i64, String, String, String)],
-) -> String {
+pub fn build_memory_query(current_task: &str, recent_messages: &[StoredMessage]) -> String {
     let current = current_task.trim();
     if current.is_empty() {
         return String::new();
@@ -26,17 +24,13 @@ pub fn build_memory_query(
         return current.to_string();
     }
 
-    let previous_user_message =
-        recent_messages
-            .iter()
-            .rev()
-            .find_map(|(_, role, content, _)| {
-                if role == "user" && content.trim() != current {
-                    Some(content.trim().to_string())
-                } else {
-                    None
-                }
-            });
+    let previous_user_message = recent_messages.iter().rev().find_map(|m| {
+        if m.role == "user" && m.content.trim() != current {
+            Some(m.content.trim().to_string())
+        } else {
+            None
+        }
+    });
 
     match previous_user_message {
         Some(prev) if !prev.is_empty() => format!("{current} {prev}"),
@@ -48,17 +42,17 @@ pub fn build_memory_query(
 /// The most recent message is the highest priority; priority decays by 0.03
 /// per step back.
 pub fn build_recent_history_chunks(
-    recent_messages: &[(i64, String, String, String)],
+    recent_messages: &[StoredMessage],
     current_task: &str,
 ) -> Vec<ContextChunk> {
     let current = current_task.trim();
     let mut selected = Vec::new();
 
-    for (_, role, content, _) in recent_messages.iter().rev() {
-        if role != "user" {
+    for m in recent_messages.iter().rev() {
+        if m.role != "user" {
             continue;
         }
-        let trimmed = content.trim();
+        let trimmed = m.content.trim();
         if trimmed.is_empty() || trimmed == current {
             continue;
         }

@@ -179,6 +179,7 @@ impl OrchestratorCluster {
                 repo_url: None,
                 assignee: None,
                 team_members: None,
+                workspace_id: None,
             };
 
             let submission = orch.submit_run(run_req).await?;

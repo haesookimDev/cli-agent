@@ -1759,10 +1759,15 @@ impl Orchestrator {
             let event_clone = event.clone();
             tokio::spawn(async move {
                 let payload = match &event_clone {
-                    RuntimeEvent::NodeStarted { node_id, role } => serde_json::json!({
+                    RuntimeEvent::NodeStarted {
+                        node_id,
+                        role,
+                        persona_name,
+                    } => serde_json::json!({
                         "node_id": node_id,
                         "role": role,
-                        "phase": "started"
+                        "phase": "started",
+                        "persona_name": persona_name,
                     }),
                     RuntimeEvent::NodeCompleted {
                         node_id,
@@ -1772,6 +1777,7 @@ impl Orchestrator {
                         output_preview,
                         output_truncated,
                         token_usage,
+                        persona_name,
                     } => serde_json::json!({
                         "node_id": node_id,
                         "role": role,
@@ -1781,16 +1787,19 @@ impl Orchestrator {
                         "output_preview": output_preview,
                         "output_truncated": output_truncated,
                         "token_usage": token_usage,
+                        "persona_name": persona_name,
                     }),
                     RuntimeEvent::NodeFailed {
                         node_id,
                         role,
                         error,
+                        persona_name,
                     } => serde_json::json!({
                         "node_id": node_id,
                         "role": role,
                         "phase": "failed",
-                        "error": error
+                        "error": error,
+                        "persona_name": persona_name,
                     }),
                     RuntimeEvent::NodeSkipped { node_id, reason } => serde_json::json!({
                         "node_id": node_id,
@@ -1802,12 +1811,14 @@ impl Orchestrator {
                         from_node,
                         role,
                         dependencies,
+                        persona_name,
                     } => serde_json::json!({
                         "node_id": node_id,
                         "phase": "dynamic_added",
                         "from": from_node,
                         "role": role,
                         "dependencies": dependencies,
+                        "persona_name": persona_name,
                     }),
                     RuntimeEvent::NodeTokenChunk { .. } => unreachable!(),
                     RuntimeEvent::CoderSessionStarted {

@@ -255,6 +255,20 @@ impl Orchestrator {
                     let _ = memory
                         .remember_long(session_id, &scope, &content, importance, Some(&source))
                         .await;
+                    // Phase A — also persist the reply into `messages` so a
+                    // chat client that reconnects after navigating away
+                    // sees this node's output without waiting for the run
+                    // to finish. Idempotent on (session_id, run_id, node_id).
+                    let _ = memory
+                        .store()
+                        .record_agent_message(
+                            session_id,
+                            run_id,
+                            node.id.as_str(),
+                            node.assigned_persona.as_deref(),
+                            result.output.as_str(),
+                        )
+                        .await;
                 }
 
                 if node.role == AgentRole::Planner && result.succeeded && node.depth < 5 {
